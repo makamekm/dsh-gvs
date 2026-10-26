@@ -1,7 +1,7 @@
 {
   "name": "@makame/dsh-gvs",
-  "version": "2.0.0",
-  "description": "Adaptive persistent GVS teams, dependency scheduling, live agent panel and real game QA",
+  "version": "2.1.0",
+  "description": "Adaptive GVS teams with task-specific analysis gates, temporal render evidence and live agents",
   "type": "module",
   "license": "MIT",
   "engines": {

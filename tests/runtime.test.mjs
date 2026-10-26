@@ -16,7 +16,7 @@ function fixture(){
  apply(ctx);
  const actor=name=>{const member=[...members.values()].find(member=>member.name===name);return {id:member.id,session:{header:{parentSession:root.id}},ctx:{}};};
  async function call(name,args={},agent=root){const exec={agent,name,arguments:args,signal:new AbortController().signal};await hooks['tools/pre-execute'](exec,async()=>({kind:'allow'}));const denied=guard(exec);if(denied)throw new Error(denied);return definitions.get(name).execute(args,exec);}
- const complete=(id,agent,extra={})=>call('gvs_task',{action:'complete',taskId:id,verdict:'pass',summary:'Observed result',findings:[],...extra},agent);
+ const complete=async(id,agent,extra={})=>{const saved=JSON.parse([...files.values()][0]);if(saved.tasks.find(task=>task.id===id)?.kind==='brief'&&saved.analysis?.state!=='ready')await call('gvs_analysis',{action:'plan',rationale:'Small code-only fixture: existing unit checks cover the goal; no additional visual analysis needed.',requirements:[]},agent);return call('gvs_task',{action:'complete',taskId:id,verdict:'pass',summary:'Observed result',findings:[],...extra},agent);};
  async function consult(agent){const pending=call('gvs_ask_user',{question:'Confirm the exact goal'},agent);await new Promise(resolve=>setImmediate(resolve));let list=await call('gvs_task',{action:'list'});const question=list.tasks.find(task=>task.kind==='consultation'&&task.state==='running');assert.ok(question);await complete(question.id,actor('user'));await pending;}
  return {root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,get spawns(){return spawns;}};
 }
@@ -70,4 +70,44 @@ test('routine status does not repeat large task instructions into the coordinato
  for(let i=0;i<3;i++)await f.call('gvs_task',{action:'create',title:`Later ${i}`,instructions:'x'.repeat(15000),kind:'work',assignee:'user'});
  const list=await f.call('gvs_task',{action:'list'});assert.equal(list.tasks.length,4);assert.ok(JSON.stringify(list).length<16000);
  const wait=await f.call('gvs_wait',{seconds:10});assert.ok(JSON.stringify(wait).length<8000);
+});
+
+test('User must choose task-specific checks before accepting the brief; roles cannot approve missing motion evidence',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Сделай параллакс плавным: текстура двигается рывками.',kind:'ui',viewports:['desktop']});
+ await assert.rejects(f.call('gvs_task',{action:'complete',taskId:start.briefTaskId,verdict:'pass',summary:'Assumed smooth',findings:[]},f.actor('user')),/first call gvs_analysis plan/);
+ await assert.rejects(f.call('gvs_analysis',{action:'plan',rationale:'No analysis',requirements:[]}),/central User/);
+ await assert.rejects(f.call('gvs_analysis',{action:'plan',rationale:'No analysis',requirements:[]},f.actor('user')),/visible smoothness/);
+ await f.call('gvs_analysis',{action:'plan',rationale:'Visible steps must be checked in the rendered output.',requirements:[{id:'motion',reason:'The user sees stepping',criterion:'Rendered texture moves without quantized jumps',method:'rendered-sequence'}]},f.actor('user'));
+ await f.complete(start.briefTaskId,f.actor('user'));
+ const task=await f.call('gvs_task',{action:'create',title:'Accept',instructions:'Actual evidence needed',kind:'user-review',assignee:'user'});
+ await assert.rejects(f.complete(task.task.id,f.actor('user')),/analysis is incomplete/);
+ const finish=await f.call('gvs_finish');assert.equal(finish.status,'needs-review');assert.equal(finish.quality.analysis,false);
+ await assert.rejects(f.call('gvs_analysis',{action:'check',command:'do not execute'},f.actor('user')),/independent verify agent/);
+});
+
+test('conditional runtime evidence comes from a finished foreground command and still needs independent review',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Improve lookup latency',kind:'code'});
+ await f.call('gvs_analysis',{action:'plan',rationale:'Latency is the acceptance target.',requirements:[{id:'latency',reason:'The user requested faster lookup',criterion:'Measured p95 under the agreed budget',method:'runtime'}]},f.actor('user'));await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'perf',title:'Performance QA',purpose:'Measure real lookup',capability:'verify'});
+ await f.call('gvs_task',{action:'create',title:'Measure',instructions:'Use actual implementation',kind:'work',assignee:'perf'});
+ const actor=f.actor('perf');actor.ctx.tools={execute:async()=>({isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'GVS_ANALYSIS_RESULT: '+JSON.stringify({schema:'gvs.analysis/1',engine:'fixture',analyzer:'Call actual lookup and measure elapsed milliseconds',results:[{id:'latency',cases:[{name:'p95 latency',source:'runtime',actual:8,expected:'<10ms',passed:true}]}]})}}})};
+ const measured=await f.call('gvs_analysis',{action:'check',command:'node latency.mjs'},actor);assert.equal(measured.ok,true);
+ const status=await f.call('gvs_analysis',{action:'status'});assert.equal(status.ready,false);assert.equal(status.reports.length,1);
+ actor.ctx.tools.execute=async()=>({isError:false,value:{kind:'background',jobId:'pending'}});
+ await assert.rejects(f.call('gvs_analysis',{action:'check',command:'node latency.mjs'},actor),/foreground/);
+});
+
+test('motion checker rejects out-of-workspace captures and repeated copies of one static image',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Smooth visible motion',kind:'ui',viewports:['desktop']});
+ await f.call('gvs_analysis',{action:'plan',rationale:'Inspect actual visible motion',requirements:[{id:'motion',reason:'User sees stepping',criterion:'Continuous rendered motion and consistent frame times',method:'rendered-sequence'}]},f.actor('user'));await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'motion',title:'Motion QA',purpose:'Inspect rendered frames',capability:'verify'});
+ await f.call('gvs_task',{action:'create',title:'Analyze',instructions:'Capture real frames',kind:'work',assignee:'motion'});
+ const actor=f.actor('motion');actor.session.requestHeader=()=>({config:{provider:'mock',model:'vision'}});f.ctx.llm={resolveModelInfo:async()=>({inputModalities:['image']})};f.ctx.attachments={saveImage:async()=>({attachmentId:'same-image',mediaType:'image/png'})};
+ f.ctx.fs.readBytes=async()=>Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5foAAAAASUVORK5CYII=','base64');
+ const data={schema:'gvs.analysis/1',engine:'mock',analyzer:'Contract test fixture',results:[{id:'motion',cases:[{name:'Pixel movement',source:'rendered-pixels',passed:true,actual:0,expected:0},{name:'Cadence',source:'frame-timing',passed:true,actual:0,expected:0}],samples:Array.from({length:32},(_,i)=>({viewport:'desktop',atMs:i*40,renderedPixelMetric:i*.25,frameTimeMs:16.7})),frames:Array.from({length:8},(_,i)=>({path:`../outside-${i}.png`,viewport:'desktop',atMs:i*150}))}]};
+ actor.ctx.tools={execute:async()=>({isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'GVS_ANALYSIS_RESULT: '+JSON.stringify(data)}}})};
+ await assert.rejects(f.call('gvs_analysis',{action:'check',command:'node motion.mjs'},actor),/inside the project/);
+ for(const [i,frame] of data.results[0].frames.entries())frame.path=`capture-${i}.png`;
+ await assert.rejects(f.call('gvs_analysis',{action:'check',command:'node motion.mjs'},actor),/identical/);
+ assert.equal((await f.call('gvs_analysis',{action:'status'})).reports.length,0);
 });

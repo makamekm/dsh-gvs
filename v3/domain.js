@@ -1,3 +1,4 @@
+import {analysisReady,analysisAcceptance} from './analysis.js';
 export const clip=(value,max=4000)=>String(value??'').slice(0,max);
 export const ID=/^[a-z][a-z0-9-]{0,39}$/;
 export const kinds=['code','ui','game2d','game3d'];
@@ -24,7 +25,7 @@ export function assertDag(tasks){
  tasks.forEach(task=>visit(task.id));
 }
 export function view(run){
- return {schema:3,sessionId:run.sessionId,runId:run.runId,task:clip(run.task,900),kind:run.kind,engine:run.engine,status:run.status,revision:run.revision,quality:run.quality,
+ return {schema:3,sessionId:run.sessionId,runId:run.runId,task:clip(run.task,900),kind:run.kind,engine:run.engine,status:run.status,revision:run.revision,quality:run.quality,analysis:run.analysis??null,
   roles:run.roles.map(role=>{
    const current=run.tasks.find(task=>task.assignee===role.name&&task.state==='running');
    const blocked=run.tasks.find(task=>task.assignee===role.name&&task.state==='blocked');
@@ -53,9 +54,9 @@ export function quality(run){
  const current=run.visualChecks.filter(check=>check.ok&&check.revision===run.revision);
  const interaction=!run.visualRequired||current.some(check=>check.interactions>0&&check.assertions>0);
  return {technical:accepted(technical)&&technical.result.simple===true&&technical.result.scopePreserved===true&&technical.result.checks.length>0,
-  design:!run.visualRequired||accepted(designer)&&imageAcceptance(run,designer),
-  user:accepted(user)&&user.assignee==='user'&&imageAcceptance(run,user),
-  visual:!run.visualRequired||interaction&&run.viewports.every(viewport=>current.some(check=>check.images.some(image=>image.viewport===viewport))),game:gameplay};
+  design:!run.visualRequired||accepted(designer)&&imageAcceptance(run,designer)&&analysisAcceptance(run,designer),
+  user:accepted(user)&&user.assignee==='user'&&imageAcceptance(run,user)&&analysisAcceptance(run,user),
+  visual:!run.visualRequired||interaction&&run.viewports.every(viewport=>current.some(check=>check.images.some(image=>image.viewport===viewport))),game:gameplay,analysis:analysisReady(run)};
 }
 export function parseGameReport(report){
  if(report?.schema!=='gvs.game/1'||typeof report.engine!=='string'||!Array.isArray(report.cases)||!report.cases.length)throw new Error('Expected a gvs.game/1 report produced by the actual engine test runner.');

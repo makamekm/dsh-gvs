@@ -1,0 +1,50 @@
+export function motionHint(task){return /плавн|рывк|ступенчат|параллакс|анимац|д[её]рг|дискретн|фриз|smooth|stutter|jitter|animation|chopp|jerk|frame.?pacing/i.test(task);}
+export function analysisPlan(input,hint=false){
+ if(!input.rationale?.trim()||!Array.isArray(input.requirements)||input.requirements.length>6)throw new Error('Explain which task-specific analyses are needed; use [] with a reason for a simple task.');
+ const ids=new Set();
+ for(const item of input.requirements){
+  if(!/^[a-z][a-z0-9-]{0,39}$/.test(item.id)||ids.has(item.id)||!item.criterion?.trim()||!item.reason?.trim()||!['runtime','rendered-sequence'].includes(item.method))throw new Error('Each analysis needs a unique id, concrete criterion, reason and runtime/rendered-sequence method.');
+  if(item.id==='motion'&&item.method!=='rendered-sequence')throw new Error('Motion acceptance requires a rendered sequence, not transform-only measurements.');
+  ids.add(item.id);
+ }
+ if(hint&&!ids.has('motion')&&!input.notRequiredReason?.trim())throw new Error('The human request mentions visible smoothness. Require motion, or explain specifically why this is only a static/text change.');
+ return {state:'ready',rationale:input.rationale,requirements:input.requirements,notRequiredReason:input.notRequiredReason??''};
+}
+export function parseAnalysisReport(raw,plan,viewports){
+ if(raw?.schema!=='gvs.analysis/1'||!raw.engine?.trim()||!raw.analyzer?.trim()||!Array.isArray(raw.results)||!raw.results.length)throw new Error('Expected a real gvs.analysis/1 runner report with engine, analyzer and results.');
+ if(raw.results.length>6||raw.results.reduce((count,result)=>count+(result.frames?.length??0),0)>120)throw new Error('Keep one analysis report to six results and 120 captured frames.');
+ const ids=new Set();
+ for(const result of raw.results){
+  const requirement=plan.requirements.find(item=>item.id===result.id);
+  if(!requirement||ids.has(result.id)||!Array.isArray(result.cases)||!result.cases.length)throw new Error('Report each planned analysis once with measured cases.');
+  ids.add(result.id);
+  for(const item of result.cases)if(!item.name?.trim()||!['runtime','rendered-pixels','frame-timing'].includes(item.source)||typeof item.passed!=='boolean'||item.actual===undefined||item.expected===undefined)throw new Error('Analysis cases need a source, passed, actual and expected; counters alone are insufficient.');
+  if(requirement.method==='rendered-sequence'){
+   if(!result.cases.some(item=>item.source==='rendered-pixels')||!result.cases.some(item=>item.source==='frame-timing'))throw new Error('Temporal analysis needs BOTH rendered-pixel and frame-timing measurements. Numeric transforms alone cannot prove visible smoothness.');
+   if(!Array.isArray(result.frames)||result.frames.length>120)throw new Error('Provide 8–120 actual captured frames with timestamps.');
+   for(const viewport of viewports){
+    const frames=result.frames.filter(frame=>frame.viewport===viewport);
+    if(frames.length<8||frames.some((frame,i)=>!frame.path?.trim()||!Number.isFinite(frame.atMs)||frame.atMs<0||i&&frame.atMs<=frames[i-1].atMs)||frames.at(-1).atMs-frames[0].atMs<1000)throw new Error(`Temporal evidence needs at least 8 ordered ${viewport} frames spanning one second.`);
+    const samples=(result.samples??[]).filter(sample=>sample.viewport===viewport);
+    if(samples.length<30||samples.length>1200||samples.some((sample,i)=>!Number.isFinite(sample.atMs)||!Number.isFinite(sample.renderedPixelMetric)||!Number.isFinite(sample.frameTimeMs)||sample.frameTimeMs<=0||i&&sample.atMs<=samples[i-1].atMs)||samples.at(-1).atMs-samples[0].atMs<1000)throw new Error(`Temporal analysis needs 30+ ordered ${viewport} pixel/timing samples over one second, not transform-only coordinates.`);
+    if(new Set(samples.map(sample=>sample.renderedPixelMetric)).size<2)throw new Error('The rendered-pixel metric never changes; visible motion is not demonstrated.');
+   }
+  }
+ }
+ return {engine:raw.engine,analyzer:raw.analyzer,results:raw.results,ok:raw.results.every(result=>result.cases.every(item=>item.passed))};
+}
+export function acceptedAnalyses(run){
+ if(!run.analysis)return [];
+ return (run.analysisChecks??[]).filter(report=>report.ok&&report.revision===run.revision&&report.planVersion===run.analysis.version&&run.tasks.some(task=>task.kind==='review'&&task.state==='done'&&task.assignee!==report.capturedBy&&task.result?.verdict==='pass'&&task.result.revision===run.revision&&task.result.adapterReviewed===true&&task.result.analysisReports?.includes(report.id)));
+}
+export function analysisReady(run){
+ if(!run.analysis)return true; // Historical v2.0 transcripts retain their original contract.
+ if(run.analysis.state!=='ready')return false;
+ const accepted=acceptedAnalyses(run);
+ return run.analysis.requirements.every(requirement=>accepted.some(report=>report.results.some(result=>result.id===requirement.id)));
+}
+export function analysisAcceptance(run,task){
+ if(!run.analysis)return true;
+ if(!analysisReady(run)||task?.result?.analysisVersion!==run.analysis.version)return false;
+ return run.analysis.requirements.every(requirement=>acceptedAnalyses(run).some(report=>report.results.some(result=>result.id===requirement.id)&&(task.receivedAnalysisReports??[]).includes(report.id)&&(task.result.analysisReports??[]).includes(report.id)));
+}
