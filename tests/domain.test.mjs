@@ -33,6 +33,12 @@ test('stale evidence and unread screenshots cannot verify a game',()=>{
  let run=game();run.revision++;assert.ok(Object.values(quality(run)).some(value=>!value));
  run=game();run.tasks[2].receivedImages=[];assert.equal(quality(run).user,false);
 });
+test('previously green code, screenshots and game checks cannot bypass required motion analysis',()=>{
+ const run=game();assert.ok(Object.values(quality(run)).every(Boolean));
+ run.analysis={state:'ready',version:1,requirements:[{id:'motion',method:'rendered-sequence',criterion:'Visible texture movement is smooth',reason:'Human sees stepping'}]};run.analysisChecks=[];
+ for(const task of run.tasks)task.result.analysisVersion=1;
+ const result=quality(run);assert.equal(result.technical,true);assert.equal(result.visual,true);assert.equal(result.game,true);assert.equal(result.analysis,false);assert.equal(result.user,false);assert.equal(result.design,false);
+});
 test('a runtime report needs actual and expected values for every case',()=>{
  assert.throws(()=>parseGameReport({schema:'gvs.game/1',engine:'fake',cases:[{name:'collision',category:'collision',passed:true}]}));
  const valid=parseGameReport({schema:'gvs.game/1',engine:'engine-under-test',cases:[{name:'wall',category:'collision',passed:false,actual:2,expected:1}]});assert.equal(valid.ok,false);assert.deepEqual(valid.coverage,[]);
