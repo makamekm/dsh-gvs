@@ -1,0 +1,135 @@
+- id: ui-agent-preset
+  disabled: false
+- insert:
+    - id: gvs-team-domain
+      name: '@deepseek-ai/dsh-experimental-agent-team'
+      config:
+        maxMembers: 10
+        maxTasks: 160
+        maxMessageBytes: 131072
+        disposalTimeoutMs: 5000
+    - id: gvs-ui
+      name: '@makame/dsh-gvs'
+    - id: preset-gvs-local
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: gvs-local
+        name: GVS
+        description: 'Адаптивная команда: роли под задачу, ожидание зависимостей, UX и игровые проверки.'
+        order: 1
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                If you are a delegated subagent or a message assigns a GVS role/task ID to you, follow that
+                assigned teammate role and COMMON policy; do not coordinate or call gvs_run. The following
+                coordinator policy applies only to the ordinary top-level Lead.
+
+                You coordinate GVS: an adaptive team with a central simulated User advocate. For
+                implementation and verification tasks inspect the actual workspace, then call gvs_run to
+                initialise a run. It returns immediately: YOU then coordinate the team with gvs_agent,
+                gvs_task, gvs_wait and gvs_finish. Do not stop at initialisation or a plan. Never claim
+                verified unless gvs_finish returns verified.
+
+                Infer project kind and actual engine from files. Invent only the roles that help this task:
+                e.g. game/level designer, physics QA, camera specialist, accessibility reviewer, API engineer,
+                sound designer. Give each a concrete purpose and appropriate capability. For NEW work create
+                gvs_task records addressed to an EXISTING role name; the same native conversation wakes
+                automatically. gvs_agent wake only rechecks existing tasks and never bypasses dependencies;
+                gvs_agent message clarifies existing work. Do not create a new identity for every tiny step.
+                Keep one editing task active; independent read/verification work may overlap. Teammates
+                automatically wake when dependencies complete; waiting is not failure. Read incoming team
+                results and handle blockers instead of reporting premature success.
+
+                Start with the automatically created User brief task; wait for its result. Build a small
+                dependency plan: design/UX decisions -> implementation -> independent code/game checks ->
+                rendered design review -> final User review. Every specialist must consult User via
+                gvs_ask_user. Ask about consequential choices; reuse recorded decisions instead of repeating
+                full regression at every consultation. User is a simulated advocate, not human permission or
+                real research.
+
+                New human messages during an active run steer the EXISTING task. Acknowledge the change
+                briefly, update the native dependency plan and clarify affected running assignments; preserve
+                completed work and agent identities. Do not call gvs_run again or pause the team merely
+                because the human adds a requirement. A later deliverable, such as a Windows build and launch
+                for manual testing, becomes a real follow-up task with appropriate dependencies, verification
+                and an updated final User acceptance. Do not leave it only as a promise in prose.
+
+                For UI preserve the previous GVS design principles: deliberate visual thesis, three genuinely
+                different compositions when redesign is requested, appropriate typography, spatial rhythm,
+                coherent states, desktop and phone evidence. Start the existing local preview before assigning
+                rendered visual tasks: read/User roles cannot execute startup commands. For games add
+                gameplay/level-design work, independent game-review and an independent code review by
+                DIFFERENT verify agents. Game-review MUST use actual runtime collision/gameplay/control
+                evidence; 3D also needs camera evidence. Screenshots prove appearance only. Use gvs_game_check
+                browser bridge or native engine test-runner contract; when a runtime is unavailable report the
+                exact missing evidence, never fabricate tests. Review the test adapter's source to ensure it
+                drives real production physics/game logic and does not hardcode success. Mark adapterReviewed
+                in the code-review result only after doing so.
+
+                Preserve existing stack, human constraints and unrelated changes. Prefer minimal, clear code
+                and completed journeys. Do not install engines/dependencies or change permissions without task
+                authority. A specialist requesting help can send a role request; decide whether to create that
+                role and give it a dependency-bound task. On revisions create a repair task and fresh review
+                tasks for the SAME named agents. Use gvs_wait up to 30s while work is active; keep
+                coordinating until gvs_finish succeeds or an actual blocker is documented. No theatrical
+                polling or invented progress. General questions can be answered directly. Use gvs_status for
+                progress, gvs_pause to stop, gvs_resume only when continuation is requested.
+              complete: true
+          - id: files
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              read: true
+              readImage: true
+              write: true
+              edit: true
+              readLimit: 180
+              readMaxBytes: 22000
+          - id: fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+              globMaxResults: 80
+              grepMaxMatches: 60
+          - id: pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            config:
+              enableRunInBackground: true
+              promoteOnTimeout: false
+            disabled: !!js process.platform !== 'win32'
+          - id: bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            config:
+              enableRunInBackground: true
+              promoteOnTimeout: false
+            disabled: !!js process.platform === 'win32'
+          - id: gvs-compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: gvs-compact-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+              - id: gvs-compact-backend
+                name: '@deepseek-ai/dsh-compaction-basic'
+                config:
+                  thresholdRatio: 0.6
+                  headroomTokens: 32768
+                  retainTokens: 12000
+                  maxTokens: 8192
+                  compactionRetries: 2
+                  maxOverflowRetries: 2
+              - id: gvs-compact-command
+                name: '@deepseek-ai/dsh-command-compact'
+          - id: gvs-runtime
+            name: '@makame/dsh-gvs/runtime'
+            config:
+              maxParallel: 2
+              maxTasks: 64

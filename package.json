@@ -1,0 +1,74 @@
+{
+  "name": "@makame/dsh-gvs",
+  "version": "2.0.0",
+  "description": "Adaptive persistent GVS teams, dependency scheduling, live agent panel and real game QA",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0",
+    "dsh": "0.2.1-rc.2"
+  },
+  "exports": {
+    ".": "./v3/host.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./runtime": "./v3/runtime.js",
+    "./client": "./v3/client.js",
+    "./runtime/locale/*.json": "./locale/*.json",
+    "./runtime/icon": "./icon.svg"
+  },
+  "files": [
+    "v3/*.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.txt",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "author": "makame",
+  "homepage": "https://github.com/makamekm/dsh-gvs#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/makamekm/dsh-gvs.git"
+  },
+  "bugs": {
+    "url": "https://github.com/makamekm/dsh-gvs/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "playwright-core": "1.64.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs examples/game/test.mjs",
+    "check": "node scripts/check-package.mjs",
+    "prepack": "npm run check && npm test"
+  },
+  "keywords": [
+    "deepseek",
+    "dsh",
+    "agent-team",
+    "gvs",
+    "ux",
+    "game-testing"
+  ]
+}
