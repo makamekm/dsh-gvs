@@ -1,16 +1,16 @@
 import test from 'node:test';import assert from 'node:assert/strict';import path from 'node:path';import {randomUUID} from 'node:crypto';
 import {apply} from '../v3/runtime.js';
 function fixture(){
- const files=new Map(),members=new Map(),tasks=new Map(),sent=[];let serial=0,spawns=0,source='initial source';
- const root={id:`mock-${randomUUID()}`,session:{header:{}},ctx:{}};const hooks={},definitions=new Map();let guard;
+ const files=new Map(),members=new Map(),tasks=new Map(),sent=[];let serial=0,spawns=0,source='initial source',nextSpawnError=null;
+ const root={id:`mock-${randomUUID()}`,session:{header:{}},ctx:{}};const hooks={},definitions=new Map(),effects=[];let guard;
  const team={membership(agent){return {root,name:agent===root?'lead':members.get(agent.id).name,role:agent===root?'lead':'teammate'};},tryMembership(agent){return team.membership(agent);},
-  async spawnTeammate(_root,request){spawns++;const member={id:`member-${randomUUID()}`,name:request.name};members.set(member.id,member);return {member};},
+  listMembers:()=>[...members.values()],async spawnTeammate(_root,request){spawns++;assert.ok(request.description.length<=200,'Native description limit');if(nextSpawnError){const error=nextSpawnError;nextSpawnError=null;throw error;}const member={id:`member-${randomUUID()}`,name:request.name};members.set(member.id,member);return {member};},
   async createTask(_root,request){const task={id:`task-${++serial}`,revision:1,status:'pending',blockedBy:request.blockedBy??[],subject:request.subject};tasks.set(task.id,task);return {...task};},
   getTask(_root,id){return {...tasks.get(id)};},async updateTask(_root,request){const task=tasks.get(request.taskId);assert.equal(request.expectedRevision,task.revision);
    if(request.action==='reassign'){assert.ok(task.blockedBy.every(id=>tasks.get(id).status==='completed'));task.status='in_progress';task.ownerName=request.owner;}
    if(request.action==='complete')task.status='completed';if(['reopen','release'].includes(request.action))task.status='pending';if(request.action==='set_dependencies')task.blockedBy=request.blockedBy;task.revision++;return {...task};},
   async sendMessage(_agent,request){sent.push(request);return {messageId:randomUUID()};},async waitForChange(){return {timedOut:false};},interrupt(){return {previousStatus:'inactive'};}};
- const ctx={agentTeams:team,on:(name,fn)=>{hooks[name]=fn;},effect(){},jobs:{attachController:()=>()=>{}},tools:{register:definition=>definitions.set(definition.name,definition),guard:fn=>{guard=fn;}},
+ const ctx={agentTeams:team,on:(name,fn)=>{hooks[name]=fn;},effect:fn=>effects.push(fn),jobs:{attachController:()=>()=>{}},tools:{register:definition=>definitions.set(definition.name,definition),guard:fn=>{guard=fn;}},
   workingDirectory:{ensure:async()=>path.resolve('work/in-memory-fixture')},sandboxPolicy:{resolve:()=>({mode:'workspace-write'})},
   fs:{resolve:async file=>({file}),contains:()=>true,listDir:async()=>[{name:'app.js',type:'file'}],lstat:async()=>({type:'file'}),readBytes:async()=>Buffer.from(source),readText:async target=>{if(!files.has(target.file))throw Object.assign(new Error('missing'),{code:'ENOENT'});return files.get(target.file);},writeText:async(target,value)=>{files.set(target.file,value);}}};
  apply(ctx);
@@ -21,7 +21,7 @@ function fixture(){
   const goal=await call('gvs_goal',{action:'status'});await call('gvs_goal',{action:'plan',requirements:[{id:'human-goal',criterion:saved.task,sourceIds:goal.humanMessages.map(item=>item.id)}],assessedMessages:goal.humanMessages.map(item=>item.id),expertise:[],staffingRationale:'The fixture already has all needed capabilities.'},agent);
  }return call('gvs_task',{action:'complete',taskId:id,verdict:'pass',summary:'Observed result',findings:[],...extra},agent);};
  async function consult(agent){const pending=call('gvs_ask_user',{question:'Confirm the exact goal'},agent);await new Promise(resolve=>setImmediate(resolve));let list=await call('gvs_task',{action:'list'});const question=list.tasks.find(task=>task.kind==='consultation'&&task.state==='running');assert.ok(question);await complete(question.id,actor('user'));await pending;}
- return {root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,changeSource:value=>{source=value;},get spawns(){return spawns;}};
+ return {root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,effects,failNextSpawn:()=>{nextSpawnError=new Error('Temporary spawn failure');},changeSource:value=>{source=value;},get spawns(){return spawns;}};
 }
 test('host API defers tasks, forbids early execution and wakes the same role without duplicating work',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Fix arithmetic',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
@@ -133,4 +133,27 @@ test('a rejected task explicitly escalates every finding and cannot disappear fr
  assert.match(notice,/Missing original mobile split/);assert.match(notice,/Missing moderation notifications/);
  const status=await f.call('gvs_goal',{action:'status'});assert.equal(status.issues.length,2);
  const finish=await f.call('gvs_finish');assert.equal(finish.continue,true);assert.equal(finish.quality.goal,false);
+});
+test('normal runtime disposal keeps the goal recoverable while explicit pause remains paused',async()=>{
+ const f=fixture();await f.call('gvs_run',{task:'Long running goal',kind:'code'});
+ const cleanup=f.effects.at(-1)();await cleanup();
+ let saved=JSON.parse([...f.files.values()][0]);assert.equal(saved.status,'running');assert.equal(saved.suspended,true);assert.equal(saved.tasks[0].result.interrupted,true);
+ const p=fixture();await p.call('gvs_run',{task:'Human paused goal',kind:'code'});await p.call('gvs_pause');const pausedCleanup=p.effects.at(-1)();await pausedCleanup();saved=JSON.parse([...p.files.values()][0]);assert.equal(saved.status,'paused');
+});
+test('a disposed driver preserves its goal, but a human cancellation pauses it',async()=>{
+ const f=fixture();await f.call('gvs_run',{task:'Recovery',kind:'code'});
+ f.hooks['session/event']({id:f.root.id},{type:'turn/end',data:{reason:{kind:'aborted',reason:{kind:'disposed'}}}});await new Promise(resolve=>setImmediate(resolve));assert.equal((await f.call('gvs_status')).status,'running');
+ const p=fixture();await p.call('gvs_run',{task:'Stop',kind:'code'});p.hooks['session/event']({id:p.root.id},{type:'turn/end',data:{reason:{kind:'aborted',reason:{kind:'user'}}}});await new Promise(resolve=>setImmediate(resolve));assert.equal((await p.call('gvs_status')).status,'paused');
+});
+test('disposing one runtime scope never suspends another root goal',async()=>{
+ const a=fixture(),b=fixture();await a.call('gvs_run',{task:'A',kind:'code'});await b.call('gvs_run',{task:'B',kind:'code'});
+ await a.effects.at(-1)()();const status=await b.call('gvs_status');assert.equal(status.status,'running');assert.equal(status.gvsTeam.tasks[0].state,'running');
+});
+test('verbose roles obey the native description limit and a failed registration can wake the same role successfully',async()=>{
+ const f=fixture();await f.call('gvs_run',{task:'Research',kind:'code'});const spec={action:'create',name:'reverse',title:'R'.repeat(80),purpose:'Detailed source analysis '.repeat(50),instructions:'Preserve complete instructions',capability:'read'};
+ f.failNextSpawn();await assert.rejects(f.call('gvs_agent',spec),/Temporary spawn failure/);
+ await assert.rejects(f.call('gvs_task',{action:'create',title:'Inspect',instructions:'Inspect',kind:'work',assignee:'reverse'}),/failed to register/);
+ await f.call('gvs_agent',{action:'wake',name:'reverse'});const roles=await f.call('gvs_agent',{action:'list'});const role=roles.roles.find(role=>role.name==='reverse');
+ assert.ok(role.sessionId);assert.equal(role.error,undefined);assert.equal(roles.roles.filter(role=>role.name==='reverse').length,1);const count=f.spawns;
+ await f.call('gvs_agent',spec);assert.equal(f.spawns,count);
 });

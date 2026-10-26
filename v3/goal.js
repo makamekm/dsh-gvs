@@ -20,6 +20,7 @@ export function planGoal(run,{requirements,assessedMessages,expertise,staffingRa
   if(!/^[a-z][a-z0-9-]{0,59}$/.test(item.id)||!item.criterion?.trim()||!item.sourceIds?.length||item.sourceIds.some(id=>!ids.has(id)))throw new Error('Each requirement needs an id, a criterion and actual human sourceIds.');
   const previous=proposed.find(req=>req.id===item.id);
   if(previous&&previous.criterion!==item.criterion)throw new Error('Existing requirements are immutable. Add the additional requirement; do not silently reduce the contract.');
+  if(previous)previous.sourceIds=[...new Set([...previous.sourceIds,...item.sourceIds])];
   if(!previous)proposed.push({...item,workTasks:[],reviewTasks:[]});
  }
  if((assessedMessages??[]).some(id=>!ids.has(id)||!proposed.some(req=>req.sourceIds.includes(id))))throw new Error('Every assessed human message must be covered by a requirement.');
@@ -45,7 +46,7 @@ export function linkGoal(run,{id,issueId,workTasks,reviewTasks,roleNeedId,reques
  if(roleNeedId||requestId){
   const need=roleNeedId?run.goal.roleNeeds?.find(item=>item.id===roleNeedId):run.goal.roleRequests?.find(item=>item.id===requestId);
   const role=run.roles.find(role=>role.name===agentName&&!role.retired),task=run.tasks.find(task=>task.id===taskId&&task.assignee===agentName);
-  if(!need||!role||!task||need.capability&&role.capability!==need.capability)throw new Error('Resolve an expertise need/request with an existing suitable role AND an actual task assigned to it.');
+  if(!need||!role?.sessionId||!task||need.capability&&role.capability!==need.capability)throw new Error('Resolve an expertise need/request with a successfully registered suitable role AND an actual task assigned to it.');
   need.agent=agentName;need.taskId=taskId;delete run.goal.handoff;return need;
  }
  const item=issueId?run.goal.issues.find(item=>item.id===issueId):run.goal.requirements.find(item=>item.id===id);
@@ -79,7 +80,7 @@ export function goalStatus(run){
  const discovery=run.tasks.filter(task=>task.kind==='discovery').at(-1);
  const inventory=discovery?.result?.inventory??[];
  const discoveryReady=!goal.discoveryRequired||passed(discovery)&&inventory.length>0&&inventory.every(item=>item.requirementIds?.length&&item.requirementIds.every(id=>requirements.some(req=>req.id===id)));
- const expertise=[...(goal.roleNeeds??[]),...(goal.roleRequests??[])].map(need=>({...need,assigned:!!need.agent&&run.roles?.some(role=>role.name===need.agent&&!role.retired)&&run.tasks.some(task=>task.id===need.taskId&&task.assignee===need.agent)}));
+ const expertise=[...(goal.roleNeeds??[]),...(goal.roleRequests??[])].map(need=>({...need,assigned:!!need.agent&&run.roles?.some(role=>role.name===need.agent&&role.sessionId&&!role.retired)&&run.tasks.some(task=>task.id===need.taskId&&task.assignee===need.agent)}));
  const staffingReady=!!goal.staffingRationale&&expertise.every(item=>item.assigned);
  return {ready:requirements.length>0&&!unassessed.length&&requirements.every(item=>item.accepted)&&issues.every(item=>item.resolved)&&discoveryReady&&staffingReady,
   requirements,issues,unassessed,expertise,staffingReady,discoveryRequired:goal.discoveryRequired,discoveryReady,handoff:goal.handoff??null};

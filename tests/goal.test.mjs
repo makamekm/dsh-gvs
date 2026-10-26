@@ -36,6 +36,6 @@ test('the team must infer needed expertise and actually assign specialists work 
  const r=run();r.roles=[{name:'dev',capability:'edit'},{name:'qa',capability:'verify'}];r.tasks=[done('build','dev'),done('qa','qa','review')];linkGoal(r,{id:'feature',workTasks:['build'],reviewTasks:['qa']});
  planGoal(r,{requirements:[{id:'feature',criterion:'Complete requested feature',sourceIds:['human']}],assessedMessages:['human'],expertise:[{id:'protocol-research',purpose:'Unknown protocol requires source-level investigation',capability:'read'}],staffingRationale:'Discovery revealed an unowned protocol risk'});
  assert.equal(goalStatus(r).staffingReady,false);assert.equal(goalStatus(r).ready,false);
- r.roles.push({name:'researcher',capability:'read'});assert.throws(()=>linkGoal(r,{roleNeedId:'protocol-research',agentName:'researcher',taskId:'absent'}),/actual task/);
+ r.roles.push({name:'researcher',capability:'read',sessionId:'real-researcher'});assert.throws(()=>linkGoal(r,{roleNeedId:'protocol-research',agentName:'researcher',taskId:'absent'}),/actual task/);
  r.tasks.push(done('inspect','researcher'));linkGoal(r,{roleNeedId:'protocol-research',agentName:'researcher',taskId:'inspect'});assert.equal(goalStatus(r).ready,true);
 });

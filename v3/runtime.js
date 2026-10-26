@@ -18,6 +18,7 @@ const liveImages=run=>[...run.viewports.map(viewport=>run.visualChecks.filter(ch
 const taskSummaries=(tasks,detail=false)=>tasks.map(({id,title,assignee,kind,dependsOn,state,result})=>({id,title,assignee,kind,dependsOn,state,...(result?{result:detail?result:{...result,summary:clip(result.summary,800),findings:result.findings.map(item=>clip(item,600)),inventory:result.inventory?.slice(0,10).map(item=>({...item,evidence:clip(item.evidence,400)}))}}:{})}));
 
 export function apply(ctx,config={}){
+ const owned=new Set();
  const maxParallel=config.maxParallel??2,maxTasks=!config.goalProtocol&&[64,160].includes(config.maxTasks)?10000:config.maxTasks??10000;
  ctx.effect(()=>ctx.jobs.attachController('gvs-team-preview'));
  async function storage(root,signal){
@@ -46,6 +47,10 @@ export function apply(ctx,config={}){
   const member=ctx.agentTeams.membership(exec.agent),entry=await load(member.root,exec.signal);
   if(required&&!entry)throw new Error('The coordinator must call gvs_run first.');
   if(entry){
+   if(member.role==='lead'){
+    if(entry.owner!==ctx&&entry.suspending){entry.abort=new AbortController();entry.suspending=false;}
+    entry.owner=ctx;owned.add(member.root.id);
+   }
    const messages=ctx.sessionProjections?.stateOf(member.root.session,'gvsHumanGoal')?.messages;
    const migrating=!entry.run.goal;
    syncGoal(entry.run,messages?.length?messages:!entry.run.goal?[{id:'initial-request',text:entry.run.task}]:[]);
@@ -64,13 +69,15 @@ export function apply(ctx,config={}){
  }
  async function createRole(entry,input,signal){
   const spec=roleSpec(input),existing=roleOf(entry,spec.name);
-  if(existing){if(existing.capability!==spec.capability)throw new Error('A persistent role cannot silently change capability. Use a new role name.');existing.retired=false;return existing;}
-  if(entry.run.roles.length>=32)throw new Error('This team has 32 persistent roles; reuse an appropriate specialist.');
-  const role={...spec,sessionId:null,retired:false};entry.run.roles.push(role);
+  if(existing){if(existing.capability!==spec.capability)throw new Error('A persistent role cannot silently change capability. Use a new role name.');existing.retired=false;if(existing.sessionId){delete existing.error;return existing;}}
+  if(!existing&&entry.run.roles.length>=32)throw new Error('This team has 32 persistent roles; reuse an appropriate specialist.');
+  const role=existing??{...spec,sessionId:null,retired:false};if(!existing)entry.run.roles.push(role);
   try{
-   const created=await ctx.agentTeams.spawnTeammate(entry.root,{name:spec.name,description:`${spec.title} — ${spec.purpose}`.slice(0,1000),context:'fresh',provider:'spawn',signal,
+   const native=ctx.agentTeams.listMembers?.(entry.root).find(member=>member.name===spec.name);
+   if(native){role.sessionId=native.id;delete role.error;return role;}
+   const created=await ctx.agentTeams.spawnTeammate(entry.root,{name:spec.name,description:`${spec.title} — ${spec.purpose}`.slice(0,200),context:'fresh',provider:'spawn',signal,
     prompt:[{type:'text',text:`${COMMON}\n\nROLE ${spec.name}: ${spec.title}\nPURPOSE: ${spec.purpose}\nCAPABILITY: ${spec.capability}\n${spec.capability==='user'?USER:spec.instructions}\n${entry.run.kind.startsWith('game')?GAME:''}\nHUMAN TASK: ${entry.run.task}\nThis is role registration, not an assigned task yet. Briefly acknowledge and become idle; a dependency-ready task will wake this same conversation.`}]});
-   role.sessionId=created.member.id;
+   role.sessionId=created.member.id;delete role.error;
   }catch(error){role.error=clip(error.message);throw error;}finally{await commit(entry);}
   return role;
  }
@@ -80,6 +87,7 @@ export function apply(ctx,config={}){
   const dependsOn=input.dependsOn??[];assertDag([...entry.run.tasks,{id:'new-task',dependsOn}]);
   if(!taskKinds.includes(input.kind))throw new Error('Choose a supported task kind.');
   const role=roleOf(entry,input.assignee);
+  if(!role.sessionId)throw new Error('This role failed to register. Use gvs_agent wake with its existing name to repair registration before assigning work.');
   if(input.kind==='discovery'&&!['read','verify'].includes(role.capability))throw new Error('Assign discovery to an independent read/verify architect or researcher.');
   if(['review','game-review'].includes(input.kind)&&role.capability!=='verify')throw new Error('Assign independent verification to a verify role, not the editing agent.');
   if(input.kind==='design-review'&&role.capability==='edit')throw new Error('The rendered design reviewer must be separate from the editing role.');
@@ -165,6 +173,7 @@ export function apply(ctx,config={}){
   const run={schema:3,sessionId:root.id,runId:`${new Date().toISOString().replace(/[:.]/g,'-')}-${randomUUID().slice(0,8)}`,task:args.task,kind:args.kind,engine:args.engine??'',status:'running',revision:0,
    visualRequired,viewports:args.viewports??(args.kind==='ui'?['desktop','mobile']:['desktop']),roles:previous?.run.roles??[],tasks:[],checks:[],visualChecks:[],gameChecks:[],analysis:{state:'pending',version:0,requirements:[],rationale:'',motionHint:motionHint(args.task)},analysisChecks:[],preview:null,quality:null,summary:''};
   const entry={run,root,io,write:Promise.resolve(),abort:new AbortController(),waiters:new Map(),scheduling:null};entries.set(root.id,entry);
+  entry.owner=ctx;owned.add(root.id);
   const human=ctx.sessionProjections?.stateOf(root.session,'gvsHumanGoal')?.messages;
   syncGoal(run,human?.length?human:[{id:'initial-request',text:args.task}]);
   await refreshRevision(entry,ctx.fs,exec.signal);
@@ -189,6 +198,7 @@ export function apply(ctx,config={}){
    role.retired=true;await commit(entry);return {status:'retired',name:role.name};
   }
   role.retired=false;
+  if(!role.sessionId)await createRole(entry,role,exec.signal);
   const assigned=entry.run.tasks.find(task=>task.assignee===role.name&&['waiting','running','blocked'].includes(task.state));
   if(!assigned)return {status:'idle',sessionId:role.sessionId,reused:true,next:'Create a new task for this existing role with gvs_task create. No new agent is needed.'};
   if(assigned.state==='running'&&args.message)await ctx.agentTeams.sendMessage(entry.root,{target:role.name,content:[{type:'text',text:`Clarification for existing ${assigned.id}: ${args.message}`}],signal:exec.signal});
@@ -337,9 +347,19 @@ export function apply(ctx,config={}){
   if(entry.run.preview?.jobId){try{ctx.jobs.kill(entry.run.preview.jobId,entry.root.id,'GVS paused');}catch{}}
   await commit(entry);
  }
+ async function suspend(entry){
+  if(entry.suspending||entry.run.status!=='running')return;entry.suspending=true;
+  entry.run.suspended=true;entry.run.summary='Runtime stopped; the complete goal remains active and will recover after restart.';
+  entry.abort.abort(new Error('GVS runtime suspended'));
+  for(const task of entry.run.tasks.filter(task=>task.state==='running')){
+   task.state='blocked';task.result={verdict:'blocked',summary:'Interrupted by service restart; inspect partial work before resuming.',findings:[],interrupted:true,revision:entry.run.revision};
+   try{ctx.agentTeams.interrupt(entry.root,task.assignee);}catch{}
+  }
+  await commit(entry);
+ }
  register('gvs_pause','Pause this team’s work and its managed preview, preserving named agents, tasks and memory.',{},[],async(_args,exec)=>{const {member,entry}=await current(exec);lead(member);await pause(entry);return {status:'paused'};});
  register('gvs_resume','Resume saved GVS tasks after the user requests continuation; the same named agents keep their conversations.',{},[],async(_args,exec)=>{
-  const {member,entry}=await current(exec);lead(member);entry.abort=new AbortController();entry.run.status='running';
+  const {member,entry}=await current(exec);lead(member);entry.abort=new AbortController();entry.run.status='running';entry.suspending=false;delete entry.run.suspended;
   for(const task of entry.run.tasks.filter(task=>task.state==='blocked'&&(task.result?.interrupted===true||/^(?:Interrupted by service restart;|Paused;)/.test(task.result?.summary??'')))){
    const native=ctx.agentTeams.getTask(entry.root,task.id);if(['in_progress','completed'].includes(native.status))await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:native.status==='completed'?'reopen':'release'});
    task.state='waiting';delete task.result;
@@ -388,7 +408,11 @@ export function apply(ctx,config={}){
  },180000);
  ctx.on('session/event',(session,event)=>{
   const own=entries.get(session.id);
-  if(own?.run.status==='running'&&event.type==='turn/end'&&['aborted','blocked','forked'].includes(event.data.reason.kind)){pause(own).catch(()=>{});return;}
+  if(own?.run.status==='running'&&event.type==='turn/end'&&['aborted','blocked','forked'].includes(event.data.reason.kind)){
+   if(own.suspending||event.data.reason.kind==='aborted'&&event.data.reason.reason?.kind==='disposed')suspend(own).catch(()=>{});
+   else pause(own).catch(()=>{});
+   return;
+  }
   for(const entry of entries.values()){
    if(entry.run.status!=='running')continue;
    const role=entry.run.roles.find(role=>role.sessionId===session.id);if(!role)continue;
@@ -398,5 +422,5 @@ export function apply(ctx,config={}){
    if(event.type==='turn/end'&&task.executionTurn===event.data.turn){task.state='blocked';task.result={verdict:'blocked',summary:`Agent turn ended (${event.data.reason.kind}) without completing its assigned task. Inspect its chat and retry this task.`,findings:[],revision:entry.run.revision};commit(entry).catch(()=>{});}
   }
  });
- ctx.effect(()=>async()=>{for(const entry of entries.values())if(entry.run.status==='running')await pause(entry).catch(()=>{});});
+ ctx.effect(()=>async()=>{for(const id of owned){const entry=entries.get(id);if(entry?.owner===ctx&&entry.run.status==='running')await suspend(entry).catch(()=>{});}});
 }

@@ -1,7 +1,7 @@
 window.__ModuleLoader__.load({id:'@makame/dsh-gvs',factory(require){
  const React=require('react'),h=React.createElement,NS='gvs.team';
- const en={team:'GVS team',plan:'Task plan',hide:'Hide plan',running:'Working',waiting:'Waiting',blocked:'Blocked',idle:'Standby',error:'Error',done:'Done',open:'Open agent chat',waitFor:'Waiting for',waitingUser:'Waiting for the User advocate',tasks:'tasks',automatic:'GVS · automatic team',goal:'Goal',verified:'Verified',paused:'Paused',ready:'Ready',noWork:'Waiting for new work'};
- const ru={team:'Команда GVS',plan:'План задач',hide:'Скрыть план',running:'В работе',waiting:'Ждёт',blocked:'Нужна помощь',idle:'Ожидает',error:'Ошибка',done:'Готово',open:'Открыть чат агента',waitFor:'Ждёт',waitingUser:'Ждёт ответа Пользователя',tasks:'задач',automatic:'GVS · команда под задачу',goal:'Цель',verified:'Проверено',paused:'Приостановлено',ready:'Можно начать',noWork:'Ожидает новую задачу'};
+ const en={team:'GVS team',plan:'Task plan',hide:'Hide plan',running:'Working',waiting:'Waiting',blocked:'Blocked',idle:'Standby',error:'Error',done:'Done',open:'Open agent chat',waitFor:'Waiting for',waitingUser:'Waiting for the User advocate',tasks:'tasks',issues:'issues',automatic:'GVS · automatic team',goal:'Goal',verified:'Verified',paused:'Paused',ready:'Ready',noWork:'Waiting for new work'};
+ const ru={team:'Команда GVS',plan:'План задач',hide:'Скрыть план',running:'В работе',waiting:'Ждёт',blocked:'Нужна помощь',idle:'Ожидает',error:'Ошибка',done:'Готово',open:'Открыть чат агента',waitFor:'Ждёт',waitingUser:'Ждёт ответа Пользователя',tasks:'задач',issues:'замечаний',automatic:'GVS · команда под задачу',goal:'Цель',verified:'Проверено',paused:'Приостановлено',ready:'Можно начать',noWork:'Ожидает новую задачу'};
  const css=`
 .gvs-team{box-sizing:border-box;width:calc(100% - 2 * var(--dsh-composer-side-clearance,16px));max-width:var(--dsh-composer-card-max-width,840px);min-width:0;align-self:center;margin:0 auto 2px;padding:0;color:var(--dsw-alias-label-primary);font-size:12px}
 .gvs-head{display:flex;align-items:center;gap:8px;min-height:28px;padding:0 3px 5px}.gvs-head strong{font-size:11px;font-weight:600;letter-spacing:.035em}.gvs-subtle{color:var(--dsw-alias-label-tertiary);font-size:11px}.gvs-head .gvs-plan{margin-left:auto}
@@ -26,7 +26,7 @@ window.__ModuleLoader__.load({id:'@makame/dsh-gvs',factory(require){
     team.status!=='running'&&h('span',{className:'gvs-subtle'},t(team.status==='verified'?'verified':'paused')),h('button',{className:'gvs-plan',onClick:()=>setExpanded(value=>!value),'aria-expanded':expanded},t(expanded?'hide':'plan'))),
    h('div',{className:'gvs-roles'},...team.roles.map(role=>h(Agent,{key:role.name,role,roles:team.roles,tasks,rootId,sessionId,useSessionStatus,openAgent,t,onError:setError}))),
    error&&h('p',{role:'alert'},error),
-   expanded&&h('div',{className:'gvs-tasks'},h('p',{className:'gvs-subtle'},`${t('goal')}: ${team.task}`),team.goal&&h('p',{className:'gvs-subtle'},`${t('goal')}: ${Math.max(0,team.goal.requirements-team.goal.remainingCount)}/${team.goal.requirements} · ${team.goal.issueCount} ${t('blocked')}`),...tasks.map(task=>{
+   expanded&&h('div',{className:'gvs-tasks'},h('p',{className:'gvs-subtle'},`${t('goal')}: ${team.task}`),team.goal&&h('p',{className:'gvs-subtle'},`${t('goal')}: ${Math.max(0,team.goal.requirements-team.goal.remainingCount)}/${team.goal.requirements} · ${team.goal.issueCount} ${t('issues')}`),...tasks.map(task=>{
     const deps=task.dependsOn.map(id=>tasks.find(item=>item.id===id)).filter(task=>task&&task.state!=='done');
     return h('div',{className:'gvs-task',key:task.id},h('span',{'aria-hidden':true},task.state==='done'?'✓':task.state==='running'?'↻':'○'),h('div',null,h('strong',null,task.title),h('p',null,team.roles.find(role=>role.name===task.assignee)?.title??task.assignee),deps.length>0&&h('p',null,`${t('waitFor')}: ${deps.map(dep=>`${team.roles.find(role=>role.name===dep.assignee)?.title??dep.assignee} — ${dep.title}`).join('; ')}`),task.summary&&h('p',null,task.summary)));
    })));
@@ -41,7 +41,7 @@ window.__ModuleLoader__.load({id:'@makame/dsh-gvs',factory(require){
    onClick:()=>{try{openAgent(rootId,role.sessionId);onError('');}catch(error){onError(error.message);}}},
    h('span',{className:'gvs-name'},h('span',{className:`gvs-dot ${status}`}),h('strong',null,role.title),h('span',{className:'gvs-status'},t(status))),
    h('span',{className:'gvs-activity'},activity),
-   deps.length>0?h('span',{className:'gvs-dependency'},`${t('waitFor')}: ${deps.map(dep=>`${roles.find(role=>role.name===dep.assignee)?.title??dep.assignee} — ${dep.title}`).join('; ')}`):role.state==='waiting'&&role.activity.includes('Пользователя')?h('span',{className:'gvs-dependency'},t('waitingUser')):h('span',{className:'gvs-subtle'},`${own.filter(task=>task.state==='done').length} ${t('tasks')}`));
+   deps.length>0?h('span',{className:'gvs-dependency'},`${t('waitFor')}: ${deps.map(dep=>`${roles.find(role=>role.name===dep.assignee)?.title??dep.assignee} — ${dep.title}`).join('; ')}`):role.state==='waiting'&&role.activity.includes('Пользователя')?h('span',{className:'gvs-dependency'},t('waitingUser')):h('span',{className:'gvs-subtle'},`${role.completed??own.filter(task=>task.state==='done').length} ${t('tasks')}`));
  }
  return {inject:['slots','locale','sessions','uiWorkspace'],apply(ctx){
   ctx.effect(()=>ctx.locale.register(NS,{en,ru}));
