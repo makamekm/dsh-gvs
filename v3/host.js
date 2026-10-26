@@ -1,7 +1,7 @@
 import {z} from 'zod';
 export const inject=['sessionProjections'];
 export function apply(ctx,config={}){
- const team=z.object({schema:z.literal(3),sessionId:z.string(),roles:z.array(z.object({name:z.string(),title:z.string(),state:z.string()}).passthrough()).max(12),tasks:z.array(z.object({id:z.string(),state:z.string()}).passthrough()).max(160)}).passthrough().nullable();
+ const team=z.object({schema:z.literal(3),sessionId:z.string(),roles:z.array(z.object({name:z.string(),title:z.string(),state:z.string()}).passthrough()).max(32),tasks:z.array(z.object({id:z.string(),state:z.string()}).passthrough()).max(160)}).passthrough().nullable();
  ctx.sessionProjections.register({key:'gvsTeam',stateVersion:1,stateSchema:z.object({calls:z.record(z.string(),z.string()),value:team}),
   init:()=>({calls:{},value:null}),apply(state,event){
    if(event.type==='tool/call'&&event.data.name.startsWith('gvs_'))return {...state,calls:{...state.calls,[event.data.callId]:event.data.name}};

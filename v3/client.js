@@ -20,13 +20,13 @@ window.__ModuleLoader__.load({id:'@makame/dsh-gvs',factory(require){
   const native=useSessions(state=>state.projectionsBySession[rootId]?.values.agentTeam);
   if(!team)return null;
   const tasks=team.tasks.map(task=>({...task,state:native?.tasks.find(item=>item.id===task.id)?.status==='completed'?'done':task.state}));
-  const completed=tasks.filter(task=>task.state==='done').length;
+  const completed=team.taskCounts?.done??tasks.filter(task=>task.state==='done').length;
   return h('section',{className:'gvs-team','aria-label':t('team')},h('style',null,css),
-   h('div',{className:'gvs-head'},h('strong',null,t('team')),h('span',{className:'gvs-subtle'},`${team.roles.length} · ${completed}/${tasks.length}`),
+   h('div',{className:'gvs-head'},h('strong',null,t('team')),h('span',{className:'gvs-subtle'},`${team.roles.length} · ${completed}/${team.taskCounts?.total??tasks.length}`),
     team.status!=='running'&&h('span',{className:'gvs-subtle'},t(team.status==='verified'?'verified':'paused')),h('button',{className:'gvs-plan',onClick:()=>setExpanded(value=>!value),'aria-expanded':expanded},t(expanded?'hide':'plan'))),
    h('div',{className:'gvs-roles'},...team.roles.map(role=>h(Agent,{key:role.name,role,roles:team.roles,tasks,rootId,sessionId,useSessionStatus,openAgent,t,onError:setError}))),
    error&&h('p',{role:'alert'},error),
-   expanded&&h('div',{className:'gvs-tasks'},h('p',{className:'gvs-subtle'},`${t('goal')}: ${team.task}`),...tasks.map(task=>{
+   expanded&&h('div',{className:'gvs-tasks'},h('p',{className:'gvs-subtle'},`${t('goal')}: ${team.task}`),team.goal&&h('p',{className:'gvs-subtle'},`${t('goal')}: ${Math.max(0,team.goal.requirements-team.goal.remainingCount)}/${team.goal.requirements} · ${team.goal.issueCount} ${t('blocked')}`),...tasks.map(task=>{
     const deps=task.dependsOn.map(id=>tasks.find(item=>item.id===id)).filter(task=>task&&task.state!=='done');
     return h('div',{className:'gvs-task',key:task.id},h('span',{'aria-hidden':true},task.state==='done'?'✓':task.state==='running'?'↻':'○'),h('div',null,h('strong',null,task.title),h('p',null,team.roles.find(role=>role.name===task.assignee)?.title??task.assignee),deps.length>0&&h('p',null,`${t('waitFor')}: ${deps.map(dep=>`${team.roles.find(role=>role.name===dep.assignee)?.title??dep.assignee} — ${dep.title}`).join('; ')}`),task.summary&&h('p',null,task.summary)));
    })));

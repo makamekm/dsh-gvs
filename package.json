@@ -1,7 +1,7 @@
 {
   "name": "@makame/dsh-gvs",
-  "version": "2.1.0",
-  "description": "Adaptive GVS teams with task-specific analysis gates, temporal render evidence and live agents",
+  "version": "2.2.0",
+  "description": "Persistent goal-driven agent teams with adaptive expertise, complete requirement coverage and independent acceptance",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -13,9 +13,15 @@
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
     "./runtime": "./v3/runtime.js",
+    "./coordinator": "./v3/coordinator.js",
+    "./coordinator/locale/*.json": "./locale/*.json",
+    "./coordinator/icon": "./icon.svg",
     "./client": "./v3/client.js",
     "./runtime/locale/*.json": "./locale/*.json",
-    "./runtime/icon": "./icon.svg"
+    "./runtime/icon": "./icon.svg",
+    "./recovery": "./v3/recovery-host.js",
+    "./recovery/locale/*.json": "./locale/*.json",
+    "./recovery/icon": "./icon.svg"
   },
   "files": [
     "v3/*.js",

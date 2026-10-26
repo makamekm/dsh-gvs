@@ -4,12 +4,14 @@
     - id: gvs-team-domain
       name: '@deepseek-ai/dsh-experimental-agent-team'
       config:
-        maxMembers: 10
-        maxTasks: 160
+        maxMembers: 34
+        maxTasks: 10000
         maxMessageBytes: 131072
         disposalTimeoutMs: 5000
     - id: gvs-ui
       name: '@makame/dsh-gvs'
+    - id: gvs-coordinator
+      name: '@makame/dsh-gvs/coordinator'
     - id: preset-gvs-local
       name: '@deepseek-ai/dsh-agent-preset'
       config:
@@ -25,6 +27,48 @@
                 If you are a delegated subagent or a message assigns a GVS role/task ID to you, follow that
                 assigned teammate role and COMMON policy; do not coordinate or call gvs_run. The following
                 coordinator policy applies only to the ordinary top-level Lead.
+
+                COMPLETE THE HUMAN GOAL: preserve the actual human messages with gvs_goal, not your rewritten
+                local subset. The simulated User cannot waive any requirement, accept an MVP instead of
+                requested parity, or grant permissions. User first assesses every real message into immutable
+                requirements. Link EACH requirement to implementation and independent review tasks with
+                gvs_goal link. A failed review is work to repair, not a stopping condition: every finding is a
+                durable issue requiring linked repair and independent recheck. Read ALL findings, including
+                missing features and visual mismatches; never bury them as limitations in summary. gvs_finish
+                needs-review means CONTINUE the same run until verified. A useful prototype, partial pass or
+                long runtime is not completion. Only an evidenced external dependency after all actionable
+                work is exhausted permits gvs_goal handoff; report the exact missing input honestly and keep
+                the goal unaccepted.
+
+                INFER EXPERTISE YOURSELF: the human describes the desired outcome, not a roster. At the brief
+                and whenever a new risk/unknown appears, User assesses needed capabilities with gvs_goal plan
+                expertise:[{id,purpose,capability:read|edit|verify}], staffingRationale and discoveryRequired.
+                [] needs a concrete rationale that existing capabilities suffice. Lead creates/reuses suitable
+                specialist roles, assigns each an actual task and records gvs_goal link
+                roleNeedId/agentName/taskId. Specialists surface capability gaps with gvs_agent request; Lead
+                must resolve the durable requestId through a suitable named role and real task. These needs
+                block full acceptance until assigned. Examples such as reverse engineer, product analyst,
+                architect, game designer, security reviewer or accessibility QA are possibilities, not a fixed
+                mandatory roster. Choose from the actual goal, project evidence, risks and missing knowledge.
+                Detail requirements into end-to-end journeys, edge/failure/recovery states, interactions,
+                data/protocols and acceptance evidence before implementing dependent work. Reassess
+                completeness after each discovery/review, including what no existing task covers. Work may
+                span days and many model turns: use paginated task history, preserve the same goal/agents and
+                do not stop because a response or a useful iteration ended. A smaller local model obeys the
+                same durable gates; never lower the acceptance bar to fit it.
+
+                For a full transfer/reverse engineering/1:1 request, create or reuse an independent
+                architect/researcher and a discovery task BEFORE dependent implementation. Inventory visible
+                and hidden UI states, routes, assets, animations, responsive size formulas, copy,
+                authentication, API/WebSocket commands and notifications, camera/media lifecycle,
+                admin/moderation/ban/reporting workflows, and other source-discovered features. Return
+                source-backed inventory with requirementIds. Distinguish confirmed, unknown and unavailable
+                private behaviour. Discovery MUST escalate new requirements and unknown server contracts to
+                Lead/User; do not guess private behaviour or silently omit it. For exact visual parity compare
+                matching reference/local states and viewports with overlays/diffs plus interaction and
+                temporal evidence where needed. No discretionary redesign or usability exception overrides 1:1
+                without a real human request. Do not ask the human to enumerate what systematic investigation
+                can reveal.
 
                 You coordinate GVS: an adaptive team with a central simulated User advocate. For
                 implementation and verification tasks inspect the actual workspace, then call gvs_run to
@@ -56,6 +100,11 @@
                 must consult User via gvs_ask_user. Ask about consequential choices; reuse recorded decisions
                 instead of repeating full regression at every consultation. User is a simulated advocate, not
                 human permission or real research.
+
+                A human status question takes priority and is read-only: answer in the main chat before tool
+                calls or waiting, using current tasks and live team activity. Report blockers honestly.
+                Preserve the run, plan and agent identities, keep agents working, and continue the original
+                task after the answer. Do not treat a status question as a change request.
 
                 New human messages during an active run steer the EXISTING task. Acknowledge the change
                 briefly, update the native dependency plan and clarify affected running assignments; preserve
@@ -148,4 +197,8 @@
             name: '@makame/dsh-gvs/runtime'
             config:
               maxParallel: 2
-              maxTasks: 64
+              maxTasks: 10000
+              goalProtocol: 2
+    - id: gvs-recovery
+      name: '@makame/dsh-gvs/recovery'
+      config: {}

@@ -1,7 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import path from 'node:path';import {randomUUID} from 'node:crypto';
 import {apply} from '../v3/runtime.js';
 function fixture(){
- const files=new Map(),members=new Map(),tasks=new Map(),sent=[];let serial=0,spawns=0;
+ const files=new Map(),members=new Map(),tasks=new Map(),sent=[];let serial=0,spawns=0,source='initial source';
  const root={id:`mock-${randomUUID()}`,session:{header:{}},ctx:{}};const hooks={},definitions=new Map();let guard;
  const team={membership(agent){return {root,name:agent===root?'lead':members.get(agent.id).name,role:agent===root?'lead':'teammate'};},tryMembership(agent){return team.membership(agent);},
   async spawnTeammate(_root,request){spawns++;const member={id:`member-${randomUUID()}`,name:request.name};members.set(member.id,member);return {member};},
@@ -12,13 +12,16 @@ function fixture(){
   async sendMessage(_agent,request){sent.push(request);return {messageId:randomUUID()};},async waitForChange(){return {timedOut:false};},interrupt(){return {previousStatus:'inactive'};}};
  const ctx={agentTeams:team,on:(name,fn)=>{hooks[name]=fn;},effect(){},jobs:{attachController:()=>()=>{}},tools:{register:definition=>definitions.set(definition.name,definition),guard:fn=>{guard=fn;}},
   workingDirectory:{ensure:async()=>path.resolve('work/in-memory-fixture')},sandboxPolicy:{resolve:()=>({mode:'workspace-write'})},
-  fs:{resolve:async file=>({file}),readText:async target=>{if(!files.has(target.file))throw Object.assign(new Error('missing'),{code:'ENOENT'});return files.get(target.file);},writeText:async(target,value)=>{files.set(target.file,value);}}};
+  fs:{resolve:async file=>({file}),contains:()=>true,listDir:async()=>[{name:'app.js',type:'file'}],lstat:async()=>({type:'file'}),readBytes:async()=>Buffer.from(source),readText:async target=>{if(!files.has(target.file))throw Object.assign(new Error('missing'),{code:'ENOENT'});return files.get(target.file);},writeText:async(target,value)=>{files.set(target.file,value);}}};
  apply(ctx);
  const actor=name=>{const member=[...members.values()].find(member=>member.name===name);return {id:member.id,session:{header:{parentSession:root.id}},ctx:{}};};
  async function call(name,args={},agent=root){const exec={agent,name,arguments:args,signal:new AbortController().signal};await hooks['tools/pre-execute'](exec,async()=>({kind:'allow'}));const denied=guard(exec);if(denied)throw new Error(denied);return definitions.get(name).execute(args,exec);}
- const complete=async(id,agent,extra={})=>{const saved=JSON.parse([...files.values()][0]);if(saved.tasks.find(task=>task.id===id)?.kind==='brief'&&saved.analysis?.state!=='ready')await call('gvs_analysis',{action:'plan',rationale:'Small code-only fixture: existing unit checks cover the goal; no additional visual analysis needed.',requirements:[]},agent);return call('gvs_task',{action:'complete',taskId:id,verdict:'pass',summary:'Observed result',findings:[],...extra},agent);};
+ const complete=async(id,agent,extra={})=>{const saved=JSON.parse([...files.values()][0]);if(saved.tasks.find(task=>task.id===id)?.kind==='brief'){
+  if(saved.analysis?.state!=='ready')await call('gvs_analysis',{action:'plan',rationale:'Small code-only fixture: existing unit checks cover the goal; no additional visual analysis needed.',requirements:[]},agent);
+  const goal=await call('gvs_goal',{action:'status'});await call('gvs_goal',{action:'plan',requirements:[{id:'human-goal',criterion:saved.task,sourceIds:goal.humanMessages.map(item=>item.id)}],assessedMessages:goal.humanMessages.map(item=>item.id),expertise:[],staffingRationale:'The fixture already has all needed capabilities.'},agent);
+ }return call('gvs_task',{action:'complete',taskId:id,verdict:'pass',summary:'Observed result',findings:[],...extra},agent);};
  async function consult(agent){const pending=call('gvs_ask_user',{question:'Confirm the exact goal'},agent);await new Promise(resolve=>setImmediate(resolve));let list=await call('gvs_task',{action:'list'});const question=list.tasks.find(task=>task.kind==='consultation'&&task.state==='running');assert.ok(question);await complete(question.id,actor('user'));await pending;}
- return {root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,get spawns(){return spawns;}};
+ return {root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,changeSource:value=>{source=value;},get spawns(){return spawns;}};
 }
 test('host API defers tasks, forbids early execution and wakes the same role without duplicating work',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Fix arithmetic',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
@@ -50,10 +53,10 @@ test('a claimed agent turn ending without completion becomes a visible blocker',
  f.hooks['session/event']({id:actor.id},{type:'turn/end',data:{turn:1,reason:{kind:'completed'}}});
  const status=await f.call('gvs_task',{action:'list'});assert.equal(status.tasks.find(task=>task.id===created.task.id).state,'blocked');
 });
-test('restart pauses interrupted work and resume reuses its original actor',async()=>{
+test('restart preserves the active goal and resume reuses its original actor',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Recover',kind:'code'});const id=f.actor('user').id;
  const isolated=await import(`../v3/runtime.js?recovery=${randomUUID()}`);isolated.apply(f.ctx);
- const status=await f.call('gvs_status');assert.equal(status.status,'paused');assert.equal(status.gvsTeam.tasks.find(task=>task.id===start.briefTaskId).state,'blocked');
+ const status=await f.call('gvs_status');assert.equal(status.status,'running');assert.equal(status.gvsTeam.tasks.find(task=>task.id===start.briefTaskId).state,'blocked');
  await f.call('gvs_resume');assert.equal(f.actor('user').id,id);assert.equal(f.spawns,1);assert.equal(f.tasks.get(start.briefTaskId).status,'in_progress');
 });
 
@@ -110,4 +113,24 @@ test('motion checker rejects out-of-workspace captures and repeated copies of on
  for(const [i,frame] of data.results[0].frames.entries())frame.path=`capture-${i}.png`;
  await assert.rejects(f.call('gvs_analysis',{action:'check',command:'node motion.mjs'},actor),/identical/);
  assert.equal((await f.call('gvs_analysis',{action:'status'})).reports.length,0);
+});
+
+test('read-only commands preserve report freshness; actual source changes invalidate it regardless of command success',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Small change',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ const revision=(await f.call('gvs_status')).gvsTeam.revision;
+ f.hooks['tools/result']({agent:f.root,name:'pwsh',arguments:{command:'Get-Content app.js'}},{isError:false,value:{kind:'foreground',exitCode:0},content:[]});
+ assert.equal((await f.call('gvs_status')).gvsTeam.revision,revision);
+ f.changeSource('changed even though the shell later failed');f.hooks['tools/result']({agent:f.root,name:'pwsh',arguments:{command:'edit; failed build'}},{isError:true,value:{kind:'foreground',exitCode:1},content:[]});
+ assert.equal((await f.call('gvs_status')).gvsTeam.revision,revision+1);
+ assert.equal((await f.call('gvs_status')).gvsTeam.revision,revision+1);
+});
+test('a rejected task explicitly escalates every finding and cannot disappear from goal coverage',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Small change',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'research',title:'Research',purpose:'Discover gaps',capability:'read'});
+ const task=await f.call('gvs_task',{action:'create',title:'Inspect',instructions:'Find all missing states',kind:'work',assignee:'research'});
+ await f.call('gvs_task',{action:'complete',taskId:task.task.id,verdict:'revise',summary:'Useful local prototype',findings:['Missing original mobile split','Missing moderation notifications']},f.actor('research'));
+ const notice=f.sent.filter(message=>message.target==='lead').at(-1).content[0].text;
+ assert.match(notice,/Missing original mobile split/);assert.match(notice,/Missing moderation notifications/);
+ const status=await f.call('gvs_goal',{action:'status'});assert.equal(status.issues.length,2);
+ const finish=await f.call('gvs_finish');assert.equal(finish.continue,true);assert.equal(finish.quality.goal,false);
 });

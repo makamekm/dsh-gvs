@@ -1,8 +1,9 @@
 import {analysisReady,analysisAcceptance} from './analysis.js';
+import {goalStatus} from './goal.js';
 export const clip=(value,max=4000)=>String(value??'').slice(0,max);
 export const ID=/^[a-z][a-z0-9-]{0,39}$/;
 export const kinds=['code','ui','game2d','game3d'];
-export const taskKinds=['work','review','design-review','game-review','user-review','consultation','brief'];
+export const taskKinds=['work','discovery','review','design-review','game-review','user-review','consultation','brief'];
 export function roleSpec(input){
  if(!ID.test(input.name)||input.name==='lead')throw new Error('Use a unique lowercase role name, up to 40 characters.');
  if(!['read','edit','verify','user'].includes(input.capability))throw new Error('Capability must be read, edit, verify or user.');
@@ -25,7 +26,11 @@ export function assertDag(tasks){
  tasks.forEach(task=>visit(task.id));
 }
 export function view(run){
+ const goal=goalStatus(run);
+ const shownTasks=[...run.tasks.filter(task=>task.state!=='done').slice(-100),...run.tasks.filter(task=>task.state==='done').slice(-20)];
  return {schema:3,sessionId:run.sessionId,runId:run.runId,task:clip(run.task,900),kind:run.kind,engine:run.engine,status:run.status,revision:run.revision,quality:run.quality,analysis:run.analysis??null,
+  taskCounts:{total:run.tasks.length,done:run.tasks.filter(task=>task.state==='done').length},
+  goal:{ready:goal.ready,unassessed:goal.unassessed.map(item=>item.id),requirements:goal.requirements.length,remainingCount:goal.requirements.filter(item=>!item.accepted).length,remaining:goal.requirements.filter(item=>!item.accepted).slice(0,20).map(({id,criterion})=>({id,criterion:clip(criterion,300)})),issueCount:goal.issues.filter(item=>!item.resolved).length,issues:goal.issues.filter(item=>!item.resolved).slice(0,10).map(({id,taskId,criterion})=>({id,taskId,criterion:clip(criterion,400)})),expertise:(goal.expertise??[]).filter(item=>!item.assigned).slice(0,20),staffingReady:goal.staffingReady??true,discoveryReady:goal.discoveryReady,handoff:goal.handoff??null},
   roles:run.roles.map(role=>{
    const current=run.tasks.find(task=>task.assignee===role.name&&task.state==='running');
    const blocked=run.tasks.find(task=>task.assignee===role.name&&task.state==='blocked');
@@ -36,7 +41,7 @@ export function view(run){
     activity:clip(role.waitingForUser?'Ждёт ответа Пользователя':current?.title??blocked?.result?.summary??waiting?.title??'Ожидает новую задачу',280),
     waitingFor:(dependencies??[]).filter(Boolean).map(task=>({id:task.id,title:task.title,agent:run.roles.find(role=>role.name===task.assignee)?.title??task.assignee})),
     completed:run.tasks.filter(task=>task.assignee===role.name&&task.state==='done').length,error:role.error??null};
-  }),tasks:run.tasks.map(({id,title,assignee,kind,state,dependsOn,result})=>({id,title,assignee,kind,state,dependsOn,summary:clip(result?.summary,280)})),summary:run.summary??''};
+  }),tasks:shownTasks.map(({id,title,assignee,kind,state,dependsOn,result})=>({id,title,assignee,kind,state,dependsOn,verdict:result?.verdict??null,findings:result?.findings?.map(item=>clip(item,400))??[],summary:clip(result?.summary,280)})),summary:run.summary??''};
 }
 export function imageAcceptance(run,task){
  if(!run.visualRequired)return true;
@@ -53,7 +58,7 @@ export function quality(run){
   ['collision','gameplay','controls',...(run.kind==='game3d'?['camera']:[])].every(category=>coverage.has(category))&&technical?.result.adapterReviewed===true;
  const current=run.visualChecks.filter(check=>check.ok&&check.revision===run.revision);
  const interaction=!run.visualRequired||current.some(check=>check.interactions>0&&check.assertions>0);
- return {technical:accepted(technical)&&technical.result.simple===true&&technical.result.scopePreserved===true&&technical.result.checks.length>0,
+ return {goal:goalStatus(run).ready,source:!run.sourceError,technical:accepted(technical)&&technical.result.simple===true&&technical.result.scopePreserved===true&&technical.result.checks.length>0,
   design:!run.visualRequired||accepted(designer)&&imageAcceptance(run,designer)&&analysisAcceptance(run,designer),
   user:accepted(user)&&user.assignee==='user'&&imageAcceptance(run,user)&&analysisAcceptance(run,user),
   visual:!run.visualRequired||interaction&&run.viewports.every(viewport=>current.some(check=>check.images.some(image=>image.viewport===viewport))),game:gameplay,analysis:analysisReady(run)};

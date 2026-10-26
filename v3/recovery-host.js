@@ -1,0 +1,20 @@
+import {randomUUID} from 'node:crypto';
+import {recoverGoals} from './recovery.js';
+export const inject=['sessionPersistence','sessionController','fs'];
+export function apply(ctx,config={}){
+ ctx.effect(()=>{
+  const controller=new AbortController();
+  void recoverGoals(ctx,config,controller.signal).then(result=>{
+   if(controller.signal.aborted)return;
+   for(const agent of [...result.resumed,...result.maintenance]){
+    // A cold-resumed inbox may already contain undelivered teammate results.
+    // Those queued records do not start a driver: followup must wake it while
+    // preserving the inbox, even when it is nonempty.
+    const maintenance=result.maintenance.includes(agent);
+    agent.followup({id:randomUUID(),role:'user',source:{kind:'gvs-coordinator-continuation',form:'notice',summary:maintenance?'Restore the active goal interrupted by the authorized upgrade':'Restore the unfinished human goal after restart'},content:[{type:'text',text:`${maintenance?'The authorized GVS upgrade interrupted this previously running run. Its runId and exact pause timestamp match the maintenance record; this was not a human pause. Call gvs_resume.':'Harness restarted with this goal still active. Inspect and retry interrupted tasks; do not create a new run.'} Preserve the SAME agents, tasks and completed work. Read gvs_goal status and paginate gvs_task list. If goal tracking was added by this upgrade, assign the same User a consultation to map all real humanMessages into immutable requirements and infer expertise/staffingRationale. Create/reuse suitable specialists yourself, assign real discovery/implementation/review tasks and link them to requirements and issues. Restore the project preview if interrupted. Every required mismatch and missing function needs repair plus independent recheck. Reviews explicitly attest coveredRequirements/scopeReviewed and addressedIssues. Continue until gvs_finish returns verified; only an evidenced external dependency after all actionable work is exhausted permits a handoff.`}]});
+   }
+   console.info('GVS recovery:',JSON.stringify({resumed:result.resumed.length,maintenance:result.maintenance.length,errors:result.errors}));
+  }).catch(error=>{if(!controller.signal.aborted)console.warn('GVS recovery failed:',error.code??'unknown');});
+  return()=>controller.abort();
+ });
+}
