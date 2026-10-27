@@ -10,6 +10,8 @@
         disposalTimeoutMs: 5000
     - id: gvs-ui
       name: '@makame/dsh-gvs'
+    - id: gvs-models
+      name: '@makame/dsh-gvs/models'
     - id: gvs-coordinator
       name: '@makame/dsh-gvs/coordinator'
     - id: preset-gvs-local

@@ -1,7 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import vm from 'node:vm';
 const source=fs.readFileSync(new URL('../v3/client.js',import.meta.url),'utf8');
 function render({tasks=[],native=[],live={},roles=[{name:'builder',title:'Builder',sessionId:'child',state:'running'}],present=true,parallel}={}){
- let plugin,Board;const React={useState:value=>[value,()=>{}],createElement:(type,props,...children)=>({type,props:props??{},children:children.flat(Infinity).filter(x=>x!==false&&x!=null)})};
+ let plugin,Board;const React={useEffect:()=>{},useState:value=>[value,()=>{}],createElement:(type,props,...children)=>({type,props:props??{},children:children.flat(Infinity).filter(x=>x!==false&&x!=null)})};
  vm.runInNewContext(source,{window:{__ModuleLoader__:{load:definition=>{plugin=definition.factory(()=>React);}}}});
  plugin.apply({effect:()=>{},slots:{inject:(_name,fn)=>fn(),register:(_options,component)=>{Board=component;}}});
  const team={roles,tasks,status:'running',parallel,taskCounts:{done:0,total:tasks.length}},store={projectionsBySession:{root:{values:{gvsTeam:present?team:null,agentTeam:{tasks:native}}}}};let subscriptions=0;
