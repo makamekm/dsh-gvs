@@ -7,6 +7,9 @@ export function reusableDecision(run,id){
  const task=run.tasks.find(task=>task.id===id);
  return task?.assignee==='user'&&['brief','consultation'].includes(task.kind)&&task.state==='done'&&task.result?.verdict==='pass'&&task.result.decisionKey===decisionKey(run)?task:null;
 }
+export function availableDecisions(run){
+ return run.tasks.filter(task=>reusableDecision(run,task.id)).map(task=>({taskId:task.id,kind:task.kind,summary:task.result.summary.slice(0,600)}));
+}
 export function consultationKey(question,context=''){
  return createHash('sha256').update(question.trim()+'\0'+context.trim()).digest('hex');
 }

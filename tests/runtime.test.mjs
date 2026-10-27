@@ -23,6 +23,18 @@ function fixture(){
  async function consult(agent){let cached;const pending=call('gvs_ask_user',{question:'Confirm the exact goal'},agent).then(value=>(cached=value,value));await new Promise(resolve=>setImmediate(resolve));if(cached)return cached;let list=await call('gvs_task',{action:'list'});const question=list.tasks.find(task=>task.kind==='consultation'&&task.state==='running');assert.ok(question);await complete(question.id,actor('user'));return pending;}
  return {root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,effects,failNextSpawn:()=>{nextSpawnError=new Error('Temporary spawn failure');},changeSource:value=>{source=value;},get spawns(){return spawns;}};
 }
+test('specialists discover current reusable User IDs and Lead messages without weakening task completion',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Fix implementation',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});
+ const work=await f.call('gvs_task',{action:'create',title:'Bounded work',instructions:'Implement',kind:'work',assignee:'developer'}),agent=f.actor('developer');
+ const status=await f.call('gvs_ask_user',{action:'status'},agent);assert.equal(status.decisions[0].taskId,start.briefTaskId);assert.equal(status.total,1);
+ assert.ok(f.sent.find(item=>item.target==='developer').content[0].text.includes('"taskId":"'+start.briefTaskId+'"'),'Assignment includes exact reusable IDs');
+ const reused=await f.call('gvs_ask_user',{reuseTaskId:status.decisions[0].taskId},agent);assert.equal(reused.reused,true);
+ const sent=await f.call('gvs_agent',{action:'message',name:'Lead',message:'Current source checkpoint'},agent);assert.equal(sent.target,'lead');
+ await assert.rejects(f.call('gvs_task',{action:'complete',taskId:work.task.id,verdict:'pass',summary:'No explicit findings'},agent),/TOP-LEVEL/);assert.equal(f.tasks.get(work.task.id).status,'in_progress');
+ await assert.rejects(f.call('gvs_ask_user',{reuseTaskId:'not-a-decision'},agent),new RegExp('Current reusable IDs: '+start.briefTaskId));
+});
+
 test('host API defers tasks, forbids early execution and wakes the same role without duplicating work',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Fix arithmetic',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
  await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Small changes',capability:'edit'});

@@ -1,6 +1,24 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {motionHint,analysisPlan,parseAnalysisReport,analysisReady,analysisAcceptance,decodeAnalysisRunner} from '../v3/analysis.js';
+import {motionHint,analysisPlan,parseAnalysisReport,analysisReady,analysisAcceptance,decodeAnalysisRunner,decodeAnalysisOutput,MAX_ANALYSIS_STDOUT_BYTES} from '../v3/analysis.js';
 const plan=()=>({...analysisPlan({rationale:'The human sees stepping in a moving texture.',requirements:[{id:'motion',reason:'Visible stepping was reported',criterion:'No quantized texture steps or uneven frame cadence',method:'rendered-sequence'}]},true),version:1});
+test('truncated analysis stdout recovers the complete Native spill, preserves failed exits and records provenance',async()=>{
+ const raw={schema:'gvs.analysis/1',engine:'real',analyzer:'fixture',results:[]};
+ const bytes=Buffer.from('Actual process log\nGVS_ANALYSIS_RESULT:'+JSON.stringify(raw));
+ const result={isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:bytes.toString().slice(-12),truncated:true,spillPath:'/native/full-stdout.log'},stderr:{text:''}}};
+ let reads=0;const read=async(path,cap)=>{reads++;assert.equal(path,'/native/full-stdout.log');assert.equal(cap,MAX_ANALYSIS_STDOUT_BYTES);return bytes;};
+ const decoded=await decodeAnalysisOutput(result,read);assert.deepEqual(decoded.raw,raw);assert.equal(decoded.ok,true);assert.equal(decoded.outputSource.bytes,bytes.length);assert.match(decoded.outputSource.sha256,/^[a-f0-9]{64}$/);
+ result.value.exitCode=1;assert.equal((await decodeAnalysisOutput(result,read)).ok,false,'A recovered report never overrides the process failure');
+ result.value.stdout.text=bytes.toString();await decodeAnalysisOutput(result,()=>assert.fail('Complete retained final JSON needs no spill read'));assert.equal(reads,2);
+});
+test('missing, malformed, oversized and unreadable spill reports remain unaccepted',async()=>{
+ const result={isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'partial tail',truncated:true},stderr:{text:''}}};
+ await assert.rejects(decodeAnalysisOutput(result,()=>assert.fail()),/complete spill file is unavailable/);
+ result.value.stdout.spillPath='/native/full.log';
+ await assert.rejects(decodeAnalysisOutput(result,async()=>{throw Error('permission denied');}),/permission denied/);
+ await assert.rejects(decodeAnalysisOutput(result,async()=>Buffer.alloc(MAX_ANALYSIS_STDOUT_BYTES+1)),/8 MiB/);
+ await assert.rejects(decodeAnalysisOutput(result,async()=>Buffer.from('GVS_ANALYSIS_RESULT:{broken')),/Malformed/);
+ result.value.kind='background';await assert.rejects(decodeAnalysisOutput(result,()=>assert.fail('Never recover a background/unfinished process as completed')),/foreground/);
+});
 const report=()=>({schema:'gvs.analysis/1',engine:'test renderer',analyzer:'Compare rendered texture displacement and presentation timestamps',results:[{id:'motion',cases:[{name:'Rendered texture step cadence',source:'rendered-pixels',actual:0,expected:0,passed:true},{name:'Frame-time spike count',source:'frame-timing',actual:0,expected:0,passed:true}],samples:Array.from({length:32},(_,i)=>({viewport:'desktop',atMs:i*40,renderedPixelMetric:i*.25,frameTimeMs:16.7})),frames:Array.from({length:12},(_,i)=>({path:`capture-${i}.png`,viewport:'desktop',atMs:i*100}))}]});
 test('runner diagnostics preserve stderr and distinguish failed execution from missing or malformed JSON',()=>{
  assert.throws(()=>decodeAnalysisRunner({value:{kind:'foreground',exitCode:1,stdout:{text:''},stderr:{text:'AssertionError: focus was BODY'}}}),/failed \(exit 1\)[\s\S]*focus was BODY/);

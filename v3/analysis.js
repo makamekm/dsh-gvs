@@ -1,5 +1,20 @@
-export function decodeAnalysisRunner(result){
- const value=result.value,stdout=value?.stdout?.text??'',stderr=value?.stderr?.text??'';
+import {createHash} from 'node:crypto';
+export const MAX_ANALYSIS_STDOUT_BYTES=8*1024*1024;
+export async function decodeAnalysisOutput(result,readSpill){
+ try{return decodeAnalysisRunner(result);}catch(original){
+  const output=result.value?.stdout;
+  if(result.value?.kind!=='foreground'||!output?.truncated)throw original;
+  if(!output.spillPath)throw new Error(`${original.message}\nStdout was truncated and its complete spill file is unavailable. Emit a bounded final report; do not infer success from the retained tail.`);
+  try{
+   const bytes=await readSpill(output.spillPath,MAX_ANALYSIS_STDOUT_BYTES);
+   if(bytes.length>MAX_ANALYSIS_STDOUT_BYTES)throw new Error('Complete stdout exceeds the 8 MiB ingestion budget; keep full diagnostics in artifacts and emit a compact final report.');
+   const stdout=new TextDecoder('utf-8',{fatal:true}).decode(bytes);
+   return {...decodeAnalysisRunner(result,stdout),outputSource:{kind:'native-stdout-spill',path:output.spillPath,bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}};
+  }catch(error){throw new Error(`${original.message}\nComplete stdout recovery failed: ${error.message}\nNo analysis evidence accepted.`);}
+ }
+}
+export function decodeAnalysisRunner(result,stdout=result.value?.stdout?.text??''){
+ const value=result.value,stderr=value?.stderr?.text??'';
  const detail=(stderr||stdout||result.content?.filter(part=>part.type==='text').map(part=>part.text).join('\n')||'No process output.').slice(-3000);
  if(value?.kind!=='foreground')throw new Error(`Analysis must finish in foreground.${result.isError?' Execution failed: '+detail:''}`);
  const ok=!result.isError&&value.exitCode===0&&!value.timedOut&&!value.aborted&&value.signal==null;

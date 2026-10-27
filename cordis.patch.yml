@@ -230,7 +230,7 @@
               readImage: true
               write: true
               edit: true
-              readLimit: 180
+              readLimit: 2000
               readMaxBytes: 22000
           - id: fs-search
             name: '@deepseek-ai/dsh-tool-fs-search'
