@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {installModelSelection} from '@deepseek-ai/dsh-agent';
-import {ModelRouting,emptyPolicy,foldRouting,inheritSelection,validatePolicy} from '../v3/models.js';
+import {ModelRouting,emptyPolicy,foldRouting,inheritSelection,validatePolicy,providerRecoveryCandidates,readFailedSelection} from '../v3/models.js';
 const selection=(model='large',reasoningEffort='high')=>({provider:'test',model,...(reasoningEffort?{reasoningEffort}:{})});
 const catalog={groups:[{id:'test',models:[{id:'large',reasoning:{efforts:[{id:'high'},{id:'low'}]}},{id:'small',reasoning:{efforts:[{id:'low'}]}}]}]};
 function fixture(saved){
@@ -28,6 +28,24 @@ test('team and individual edits update resident workers without waking them or c
  assert.deepEqual(f.manager.workers.get('a').ref.current,selection());assert.deepEqual(f.manager.workers.get('b').ref.current,selection('large','low'));
  await f.manager.set(f.root,{revision:3,target:'qa',choice:{}});assert.deepEqual(f.manager.workers.get('a').ref.current,selection('large','low'));
  assert.equal(f.a.session.events.length,4,'No redundant selection event on unchanged steps');
+});
+
+test('human selection prepares retained sleeping teammates without spawning a turn',async()=>{
+ const f=fixture();f.manager.detach('b');let loads=0;f.manager.api.load=async id=>{assert.equal(id,'b');loads++;return f.b;};
+ await f.manager.set(f.root,{revision:0,target:'team',choice:{provider:'test',model:'small',reasoningEffort:'low'}});assert.equal(loads,1);assert.deepEqual(f.manager.workers.get('b').ref.current,selection('small','low'));assert.equal(f.b.session.events.at(-1).type,'model/selection');
+});
+
+test('model-change recovery selects only actual provider-stopped assignments whose effective route changed',()=>{
+ const task={id:'quota',assignee:'qa',state:'blocked',result:{summary:'Agent turn ended (error) without delivering'},failedModel:selection()},run={status:'running',goal:{autonomous:true},tasks:[task],diagnostics:[{taskId:'quota',agent:'qa',tool:'agent-turn',message:'429 Token Plan usage limit reached',lastAt:1}]},policy={...emptyPolicy(),revision:4,defaults:selection('small','low')};
+ assert.deepEqual(providerRecoveryCandidates(run,policy,selection(),()=>null),[task]);assert.deepEqual(providerRecoveryCandidates(run,{...policy,overrides:{qa:selection()}},selection(),()=>null),[]);
+ assert.deepEqual(providerRecoveryCandidates({...run,status:'paused'},policy,selection(),()=>null),[]);assert.deepEqual(providerRecoveryCandidates({...run,diagnostics:[{...run.diagnostics[0],message:'A real code assertion failed'}]},policy,selection(),()=>null),[]);
+ task.modelRecovery={revision:4};assert.deepEqual(providerRecoveryCandidates(run,policy,selection(),()=>null),[]);delete task.modelRecovery;delete task.failedModel;assert.deepEqual(providerRecoveryCandidates(run,policy,selection(),()=>null),[]);assert.deepEqual(providerRecoveryCandidates(run,policy,selection(),()=>selection()),[task]);
+ assert.deepEqual(providerRecoveryCandidates({...run,tasks:[{...task,result:{summary:'Actual product test failed'}}]},policy,selection(),()=>selection()),[]);
+});
+
+test('cold provider-failure provenance reads the request header before the error without activating a child or using a newer model',async()=>{
+ const calls=[],controller={projections:async()=>({asOfSeq:20}),page:async request=>{calls.push(request);return request.throughSeq===20?{hasMore:true,records:[{event:{type:'request/header',seq:15,time:300,data:{header:{config:{provider:'new',model:'luna'}}}}}]}:{hasMore:false,records:[{event:{type:'request/header',seq:5,time:100,data:{header:{config:{provider:'limited',model:'old'}}}}}]};},resolveAgent:()=>assert.fail('Child ownership must not be bypassed to inspect its failed request')};
+ assert.deepEqual(await readFailedSelection(controller,'parent','child',200),{provider:'limited',model:'old'});assert.equal(calls.length,2);assert.equal(calls[0].address.kind,'subagent');assert.equal(calls[1].throughSeq,14);
 });
 test('bad route, effort, stale browser or provider failure preserves the prior policy',async()=>{
  const f=fixture();

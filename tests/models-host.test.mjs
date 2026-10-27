@@ -14,3 +14,18 @@ test('Host composes the official Agent hooks, human-only commands, replay and ch
  assert.deepEqual(await childHooks.get('agent/request')({},async()=>({})),{provider:'test',model:'large',reasoningEffort:'low'});
  cleanup();assert.equal(childHooks.size,0);
 });
+
+test('only a successfully committed human model command attempts provider recovery and human pause prevents a coordinator wake',async()=>{
+ let definition,projection,state,continued=true;const hooks=new Map(),calls=[],sent=[];
+ const root={id:'root',options:{provider:'test',model:'large'},ctx:{tools:{execute:async input=>{calls.push(input);return {value:{continued,recovered:['same-task']}};}}},session:{header:{agentPreset:'gvs-local'},requestHeader:()=>null},steer:message=>sent.push(message)};
+ const ctx={commands:{register:value=>definition=value},agents:{list:()=>[root],get:id=>id==='root'?root:null},agentTeams:{tryMembership:()=>undefined,listMembers:()=>[]},sessionController:{modelCatalog:async()=>({groups:[{id:'test',models:[{id:'large'},{id:'small'}]}]})},llm:{resolveCallConfig:async value=>value},sessionProjections:{register:value=>{projection=value;state=value.init();},stateOf:(_session,key)=>key==='gvsModelRouting'?state:null},on:(name,handler)=>hooks.set(name,handler),effect(){}};
+ await apply(ctx);
+ async function command(id,request,kind='success'){
+  const run={type:'command/run',data:{commandId:id,name:'gvs-models',args:JSON.stringify(request)}};state=projection.apply(state,run);hooks.get('session/event')(root.session.id?root.session:{id:'root'},run);
+  if(kind==='success')assert.equal((await definition.handler({agent:root,rawInput:JSON.stringify(request)})).kind,'success');
+  const done={type:'command/done',data:{commandId:id,kind}};state=projection.apply(state,done);hooks.get('session/event')({id:'root'},done);await new Promise(resolve=>setImmediate(resolve));
+ }
+ await command('one',{action:'set',revision:0,target:'team',choice:{provider:'test',model:'small'}});assert.equal(calls.length,1);assert.deepEqual(calls[0].arguments,{reason:'model-change'});assert.equal(sent.length,1);
+ await command('failed',{action:'set',revision:1,target:'team',choice:{provider:'test',model:'large'}},'error');assert.equal(calls.length,1);
+ continued=false;await command('paused',{action:'set',revision:1,target:'team',choice:{provider:'test',model:'large'}});assert.equal(calls.length,2);assert.equal(sent.length,1);
+});

@@ -11,12 +11,13 @@ import {previewState,needsPreview} from './preview.js';
 import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus,visualStates} from './visual.js';
 import {USER_TESTING,planUserJourneys,userJourneyStatus,scenarioKey,userProbeInput} from './journeys.js';
 import {recordToolFailure,recordToolSuccess,toolIdentity,diagnosticStatus} from './diagnostics.js';
+import {providerRecoveryCandidates,providerFailureFor,readFailedSelection,inheritSelection} from './models.js';
 import {parallelFields,parallelBlocker,parallelStatus,taskAccess,writeAllowed,validateWriteScopes,evidencePath} from './parallel.js';
 import {assignmentDelivery} from './delivery.js';
 import {prepareCodePlan,stalePlanFiles,planSources,needsCodePlan,missingPlanOutputs,migrateCodePlan} from './planning.js';
 import {taskArtifacts} from './artifacts.js';
 
-export const inject=['tools','agentTeams','subagents','fs','workingDirectory','sandboxPolicy','attachments','llm','jobs','sessionProjections'];
+export const inject=['tools','agentTeams','agents','sessionController','subagents','fs','workingDirectory','sandboxPolicy','attachments','llm','jobs','sessionProjections'];
 const entries=new Map(),instance=randomUUID();
 const object=properties=>({type:'object',additionalProperties:false,properties});
 const text=(maxLength=4000)=>({type:'string',maxLength});
@@ -588,10 +589,25 @@ export function apply(ctx,config={}){
    task.state='waiting';delete task.result;recovered.push(task.id);
   }await commit(entry);await schedule(entry,signal);return recovered;
  }
- register('gvs_recover','Recover only service-interrupted assignments of an already active autonomous goal. Never resumes a human pause or replaces agents/tasks.',{},[],async(_args,exec)=>{
+ register('gvs_recover','Recover service interruptions, or provider-failed tasks after a human model change actually changes their effective route. Never resumes a human pause or replaces agents/tasks.',{reason:{type:'string',enum:['service','model-change']}},[],async(args,exec)=>{
   const {member,entry}=await current(exec);lead(member);
   if(entry.run.status!=='running'||!entry.run.goal?.autonomous||entry.run.goal?.handoff)return {status:entry.run.status,recovered:[],continued:false};
   if(entry.abort.signal.aborted)entry.abort=new AbortController();entry.suspending=false;delete entry.run.suspended;
+  if(args.reason==='model-change'){
+   const policy=ctx.sessionProjections.stateOf(entry.root.session,'gvsModelRouting')?.policy;
+   if(!policy)return {status:entry.run.status,recovered:[],continued:true};
+   const failedSelections=new Map();
+   for(const task of entry.run.tasks.filter(t=>t.state==='blocked'&&!t.failedModel)){
+    const failure=providerFailureFor(entry.run,task),role=roleOf(entry,task.assignee);
+    if(failure&&role?.sessionId&&ctx.sessionController)failedSelections.set(task.id,await readFailedSelection(ctx.sessionController,entry.root.id,role.sessionId,failure.lastAt,exec.signal));
+   }
+   const base=entry.root.session.requestHeader?.()?.config??entry.root.options,lastUsed=(_name,task)=>failedSelections.get(task.id),recovered=[];
+   for(const task of providerRecoveryCandidates(entry.run,policy,base,lastUsed)){
+    const native=ctx.agentTeams.getTask(entry.root,task.id);if(['in_progress','completed'].includes(native.status))await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:native.status==='completed'?'reopen':'release'});
+    task.lastFailure=task.result;task.state='waiting';delete task.result;task.modelRecovery={revision:policy.revision,at:new Date().toISOString(),from:task.failedModel??lastUsed(task.assignee,task),to:inheritSelection(base,policy.defaults,policy.overrides[task.assignee])};recovered.push(task.id);
+   }
+   await commit(entry);await schedule(entry,exec.signal);return {status:entry.run.status,recovered,continued:true};
+  }
   const recovered=await restoreTasks(entry,exec.signal,true);return {status:entry.run.status,recovered,continued:entry.run.status==='running'};
  });
  register('gvs_resume','Resume saved GVS tasks after the user requests continuation; the same named agents keep their conversations.',{},[],async(_args,exec)=>{
@@ -675,7 +691,7 @@ export function apply(ctx,config={}){
    if(event.type==='turn/start')role.executionTurn=event.data.turn;
    const task=entry.run.tasks.find(task=>task.assignee===role.name&&task.state==='running');if(!task)continue;
    if(event.type==='user/message'&&Number.isInteger(role.executionTurn)&&event.data.content.some(part=>part.type==='text'&&part.text.includes(task.nonce)))task.executionTurn=role.executionTurn;
-   if(event.type==='turn/end'&&task.executionTurn===event.data.turn){task.state='blocked';task.result={verdict:'blocked',summary:`Agent turn ended (${event.data.reason.kind}) without completing its assigned task. Inspect its chat and retry this task.`,findings:[],revision:entry.run.revision};
+   if(event.type==='turn/end'&&task.executionTurn===event.data.turn){task.failedModel=ctx.sessionProjections?.stateOf(session,'modelSelection')?.lastUsed??session.requestHeader?.()?.config??task.failedModel;task.state='blocked';task.result={verdict:'blocked',summary:`Agent turn ended (${event.data.reason.kind}) without completing its assigned task. Inspect its chat and retry this task.`,findings:[],revision:entry.run.revision};
     const {item,notify}=recordToolFailure(entry.run,{agent:role.name,taskId:task.id,tool:'agent-turn',identity:'teammate-turn',message:event.data.reason.error?.message??task.result.summary});
     if(notify)try{entry.root.steer?.({id:randomUUID(),role:'user',source:{kind:'gvs-tool-diagnostics',form:'notice',summary:'A teammate stopped before delivering its task'},content:[{type:'text',text:`GVS AGENT ERROR ${JSON.stringify(item)}. Inspect this agent and preserve the same task. Repair a concrete configuration/protocol issue or retry a transient failure; do not wait for the human to forward errors and do not claim delivery.`}]});}catch{}
     commit(entry).catch(()=>{});}

@@ -370,6 +370,16 @@ test('automatic recovery reuses interrupted assignments but never resumes a huma
  const blocked=await f.call('gvs_recover');assert.deepEqual(blocked.recovered,[]);assert.equal((await f.call('gvs_task',{action:'list',taskId:start.briefTaskId})).tasks[0].state,'blocked');
 });
 
+test('a human route change recovers the same provider-failed task once and preserves explicit pauses',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Recover after a human model switch',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});const work=await f.call('gvs_task',{action:'create',title:'Implement',instructions:'Preserve existing work',kind:'work',assignee:'developer'}),actor=f.actor('developer'),old={provider:'limited',model:'old'},policy={schema:1,revision:2,defaults:{provider:'available',model:'luna'},overrides:{}};
+ f.ctx.sessionProjections={stateOf:(_session,key)=>key==='gvsModelRouting'?{policy}:key==='modelSelection'?{lastUsed:old}:undefined};
+ f.hooks['session/event']({id:actor.id},{type:'turn/start',data:{turn:1}});f.hooks['session/event']({id:actor.id},{type:'user/message',data:{content:[{type:'text',text:work.task.nonce}]}});f.hooks['session/event']({id:actor.id},{type:'turn/end',data:{turn:1,reason:{kind:'error',error:{message:'429 Token Plan usage limit reached'}}}});await new Promise(resolve=>setImmediate(resolve));
+ const recovered=await f.call('gvs_recover',{reason:'model-change'});assert.deepEqual(recovered.recovered,[work.task.id]);assert.equal(f.tasks.get(work.task.id).status,'in_progress');assert.equal(f.actor('developer').id,actor.id);assert.equal(f.spawns,2);
+ const saved=JSON.parse([...f.files.values()][0]).tasks.find(t=>t.id===work.task.id);assert.deepEqual(saved.modelRecovery.from,old);assert.deepEqual(saved.modelRecovery.to,policy.defaults);assert.equal(saved.lastFailure.verdict,'blocked');assert.deepEqual((await f.call('gvs_recover',{reason:'model-change'})).recovered,[]);
+ await f.call('gvs_pause');assert.equal((await f.call('gvs_recover',{reason:'model-change'})).continued,false);
+});
+
 test('interrupted planned edits continue from their partial source, preserving the original baseline and requiring new checks',async()=>{
  const f=fixture({requireCoordinatorPlan:true}),start=await f.call('gvs_run',{task:'Finish the planned implementation after restart',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
  await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});

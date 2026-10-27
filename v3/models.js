@@ -22,6 +22,26 @@ export function inheritSelection(base,defaults={},override={}){
  if(!route?.provider||!route.model)throw new Error('Coordinator model is not configured');
  return {provider:route.provider,model:route.model,...(effort==null?{}:{reasoningEffort:effort})};
 }
+export function providerFailureFor(run,task){const last=(run.diagnostics??[]).filter(d=>d.taskId===task.id&&d.agent===task.assignee&&d.tool==='agent-turn').sort((a,b)=>b.lastAt-a.lastAt)[0];return last&&/429|rate.?limit|quota|usage limit|overload|provider.{0,30}(?:configured|unavailable)|invalid.api.key|insufficient.credit/iu.test(last.message)?last:undefined;}
+export async function readFailedSelection(controller,rootId,childId,at,signal){
+ const projection=await controller.projections({sessionId:childId},signal);let throughSeq=projection.asOfSeq;
+ for(let pageIndex=0;pageIndex<3;pageIndex++){
+  const page=await controller.page({address:{kind:'subagent',parentSessionId:rootId,childSessionId:childId,mode:'continuable'},throughSeq,maxMessages:40},signal),events=page.records.map(r=>r.event);
+  const header=events.filter(e=>e.type==='request/header'&&e.time<=at).at(-1)?.data.header.config;
+  if(header?.provider&&header.model)return {provider:header.provider,model:header.model,...(header.reasoningEffort?{reasoningEffort:header.reasoningEffort}:{})};
+  if(!page.hasMore||!events.length)break;throughSeq=Math.min(...events.map(e=>e.seq))-1;
+ }
+ return null;
+}
+export function providerRecoveryCandidates(run,policy,base,lastUsed){
+ if(run.status!=='running'||!run.goal?.autonomous||run.goal?.handoff)return [];
+ return run.tasks.filter(task=>{
+  if(task.state!=='blocked'||task.modelRecovery?.revision===policy.revision||!/^Agent turn ended \(error\)/.test(task.result?.summary??''))return false;
+  if(!providerFailureFor(run,task))return false;
+  const before=task.failedModel??lastUsed(task.assignee,task),after=inheritSelection(base,policy.defaults,policy.overrides[task.assignee]);
+  return !!before?.provider&&!!before.model&&(before.provider!==after.provider||before.model!==after.model);
+ });
+}
 export function foldRouting(state,event){
  if(event.type==='command/run'&&event.data.name==='gvs-models'){
   let request;try{request=JSON.parse(event.data.args??'{}');}catch{return state;}
@@ -88,6 +108,12 @@ export class ModelRouting {
   }
   return {type:'gvs-model-routing',sessionId:root.id,policy,coordinator:this.api.coordinator(root),agents};
  }
+ async refreshMembers(root){
+  for(const member of this.api.members(root)){
+   if(member.role==='lead')continue;
+   try{const agent=this.workers.get(member.id)?.agent??await this.api.load?.(member.id);if(agent)await this.prepare(agent);}catch(error){const worker=this.workers.get(member.id);if(worker)worker.error=error.message;}
+  }
+ }
  async set(root,request){
   // Revision fencing makes edits from two open browsers explicit instead of losing one.
   const previous=this.queues.get(root.id)??Promise.resolve();
@@ -104,8 +130,7 @@ export class ModelRouting {
    // Resolve before committing; a broken provider cannot overwrite saved preferences.
    await this.resolve(root,request.target==='team'?'':request.target,candidate,catalog);
    this.policies.set(root.id,candidate);
-   const workers=[...this.workers.values()].filter(worker=>worker.root.id===root.id);
-   await Promise.all(workers.map(async worker=>{try{await this.prepare(worker.agent);}catch(error){worker.error=error.message;}}));
+   await this.refreshMembers(root);
    return this.status(root);
   });
   this.queues.set(root.id,operation);try{return await operation;}finally{if(this.queues.get(root.id)===operation)this.queues.delete(root.id);}
