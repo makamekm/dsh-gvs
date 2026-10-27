@@ -3,7 +3,7 @@ import {exercised,scenarioKey} from './journeys.js';
 import {validateVisualReview,visualAssessmentFindings} from './visual.js';
 import {requiresWebVerification} from './project-qa.js';
 
-export const RESPONSIVE_TESTING='For assigned WEB/browser UI QA/design/User REVIEW tasks only; native engines/apps and CLI/bots use their actual project adapters (never briefs/consultations, editing or source-only tasks), use gvs_responsive status, check and review. Work through the current device/parameter/CSS-boundary matrix in batches of at most two cases. Observe first, then replay real journeys with actionsByCase when controls differ. Personally inspect every returned initial/intermediate/error/final frame and classify its warning candidates using review; these saved reviews avoid reciting hundreds of image IDs in the final task completion. A failed or stale capture is not proof. Report defects immediately with review verdict:revise and findings; do not wait for the entire matrix. Emulation is not a real phone, and bundled WebKit is not certification on physical Safari. Missing browser engines and untested conditions must remain explicit.';
+export const RESPONSIVE_TESTING='For assigned WEB/browser UI QA/design/User REVIEW tasks only; native engines/apps and CLI/bots use their actual project adapters (never briefs/consultations, editing or source-only tasks), use gvs_responsive status, check and review. Work through the current device/parameter/CSS-boundary matrix in batches of at most two cases. Observe first, then replay real journeys with actionsByCase when controls differ. Personally inspect every returned initial/intermediate/error/final frame and classify its warning candidates using review; these saved reviews avoid reciting hundreds of image IDs in the final task completion. A failed or stale capture is not proof. Report defects immediately with review verdict:revise and findings; do not wait for the entire matrix. If source revision changes during a check, inspect its existing pixels and submit own negative findings as historical-only revise; never pass it as current. action:states without checkId lists exact saved capture IDs, including historical/failed ones. Emulation is not a real phone, and bundled WebKit is not certification on physical Safari. Missing browser engines and untested conditions must remain explicit.';
 const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const preset=(id,width,height,extra={})=>({id,name:width<1100?'mobile':'desktop',width,height,deviceScaleFactor:width<1100?2:1,isMobile:width<1100,hasTouch:width<1100,colorScheme:'light',reducedMotion:'no-preference',contrast:'no-preference',forcedColors:'none',rootFontScale:1,...extra});
 export const DEVICE_CASES=[
@@ -57,7 +57,7 @@ export function responsiveStatus(run,task){
  for(const c of run.responsiveChecks??[])if(c.taskId===task.id&&c.capturedBy===task.assignee&&c.revision===run.revision){const key=JSON.stringify([c.caseId,c.caseKey,c.scenarioId,c.scenarioKey]),group=grouped.get(key)??[];group.push(c);grouped.set(key,group);}
  for(const item of matrix.cases)for(const scenario of scenarios){
   const checks=grouped.get(JSON.stringify([item.id,item.key,scenario.id,scenarioKey(scenario)]))??[];
-  const accepted=checks.some(c=>c.ok&&c.views?.length===1&&exercised(c.views[0],scenario.category)&&c.views[0].steps?.some(s=>s.passed&&!s.kind.startsWith('assert')&&s.inputEvents?.some(e=>e.trusted))&&c.inspection?.verdict==='pass'&&c.inspection.revision===run.revision);
+  const accepted=checks.some(c=>c.ok&&c.views?.length===1&&exercised(c.views[0],scenario.category)&&c.views[0].steps?.some(s=>s.passed&&!s.kind.startsWith('assert')&&s.inputEvents?.some(e=>e.trusted))&&c.inspection?.verdict==='pass'&&c.inspection.historical!==true&&c.inspection.revision===run.revision);
   if(accepted)completed++;else missing.push({caseId:item.id,scenarioId:scenario.id,reason:checks.some(c=>c.ok)?'Needs own successful interaction trace and explicit visual inspection':'Needs current successful capture and actual journey'});
  }
  return {required:true,ready:missing.length===0&&!matrix.limits.truncated&&!matrix.limits.unreadableStylesheets.length,completed,total:matrix.cases.length*scenarios.length,caseCount:matrix.cases.length,scenarioCount:scenarios.length,missing,limits:matrix.limits};
@@ -67,15 +67,18 @@ export function validateResponsiveAcceptance(run,task,result){
  const status=responsiveStatus(run,task);if(!status.ready)throw new Error(`Responsive acceptance is incomplete: ${status.completed}/${status.total} case/scenario pairs inspected. Read gvs_responsive status, execute check batches, and save review judgements. First missing: ${JSON.stringify(status.missing.slice(0,4))}. ${status.limits?.truncated||status.limits?.unreadableStylesheets.length?'Stylesheet discovery also has explicit coverage gaps; preserve/report them, never label the scan complete.':''} Report observed defects with revise immediately; never create fake passes to fill the matrix.`);
 }
 export function inspectResponsiveCheck(run,task,check,input){
- if(check.taskId!==task.id||check.capturedBy!==task.assignee||check.revision!==run.revision)throw new Error('Inspect only your own current responsive capture for this assigned task. Stale or another role evidence cannot substitute.');
- const assessmentFindings=visualAssessmentFindings(run,{...task,receivedImages:[]},input,run.responsiveChecks??[check]);
+ if(check.taskId!==task.id||check.capturedBy!==task.assignee)throw new Error('Inspect only your own current responsive capture for this assigned task. Another role or task cannot substitute.');
+ const historical=check.revision!==run.revision;
+ if(historical&&input.verdict!=='revise')throw new Error(`A stale responsive capture cannot pass inspection (capture revision ${check.revision}; current ${run.revision}). Read its existing pixels with gvs_responsive action:states/checkId. Negative feedback may be saved with verdict:revise as historical-only; current acceptance needs a fresh real capture.`);
+ const assessmentFindings=visualAssessmentFindings(historical?{...run,revision:check.revision}:run,{...task,receivedImages:[]},input,run.responsiveChecks??[check]);
  input={...input,findings:Array.isArray(input.findings)?[...new Set([...input.findings,...assessmentFindings])]:input.findings};
  if(!['pass','revise'].includes(input.verdict)||!Array.isArray(input.findings)||input.verdict==='pass'&&input.findings.length||input.verdict==='revise'&&!input.findings.length)throw new Error('Responsive review needs pass with findings:[], or revise with concrete defects/blockers.');
  if(input.verdict==='pass'){
   if(!check.ok)throw new Error('A failed responsive capture cannot pass inspection. Preserve failure images, fix the invocation/product and rerun the same case.');
   validateVisualReview({...run,visualPolicy:1,userTestingPolicy:0,visualChecks:[check],viewports:check.views.map(v=>v.viewport)}, {...task,kind:'review',receivedImages:[]},{...input,revision:run.revision});
  }
- check.inspection={verdict:input.verdict,findings:input.findings,assessmentFindings,observations:input.observations??[],images:input.images??[],visualReview:input.visualReview??null,revision:run.revision,at:Date.now()};return check.inspection;
+ const findings=historical?input.findings.map(f=>`Historical capture revision ${check.revision}; not current acceptance; verify against current product before resolution: ${f}`):input.findings;
+ check.inspection={verdict:input.verdict,findings,assessmentFindings,observations:input.observations??[],images:input.images??[],visualReview:input.visualReview??null,revision:check.revision,reviewedAtRevision:run.revision,...(historical?{historical:true,acceptanceEvidence:false}:{}),at:Date.now()};return check.inspection;
 }
 export function responsiveRunReady(run){
  if(!run.responsivePolicy||!requiresWebVerification(run)||run.visualRequired===false)return true;

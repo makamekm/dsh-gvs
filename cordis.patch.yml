@@ -79,9 +79,11 @@
                 returned initial/intermediate/error/final frame and classify its warning candidates using
                 review; these saved reviews avoid reciting hundreds of image IDs in the final task completion.
                 A failed or stale capture is not proof. Report defects immediately with review verdict:revise
-                and findings; do not wait for the entire matrix. Emulation is not a real phone, and bundled
-                WebKit is not certification on physical Safari. Missing browser engines and untested
-                conditions must remain explicit.
+                and findings; do not wait for the entire matrix. If source revision changes during a check,
+                inspect its existing pixels and submit own negative findings as historical-only revise; never
+                pass it as current. action:states without checkId lists exact saved capture IDs, including
+                historical/failed ones. Emulation is not a real phone, and bundled WebKit is not certification
+                on physical Safari. Missing browser engines and untested conditions must remain explicit.
 
                 PARALLEL DELIVERY: actively look for independent runnable branches whenever slots are free.
                 Use gvs_parallel status to see real dependencies, busy agents, file/resource conflicts and

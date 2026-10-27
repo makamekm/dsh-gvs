@@ -31,11 +31,20 @@ test('actual stylesheet breakpoints add before/at/after cases, accumulate dynami
 test('capture is not inspection; missing pixels/warnings, failed/stale and another role evidence cannot satisfy the matrix',()=>{
  const run=runFixture(),task=taskFixture(),item=responsiveMatrix(run).cases[0],check=captured(run,task,item);run.responsiveChecks.push(check);
  assert.equal(responsiveStatus(run,task).completed,0);assert.throws(()=>inspectResponsiveCheck(run,task,check,{...inspection(check),images:[]}),/every planned viewport/);
- assert.throws(()=>inspectResponsiveCheck(run,task,{...check,capturedBy:'qa'},inspection(check)),/own current/);assert.throws(()=>inspectResponsiveCheck(run,task,{...check,revision:3},inspection(check)),/own current/);
+ assert.throws(()=>inspectResponsiveCheck(run,task,{...check,capturedBy:'qa'},inspection(check)),/own current/);assert.throws(()=>inspectResponsiveCheck(run,task,{...check,revision:3},inspection(check)),/stale responsive capture cannot pass/);
  assert.throws(()=>inspectResponsiveCheck(run,task,{...check,ok:false},inspection(check)),/failed responsive/);
  const warning={id:'logo-over-button',kind:'overlap',targets:[{label:'Brand'},{label:'Facebook'}],images:[check.images[0].attachment.attachmentId]};check.views[0].layout.warnings=[warning];assert.throws(()=>inspectResponsiveCheck(run,task,check,inspection(check)),/Classify/);
  const revised=inspectResponsiveCheck(run,task,check,{verdict:'revise',findings:['The Facebook button visibly covers the logo.'],images:[warning.images[0]]});assert.equal(revised.verdict,'revise');assert.equal(responsiveStatus(run,task).completed,0);
  check.views[0].layout.warnings=[];inspectResponsiveCheck(run,task,check,inspection(check));assert.equal(responsiveStatus(run,task).completed,1);assert.throws(()=>validateResponsiveAcceptance(run,task,{verdict:'pass'}),/incomplete/);
+});
+
+test('source revision drift never discards own negative feedback, but historical or foreign evidence cannot pass the current matrix',()=>{
+ const run=runFixture(),task=taskFixture(),item=responsiveMatrix(run).cases[0],check=captured(run,task,item);run.responsiveChecks=[check];const pixels=structuredClone(check.images),originalRevision=check.revision,image=check.images[0].attachment.attachmentId;check.views[0].layout.warnings=[{id:'actual-old-overlap',kind:'overlap',images:[image]}];run.revision++;
+ const feedback={...inspection(check),verdict:'revise',findings:['The captured dialog extends beyond its phone viewport; current state needs an independent recheck.'],observations:['The local-entry action itself succeeded.'],visualReview:{checked:VISUAL_CHECKS,assessments:[{warningId:'actual-old-overlap',imageId:image,disposition:'defect',reason:'The actual older screenshot shows the same dialog edge cutting the text.'}]}};
+ const result=inspectResponsiveCheck(run,task,check,feedback);assert.equal(result.historical,true);assert.equal(result.acceptanceEvidence,false);assert.equal(result.revision,originalRevision);assert.equal(result.reviewedAtRevision,run.revision);assert.match(result.findings[0],/^Historical capture revision/);assert.deepEqual(check.images,pixels);assert.equal(check.revision,originalRevision);assert.equal(responsiveStatus(run,task).completed,0);
+ assert.equal(result.findings.length,2);assert.match(result.findings[1],/actual older screenshot/);assert.ok(!result.findings.some(f=>f.includes('Unverified')),'Historic own warning provenance is preserved without pretending the pixels are current.');
+ const originalFinding=result.findings[0];run.revision++;assert.equal(inspectResponsiveCheck(run,task,check,feedback).findings[0],originalFinding,'Repeated historical feedback has stable obligation identity despite other source edits.');
+ assert.throws(()=>inspectResponsiveCheck(run,task,check,{...feedback,verdict:'pass',findings:[]}),/cannot pass/);assert.throws(()=>inspectResponsiveCheck(run,task,{...check,capturedBy:'qa'},feedback),/own current/);assert.throws(()=>inspectResponsiveCheck(run,task,{...check,taskId:'another-task'},feedback),/own current/);
 });
 
 test('saved per-batch inspections cover the current matrix without a giant final citation list, but QA/User remain independent and stale evidence is rejected',()=>{

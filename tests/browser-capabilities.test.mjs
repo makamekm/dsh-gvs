@@ -12,7 +12,7 @@ test('browser diagnostics report the actual selected module, version and executa
 });
 test('missing engine executables retain actual runtime provenance and never claim a launch',async t=>{
  const f=await fixture(t,{binary:false}),rows=await browserCapabilities({browserModule:f.file});
- for(const row of rows.filter(r=>r.engine!=='chromium')){assert.equal(row.available,false);assert.equal(row.reason,'ENOENT');assert.equal(row.runtime.modulePath,f.file);assert.equal(row.runtime.executablePath,f.executable);}assert.ok(f.module.launches<=1);
+ for(const row of rows.filter(r=>r.engine!=='chromium')){assert.equal(row.available,false);assert.equal(row.reason,'ENOENT');assert.equal(row.runtime.modulePath,f.file);assert.equal(row.runtime.executablePath,f.executable);assert.equal(row.failure.stage,'stat-executable');assert.equal(row.failure.syscall,'stat');assert.equal(row.failure.path,f.executable);}assert.ok(f.module.launches<=1);
 });
 test('an invalid configured module reports the real fallback instead of pretending the requested path was used',async()=>{
  const configured=path.resolve('nonexistent-runtime/index.mjs'),resolved=await resolveBrowserRuntime({browserModule:configured});assert.notEqual(resolved.modulePath,configured);assert.equal(resolved.source,'package');assert.equal(typeof resolved.type.launch,'function');await assert.rejects(resolveBrowserRuntime({browserEngine:'unity'}),/actual Playwright engine/);

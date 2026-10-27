@@ -79,11 +79,11 @@ export async function resolveBrowserRuntime(config={}) {
 async function browserRuntime(config){return (await resolveBrowserRuntime(config)).type;}
 const capabilityProbes=new Map();
 export async function browserCapabilities(config={}){
- const rows=[];for(const engine of ['chromium','firefox','webkit']){let runtime;try{
+ const rows=[];for(const engine of ['chromium','firefox','webkit']){let runtime,stage='resolve-runtime';try{
   const resolved=await resolveBrowserRuntime({...config,browserEngine:engine}),type=resolved.type,file=engine==='chromium'?(await browserExecutable(config)??type.executablePath()):type.executablePath();
   let packageName=null,packageVersion=null;try{const pkg=JSON.parse(await fs.readFile(path.join(path.dirname(resolved.modulePath),'package.json'),'utf8'));packageName=pkg.name??null;packageVersion=pkg.version??null;}catch{}
   runtime={modulePath:resolved.modulePath,source:resolved.source,packageName,packageVersion,executablePath:file};
-  const stat=await fs.stat(file),key=JSON.stringify([resolved.modulePath,packageVersion,engine,file,stat.size,stat.mtimeMs]);
+  stage='stat-executable';const stat=await fs.stat(file),key=JSON.stringify([resolved.modulePath,packageVersion,engine,file,stat.size,stat.mtimeMs]);stage='launch-and-settings';
   let cached=capabilityProbes.get(key);
   if(!cached||Date.now()-cached.at>60000){cached={at:Date.now(),promise:(async()=>{let browser;try{
    browser=await type.launch({headless:true,executablePath:file,...(engine==='chromium'?{args:renderArgs}:{}),timeout:10000});
@@ -95,7 +95,7 @@ export async function browserCapabilities(config={}){
    return {engine,available:true,features,...(featureError?{featureError}:{}),evidence:'Actual isolated launch, screenshot and parameter/keyboard probes. Physical-device equivalence is not claimed.'};
   }catch(error){return {engine,available:false,reason:clip(error.message,500)};}finally{await browser?.close().catch(()=>{});}})()};capabilityProbes.set(key,cached);}
   rows.push({...await cached.promise,runtime});
- }catch(error){rows.push({engine,available:false,reason:clip(error.code??error.message,500),...(runtime?{runtime}:{})});}}return rows;
+ }catch(error){rows.push({engine,available:false,reason:clip(error.code??error.message,500),failure:{stage,...(error.code?{code:error.code}:{}),...(error.syscall?{syscall:error.syscall}:{}),...(error.path?{path:String(error.path)}:{})},...(runtime?{runtime}:{})});}}return rows;
 }
 async function browserExecutable(config) {
   const candidates = [config.browserExecutable, process.env.GVS_BROWSER_EXECUTABLE,
