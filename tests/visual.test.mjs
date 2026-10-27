@@ -42,3 +42,9 @@ test('a bounded automatic scan cannot be described as complete without explicit 
  result.visualReview.manualCoverage='Personally checked the full supplied phone frame, including the remaining footer and icon content, and used the recorded hit-area evidence.';
  assert.deepEqual(validateVisualReview(run,task,result),[]);
 });
+test('source-only increments do not require screenshots and cannot contribute visual QA approval',()=>{
+ const {run,task,result}=fixture();const source={...task,reviewFocus:'source',analysisIds:[]};
+ assert.deepEqual(validateVisualReview(run,source,{verdict:'pass'}),[]);
+ run.tasks=[{...source,state:'done',result}];assert.equal(visualAuditStatus(run).warnings[0].qaReviewed,false);
+ for(const other of [{...source,scope:'full'},{...source,kind:'user-review'},{...source,kind:'design-review'},{...source,analysisIds:['motion']}])assert.throws(()=>validateVisualReview(run,other,{verdict:'pass'}),/Visual acceptance/);
+});

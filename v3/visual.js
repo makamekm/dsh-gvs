@@ -75,6 +75,7 @@ export function addLayoutCapture(view,snapshot,{imageId,stage,url}){
 }
 
 export function validateVisualReview(run,task,result){
+ if(task.reviewFocus==='source'&&task.kind==='review'&&task.scope==='increment'&&Array.isArray(task.analysisIds)&&task.analysisIds.length===0)return [];
  if(!run.visualPolicy||!run.visualRequired||!['review','design-review','user-review'].includes(task.kind)||result.verdict!=='pass')return [];
  const review=result.visualReview;
  if(!review||VISUAL_CHECKS.some(id=>!review.checked?.includes(id)))throw new Error('Visual acceptance needs visualReview.checked: overlap, clipping, spacing, alignment, readability, responsive, interaction. Inspect real screenshots and states, not test totals or JSX.');
@@ -110,7 +111,7 @@ export function visualAuditStatus(run){
  for(const check of run.visualChecks.filter(c=>c.ok&&c.revision===run.revision))for(const view of check.views??[])for(const warning of view.layout?.warnings??[]){
   const previous=map.get(warning.id);map.set(warning.id,{...warning,viewport:view.viewport,images:[...new Set([...(previous?.images??[]),...warning.images])]});
  }
- const reviews=run.tasks.filter(t=>t.state==='done'&&t.result?.verdict==='pass'&&t.result.revision===run.revision&&['review','design-review','user-review'].includes(t.kind)&&visualReviewAccepted(run,t));
+ const reviews=run.tasks.filter(t=>t.reviewFocus!=='source'&&t.state==='done'&&t.result?.verdict==='pass'&&t.result.revision===run.revision&&['review','design-review','user-review'].includes(t.kind)&&visualReviewAccepted(run,t));
  const approved=(warning,role)=>reviews.some(t=>(role==='user'?t.assignee==='user':run.roles.some(r=>r.name===t.assignee&&r.capability==='verify'))&&t.result.visualReview?.assessments?.some(a=>a.warningId===warning.id&&a.disposition==='intentional'&&warning.images.includes(a.imageId)&&a.reason?.trim().length>=20));
  const warnings=[...map.values()].map(w=>({...w,qaReviewed:approved(w,'qa'),userReviewed:approved(w,'user')}));
  return {ready:warnings.every(w=>w.qaReviewed&&w.userReviewed),total:warnings.length,warnings};

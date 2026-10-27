@@ -127,6 +127,24 @@ test('incremental visual approval still requires actual received current screens
  const f=fixture(),start=await f.call('gvs_run',{task:'Static UI layout',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
  const task=await f.call('gvs_task',{action:'create',title:'Static visual slice',instructions:'Inspect pixels',kind:'user-review',assignee:'user',scope:'increment',analysisIds:[]});await assert.rejects(f.complete(task.task.id,f.actor('user')),/actual current images/);
 });
+test('Lead can classify an existing static audit without a visual waiver or a changed running lease',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'UI and a native adapter',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'abi',title:'ABI auditor',purpose:'Independent native source verification',capability:'verify'});
+ const work=await f.call('gvs_task',{action:'create',title:'Static ABI audit',instructions:'Audit source and real native assertions',kind:'review',assignee:'abi',scope:'increment',analysisIds:[],readScopes:['crates/native'],writeScopes:[],resources:[]});
+ const actor=f.actor('abi');await f.call('gvs_ask_user',{reuseTaskId:start.briefTaskId},actor);
+ f.hooks['tools/result']({agent:actor,name:'pwsh',arguments:{command:'node native-source-tests.mjs'}},{isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'passed'}},content:[]});
+ await assert.rejects(f.complete(work.task.id,actor,{checks:['node native-source-tests.mjs']}),/Visual acceptance/);
+ await assert.rejects(f.complete(work.task.id,actor,{checks:['node native-source-tests.mjs'],reviewFocus:'source'}),/coordinator assignment/);
+ const updated=await f.call('gvs_task',{action:'update',taskId:work.task.id,reviewFocus:'source',reason:'This existing increment audits native source, not rendered UI'});
+ assert.equal(updated.task.reviewFocus,'source');assert.equal(updated.task.state,'running');assert.deepEqual(updated.task.readScopes,['crates/native']);
+ await f.complete(work.task.id,actor,{checks:['node native-source-tests.mjs'],simple:true,scopePreserved:true});
+ assert.equal(f.tasks.get(work.task.id).status,'completed');const finish=await f.call('gvs_finish');assert.equal(finish.status,'needs-review');assert.equal(finish.quality.technical,false);assert.equal(finish.quality.visual,false);assert.equal(finish.quality.user,false);
+});
+test('source focus cannot be assigned to full, visual, User or motion-bearing reviews',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Do not waive visual review',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'qa',title:'QA',purpose:'Review',capability:'verify'});
+ for(const input of [{kind:'review',assignee:'qa',scope:'full'},{kind:'design-review',assignee:'qa',scope:'increment',analysisIds:[]},{kind:'user-review',assignee:'user',scope:'increment',analysisIds:[]}])await assert.rejects(f.call('gvs_task',{action:'create',title:'Invalid waiver',instructions:'Review',reviewFocus:'source',...input}),/Source-only focus/);
+});
 
 test('a passed increment still saves out-of-scope visual defects as mandatory goal issues',async()=>{
  const {VISUAL_CHECKS}=await import('../v3/visual.js');
