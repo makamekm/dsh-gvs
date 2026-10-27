@@ -11,12 +11,14 @@ import {previewState,needsPreview} from './preview.js';
 import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus} from './visual.js';
 import {parallelFields,parallelBlocker,parallelStatus,taskAccess,writeAllowed,validateWriteScopes,evidencePath} from './parallel.js';
 import {assignmentDelivery} from './delivery.js';
+import {prepareCodePlan,stalePlanFiles,planSources,needsCodePlan} from './planning.js';
 
 export const inject=['tools','agentTeams','subagents','fs','workingDirectory','sandboxPolicy','attachments','llm','jobs','sessionProjections'];
 const entries=new Map(),instance=randomUUID();
 const object=properties=>({type:'object',additionalProperties:false,properties});
 const text=(maxLength=4000)=>({type:'string',maxLength});
 const strings={type:'array',items:{type:'string'},maxItems:40};
+const codePlanInput={...object({summary:text(2000),changes:{type:'array',minItems:1,maxItems:16,items:{...object({path:text(300),anchor:{type:['string','null'],description:'Exact existing source fragment, sha256:<actual file hash>, or null only for a genuinely new file.'},edit:{...text(6000),description:"Precise code edits at the anchor: before/after conditions, functions, CSS values or replacement snippet. Not a vague goal."}}),required:['path','anchor','edit']}},checks:{...strings,minItems:1,maxItems:12,description:'Exact foreground validation commands the executor must actually run.'},acceptance:{...strings,minItems:1,maxItems:12,description:'Observable behavior/UX to verify, including matching reference states for 1:1 work.'}}),required:['summary','changes','checks','acceptance']};
 const imageParts=images=>images.map(image=>({type:'image',attachment:image.attachment}));
 const roleOf=(entry,name)=>entry.run.roles.find(role=>role.name===name);
 const liveImages=run=>{
@@ -25,7 +27,7 @@ const liveImages=run=>{
  const temporal=(run.analysisChecks??[]).filter(c=>c.ok&&c.revision===run.revision&&c.planVersion===run.analysis?.version).slice(-1).flatMap(c=>c.images);
  return [...ui,...run.viewports.flatMap(viewport=>temporal.filter(i=>i.viewport===viewport).slice(-2))].filter((image,i,all)=>all.findIndex(item=>item.attachment.attachmentId===image.attachment.attachmentId)===i).slice(0,20);
 };
-const taskSummaries=(tasks,detail=false)=>tasks.map(({id,title,assignee,kind,dependsOn,state,result,instructions,startedAt,priority,scope,reviewFocus,analysisIds,readScopes,writeScopes,resources})=>({id,title,assignee,kind,dependsOn,state,startedAt,priority,scope,reviewFocus,analysisIds,readScopes,writeScopes,resources,...(detail?{instructions}:{}),...(result?{result:detail?result:{...result,summary:clip(result.summary,800),findings:result.findings.map(item=>clip(item,600)),inventory:result.inventory?.slice(0,10).map(item=>({...item,evidence:clip(item.evidence,400)}))}}:{})}));
+const taskSummaries=(tasks,detail=false)=>tasks.map(({id,title,assignee,kind,dependsOn,state,result,instructions,startedAt,priority,scope,reviewFocus,analysisIds,readScopes,writeScopes,resources,codePlan,planRequired,planStale,lastUpdate})=>({id,title,assignee,kind,dependsOn,state,startedAt,priority,scope,reviewFocus,analysisIds,readScopes,writeScopes,resources,...(detail?{instructions,codePlan,lastUpdate}:{}),planning:codePlan?{state:planStale?'stale':'planned',summary:clip(codePlan.summary,300)}:planRequired?{state:'needs-coordinator-plan'}:null,...(result?{result:detail?result:{...result,summary:clip(result.summary,800),findings:result.findings.map(item=>clip(item,600)),inventory:result.inventory?.slice(0,10).map(item=>({...item,evidence:clip(item.evidence,400)}))}}:{})}));
 
 function reviewPlan(run,input){
  const scope=input.scope??'full';
@@ -37,6 +39,7 @@ function reviewPlan(run,input){
 
 export function apply(ctx,config={}){
  const owned=new Set();
+ const checkedPlanSources=new WeakMap();
  const maxParallel=config.maxParallel??4,maxTasks=!config.goalProtocol&&[64,160].includes(config.maxTasks)?10000:config.maxTasks??10000;
  ctx.effect(()=>ctx.jobs.attachController('gvs-team-preview'));
  async function storage(root,signal){
@@ -52,6 +55,7 @@ export function apply(ctx,config={}){
   try{
    const run=JSON.parse(await io.read(stateFile(root)));
    if(run.schema!==3||run.sessionId!==root.id)throw new Error('Invalid GVS state for this session');
+   if(run.coordinatorPlanningVersion!==1){for(const task of run.tasks)if(task.state==='running'&&!task.codePlan)task.planGrandfathered=true;run.coordinatorPlanningVersion=1;}
    if(run.status==='running'){
     run.summary='Service restarted. Inspect interrupted tasks, preserve completed work and continue the same human goal.';
     for(const role of run.roles)role.waitingForUser=false;
@@ -65,6 +69,8 @@ export function apply(ctx,config={}){
   const member=ctx.agentTeams.membership(exec.agent),entry=await load(member.root,exec.signal);
   if(required&&!entry)throw new Error('The coordinator must call gvs_run first.');
   if(entry){
+   entry.run.requireCoordinatorPlan=config.requireCoordinatorPlan!==false;
+   for(const task of entry.run.tasks)task.planRequired=task.state!=='done'&&needsCodePlan(entry.run,task);
    entry.run.parallelLimit??=maxParallel;
    if(entry.run.status==='running'&&entry.run.visualRequired)entry.run.visualPolicy=1;
    entry.run.progress??={startedAt:Date.now(),metadataSinceWrite:0,writes:0};
@@ -81,6 +87,11 @@ export function apply(ctx,config={}){
   return {member,entry,root:member.root,name:member.name};
  }
  function lead(member){if(member.role!=='lead')throw new Error('Only the coordinator can change team composition or the task plan.');}
+ async function codePlan(entry,task,input){
+  const prepared=await prepareCodePlan(input,{cwd:entry.io.cwd,read:entry.io.bytes,allowed:file=>writeAllowed(task,file,entry.io.cwd),author:entry.root.id});
+  const comparable=plan=>{const {plannedAt,...rest}=plan;return JSON.stringify(rest);};
+  return task.codePlan&&comparable(task.codePlan)===comparable(prepared)?task.codePlan:prepared;
+ }
  async function commit(entry){
   const saved=JSON.stringify({...entry.run,updatedAt:new Date().toISOString()},null,2);
   entry.write=entry.write.catch(()=>{}).then(async()=>{
@@ -116,9 +127,12 @@ export function apply(ctx,config={}){
   const scope=reviewPlan(entry.run,input);
   const access=parallelFields(input);
   validateWriteScopes(role,access.writeScopes);
+  const plan=input.codePlan?await codePlan(entry,{...input,...scope,...access},input.codePlan):null;
   const native=await ctx.agentTeams.createTask(entry.root,{subject:clip(input.title,180),description:clip(input.instructions,15000),blockedBy:dependsOn,writeScopes:access.writeScopes??[]});
   const inherited=entry.run.tasks.filter(task=>task.assignee===input.assignee).flatMap(task=>task.consultations??[]).filter(id=>reusableDecision(entry.run,id));
   const task={id:native.id,title:clip(input.title,180),instructions:clip(input.instructions,15000),assignee:input.assignee,kind:input.kind,dependsOn,state:'waiting',receivedImages:[],consultations:[...new Set(inherited)],priority:input.priority??0,...scope,...access};
+  if(plan)task.codePlan=plan;
+  task.planRequired=needsCodePlan(entry.run,task);
   entry.run.progress.metadataSinceWrite++;
   entry.run.tasks.push(task);await commit(entry);await schedule(entry,signal);return task;
  }
@@ -134,6 +148,7 @@ export function apply(ctx,config={}){
     if(role.capability==='edit'&&!goalStatus(entry.run).discoveryReady)continue;
     if(role.capability!=='user'&&entry.run.analysis&&(entry.run.analysis.state!=='ready'||entry.run.tasks.some(task=>task.kind==='brief'&&task.state!=='done')))continue;
     if(role.retired||parallelBlocker(entry.run,task,entry.run.parallelLimit??maxParallel))continue;
+    if(needsCodePlan(entry.run,task)&&task.codePlan){const stale=await stalePlanFiles(task.codePlan,entry.io.bytes);if(stale.length){task.planStale=true;task.stalePlanFiles=stale;await commit(entry);continue;}}
     const native=ctx.agentTeams.getTask(entry.root,task.id);
     await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'reassign',owner:role.name});
     task.state='running';task.startedAt=Date.now();task.startedRevision=entry.run.revision;task.nonce=randomUUID();delete task.executionTurn;
@@ -141,7 +156,7 @@ export function apply(ctx,config={}){
     task.receivedAnalysisReports=(entry.run.analysisChecks??[]).filter(check=>check.ok&&check.revision===entry.run.revision&&check.planVersion===entry.run.analysis?.version).map(check=>check.id);
     const deps=entry.run.tasks.filter(previous=>task.dependsOn.includes(previous.id)).map(({id,title,result})=>({id,title,result:result?{verdict:result.verdict,summary:clip(result.summary,1200),findings:result.findings?.map(item=>clip(item,400)),inventoryItems:result.inventory?.length??0}:null}));
     const observations=entry.run.visualChecks.filter(check=>check.revision===entry.run.revision).slice(-2).map(({ok,scenario,views})=>({ok,scenario,views}));
-    const prompt=`${COMMON}\n${role.capability==='user'?USER:role.instructions}\n${entry.run.kind.startsWith('game')?GAME:''}\n\nCURRENT HUMAN TASK: ${entry.run.task}\nROLE: ${role.title}\nASSIGNED TASK ID: ${task.id}\nTASK NONCE: ${task.nonce}\nKIND: ${task.kind}\nWORK: ${task.instructions}\nCONDITIONAL ANALYSIS PLAN: ${JSON.stringify(entry.run.analysis??null)}\nANALYSIS REPORTS: ${JSON.stringify((entry.run.analysisChecks??[]).filter(check=>task.receivedAnalysisReports.includes(check.id)).map(({id,engine,analyzer,results,frameSummary})=>({id,engine,analyzer,results:results.map(({frames,samples,...result})=>result),frameSummary})))}\nDEPENDENCY RESULTS: ${JSON.stringify(deps)}\nSHARED USER DECISIONS: ${JSON.stringify(availableDecisions(entry.run).slice(-6))}\nRECORDED BROWSER EVIDENCE: ${JSON.stringify(observations)}\nPREVIEW: ${JSON.stringify(entry.run.preview)}\nACTUAL ATTACHED IMAGES: ${JSON.stringify(images.map(image=>({viewport:image.viewport,id:image.attachment.attachmentId,atMs:image.atMs})))}\nFinish with gvs_task complete for this exact task. Include actual image IDs, analysisReports IDs and exact commands when reviewing. Other members wake automatically; do not poll them.`;
+    const prompt=`${COMMON}\n${role.capability==='user'?USER:role.instructions}\n${entry.run.kind.startsWith('game')?GAME:''}\n\nCURRENT HUMAN TASK: ${entry.run.task}\nROLE: ${role.title}\nASSIGNED TASK ID: ${task.id}\nTASK NONCE: ${task.nonce}\nKIND: ${task.kind}\nWORK: ${task.instructions}\nCOORDINATOR CODE PLAN (binding exact changes/checks; ask Lead about source drift): ${JSON.stringify(task.codePlan??null)}\nCONDITIONAL ANALYSIS PLAN: ${JSON.stringify(entry.run.analysis??null)}\nANALYSIS REPORTS: ${JSON.stringify((entry.run.analysisChecks??[]).filter(check=>task.receivedAnalysisReports.includes(check.id)).map(({id,engine,analyzer,results,frameSummary})=>({id,engine,analyzer,results:results.map(({frames,samples,...result})=>result),frameSummary})))}\nDEPENDENCY RESULTS: ${JSON.stringify(deps)}\nSHARED USER DECISIONS: ${JSON.stringify(availableDecisions(entry.run).slice(-6))}\nRECORDED BROWSER EVIDENCE: ${JSON.stringify(observations)}\nPREVIEW: ${JSON.stringify(entry.run.preview)}\nACTUAL ATTACHED IMAGES: ${JSON.stringify(images.map(image=>({viewport:image.viewport,id:image.attachment.attachmentId,atMs:image.atMs})))}\nFinish with gvs_task complete for this exact task. Include actual image IDs, analysisReports IDs and exact commands when reviewing. Other members wake automatically; do not poll them.`;
     const messages=entry.run.goal?.messages??[],selected=messages.filter((_,i)=>i<2||i>=messages.length-8);
     const contract=`REAL HUMAN CONTRACT (unaltered excerpts; ${messages.length} messages stored, paginate gvs_goal status for all): ${JSON.stringify(selected)}\nGOAL COVERAGE: ${JSON.stringify(view(entry.run).goal)}\nUser brief MUST first call gvs_goal status then gvs_goal plan with sourceIds/assessedMessages and expertise/staffingRationale. Infer needed roles; the human need not name them. Discovery inventories must map to requirements. Reviews MUST attest coveredRequirements IDs and scopeReviewed=true after independent completeness analysis; repairs attest addressedIssues IDs. Every required mismatch belongs in findings, never only in summary. Simulated User decisions cannot waive the human goal.`;
     const flow=`PARALLEL ACCESS CONTRACT: ${JSON.stringify(taskAccess(entry.run,task))}. Edit only leased write paths. Shell commands must obey the same contract; leases coordinate agents and are not OS isolation. Do not mutate shared servers/databases, run dependency installs/shared builds or overwrite another task's artifacts without the named exclusive resource (project-runtime for the common preview/build/test environment). Use task-specific artifacts and isolated checks for parallel work. Ask Lead to update a queued task's scopes/resources before an undeclared operation. Full final reviews read the whole frozen source; scoped increment results never replace integration acceptance.\nDELIVER AN INCREMENT, NOT A PLANNING LOOP. Review scope: ${task.scope??'full'}, analysisIds: ${JSON.stringify(task.analysisIds??'ALL')}. An increment pass attests only this slice/selected criteria and NEVER full-goal acceptance. [] allows only a static slice, not a motion acceptance claim. Established User decisions for this role: ${JSON.stringify(task.consultations)}. Reuse a current decision with gvs_ask_user reuseTaskId; consult only for an actual consequential unknown, never to approve the same scope again. Read a dependency's exact assignment/result with gvs_task list taskId when needed; summaries above are not a claim that you read the whole evidence. For implementation, produce a coherent runnable slice with a real build/render check, normally within 20 minutes. If this assignment is too broad, message Lead with the completed slice and remaining work so it can be split without dropping requirements. Do not expand an in-progress mobile fix into every backend/product feature or postpone all product work until universal readiness. Independent final acceptance remains mandatory.`;
@@ -170,9 +185,15 @@ export function apply(ctx,config={}){
   }
   if(role.capability!=='edit')return 'This role may not edit project files.';
   if(!target||!writeAllowed(task,target,entry.io.cwd))return 'The file is outside this task writeScopes. Ask Lead to schedule a separate scoped task; do not modify another parallel branch.';
+  if(task.codePlan&&!evidencePath(target,entry.io.cwd)&&!task.codePlan.changes.some(change=>path.resolve(entry.io.cwd,change.path).toLowerCase()===path.resolve(entry.io.cwd,target).toLowerCase()))return 'This product file is outside the coordinator codePlan. Report the concrete missing change to Lead and obtain a corrected plan before editing it.';
  }
  ctx.on('tools/pre-execute',async(exec,next)=>{
-  if(!exec.agent)return next();const membership=ctx.agentTeams.tryMembership(exec.agent);if(!membership||membership.role==='lead')return next();
+  if(!exec.agent)return next();const membership=ctx.agentTeams.tryMembership(exec.agent);if(!membership)return next();
+  if(membership.role==='lead'){
+   const entry=entries.get(membership.root.id),target=exec.arguments?.file_path??exec.arguments?.path;
+   if(entry?.run.requireCoordinatorPlan&&['write','edit'].includes(exec.name)&&target&&!evidencePath(target,entry.io.cwd))return {kind:'deny',reason:'Coordinator owns source inspection and the exact codePlan. Delegate product file changes through gvs_task to an edit specialist; direct coordinator edits are not the implementation workflow.'};
+   return next();
+  }
   const entry=await load(membership.root,exec.signal),role=entry&&roleOf(entry,membership.name);
   const alwaysRead=['read','read_image','glob','grep','working_directory','gvs_status'];
   if(!role)return alwaysRead.includes(exec.name)?next():{kind:'deny',reason:'This teammate has no GVS role assignment.'};
@@ -196,6 +217,14 @@ export function apply(ctx,config={}){
   if(!entry.run.tasks.some(task=>task.assignee===member.name&&task.state==='running')&&['write','edit','pwsh','bash','gvs_native_game_check','gvs_browser_check','gvs_game_check'].includes(exec.name))return 'No dependency-ready task is assigned. Wait for the scheduler; do not start this work early.';
   if(entry.run.status!=='running'&&!basic.includes(exec.name))return 'The run is paused or finished.';
  });
+ ctx.on('tools/post-execute',async(exec,result,next)=>{
+  if(exec.agent&&['pwsh','bash'].includes(exec.name)){
+   const member=ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);
+   const task=entry?.run.tasks.find(task=>task.assignee===member.name&&task.state==='running');
+   if(task?.codePlan&&!result.isError&&result.value?.kind==='foreground'&&result.value.exitCode===0&&!result.value.timedOut&&!result.value.aborted&&result.value.signal==null)checkedPlanSources.set(exec,await planSources(task.codePlan,entry.io.bytes));
+  }
+  return next();
+ });
  ctx.on('tools/result',(exec,result)=>{
   if(!exec.agent)return;const member=ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);if(!entry||entry.run.status!=='running')return;
   const role=roleOf(entry,member.name),task=entry.run.tasks.find(task=>task.assignee===member.name&&task.state==='running');
@@ -207,9 +236,9 @@ export function apply(ctx,config={}){
   }
   if(!['pwsh','bash'].includes(exec.name))return;
   const value=result.value;
-  entry.run.checks.push({taskId:task?.id??null,agent:member.name,command:clip(exec.arguments?.command,5000),exitCode:value?.exitCode??null,
+  entry.run.checks.push({taskId:task?.id??null,at:Date.now(),agent:member.name,command:clip(exec.arguments?.command,5000),exitCode:value?.exitCode??null,
    finished:value?.kind==='foreground'&&value?.signal==null&&!value?.timedOut&&!value?.aborted,error:result.isError,
-   output:clip([value?.stdout?.text,value?.stderr?.text].filter(Boolean).join('\n')||result.content?.filter(part=>part.type==='text').map(part=>part.text).join('\n'),12000)});
+   output:clip([value?.stdout?.text,value?.stderr?.text].filter(Boolean).join('\n')||result.content?.filter(part=>part.type==='text').map(part=>part.text).join('\n'),12000),...(checkedPlanSources.has(exec)?{codePlanSources:checkedPlanSources.get(exec)}:{})});
   entry.run.checks=entry.run.checks.slice(-120);
  });
  register('gvs_run','Start an adaptive GVS team run. Returns immediately; then create only needed specialists and dependency tasks, coordinate results, and call gvs_finish. Named teammates persist and wake for later tasks.',{task:text(16000),kind:{type:'string',enum:kinds},engine:text(100),viewports:{type:'array',items:{type:'string',enum:['desktop','mobile']},minItems:1,maxItems:2}},['task','kind'],async(args,exec)=>{
@@ -253,7 +282,7 @@ export function apply(ctx,config={}){
   return {status:assigned.state,taskId:assigned.id,dependsOn:assigned.dependsOn,sessionId:role.sessionId,reused:true,next:assigned.state==='blocked'?'Resolve the blocker and use gvs_task retry.':assigned.state==='waiting'?'Dependencies/resources are not ready; the scheduler wakes this agent automatically.':'This agent is already working on the existing task.'};
  });
  register('gvs_task','Create tasks with real dependencies; waiting tasks wake automatically. For complete, REQUIRED top-level fields are taskId, verdict (pass/revise/blocked), summary and findings (explicit [] for pass); do not nest them inside result. Increment create/update requires explicit analysisIds ([] for an actual static slice). Reviews report real checks/images/findings; blocked tasks keep dependants waiting.',
-  {action:{type:'string',enum:['create','list','complete','retry','dependencies','update']},taskId:text(40),offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:60},title:text(180),instructions:text(15000),assignee:text(40),kind:{type:'string',enum:taskKinds},dependsOn:strings,writeScopes:strings,readScopes:strings,resources:{...strings,description:'Exclusive resource names. Omit for conservative project-runtime locking on edit/verify tasks; [] only for isolated work. Literal workspace read/write paths may end in /**.'},priority:{type:'integer',minimum:-100,maximum:100},reason:text(1000),scope:{type:'string',enum:['increment','full']},reviewFocus:{type:'string',enum:['visual','source'],description:'Lead-assigned source only for static/native/ABI source reviews: kind review, scope increment, analysisIds []. No visual/full-goal waiver.'},analysisIds:strings,
+  {action:{type:'string',enum:['create','list','complete','retry','dependencies','update']},taskId:text(40),offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:60},title:text(180),instructions:text(15000),assignee:text(40),kind:{type:'string',enum:taskKinds},dependsOn:strings,writeScopes:strings,readScopes:strings,resources:{...strings,description:'Exclusive resource names. Omit for conservative project-runtime locking on edit/verify tasks; [] only for isolated work. Literal workspace read/write paths may end in /**.'},priority:{type:'integer',minimum:-100,maximum:100},reason:{...text(1000),description:"Optional audit rationale for update. If omitted, an exact description is derived from changed fields."},codePlan:codePlanInput,scope:{type:'string',enum:['increment','full']},reviewFocus:{type:'string',enum:['visual','source'],description:'Lead-assigned source only for static/native/ABI source reviews: kind review, scope increment, analysisIds []. No visual/full-goal waiver.'},analysisIds:strings,
    verdict:{type:'string',enum:['pass','revise','blocked']},summary:text(4000),findings:{...strings,description:'ALL required fixes, missing functionality, visual mismatches or blockers; do not hide scope gaps in summary. For pass use [].'},scopeReviewed:{type:'boolean',description:'Independently compared the entire human goal and feature inventory against implementation; accepting the recent repair alone is insufficient.'},coveredRequirements:{...strings,maxItems:1000},addressedIssues:{...strings,maxItems:1000},inventory:{type:'array',maxItems:100,items:{...object({feature:text(500),evidence:text(1500),status:{type:'string',enum:['confirmed','unknown']},requirementIds:strings}),required:['feature','evidence','status','requirementIds']}},checks:{...strings,description:'ONLY exact verbatim foreground command strings, e.g. node test.mjs. No commentary, prefixes, read tools or annotations.'},images:{...strings,maxItems:1000},analysisReports:strings,simple:{type:'boolean'},scopePreserved:{type:'boolean'},adapterReviewed:{type:'boolean'},visualReview:{...object({manualCoverage:text(2000),checked:{type:'array',items:{type:'string',enum:VISUAL_CHECKS},maxItems:7},assessments:{type:'array',maxItems:1000,items:{...object({warningId:text(60),imageId:text(150),disposition:{type:'string',enum:['intentional','defect','outside-scope']},reason:text(1000)}),required:['warningId','imageId','disposition','reason']}}}),required:['checked','assessments']}},['action'],async(args,exec)=>{
    const {member,entry,name}=await current(exec);
    if(args.action==='list'){
@@ -265,27 +294,35 @@ export function apply(ctx,config={}){
     const tasks=[...entry.run.tasks.filter(task=>task.state!=='done'),...entry.run.tasks.filter(task=>task.state==='done').reverse()],offset=args.offset??0,limit=args.limit??10;
     return {tasks:taskSummaries(tasks.slice(offset,offset+limit)),total:tasks.length,nextOffset:offset+limit<tasks.length?offset+limit:null};
    }
-   if(args.action==='create'){lead(member);return {task:await createTask(entry,args,exec.signal)};}
+   if(args.action==='create'){lead(member);const task=await createTask(entry,args,exec.signal);return {task,...(task.planRequired&&!task.codePlan?{status:'needs-coordinator-plan',next:'Coordinator must inspect current source and supply gvs_task update codePlan: summary, changes[{path,anchor,edit}], checks (exact commands), acceptance. This edit task has not been dispatched.'}:{})};}
    if(args.action==='update'){
     lead(member);const task=entry.run.tasks.find(task=>task.id===args.taskId);
-    if(!task||!args.reason?.trim())throw new Error('Update an outstanding task with the concrete reason; preserve remaining requirements in owned follow-up tasks.');
+    if(!task)throw new Error(`Unknown task ${args.taskId??'(missing taskId)'}. No changes applied. Read gvs_task action:list and copy the exact existing taskId.`);
     if(task.state==='done')return {status:'already-completed',updated:false,task:taskSummaries([task],true)[0],next:'No changes were applied to the completed task. Preserve its result; create a linked follow-up for actual remaining work.'};
     if(!['waiting','running','blocked'].includes(task.state))throw new Error('Update only an outstanding task.');
     const access=parallelFields(args),reassign=args.assignee&&args.assignee!==task.assignee;
-    if((Object.keys(access).length||reassign)&&task.state==='running')throw new Error('Do not change the owner/access lease of a running task. Finish its slice first; reassign/scope queued or blocked follow-ups.');
     if(reassign){
      const role=roleOf(entry,args.assignee);
      if(!role?.sessionId||role.retired||['review','game-review'].includes(task.kind)&&role.capability!=='verify'||task.kind==='discovery'&&!['read','verify'].includes(role.capability)||task.kind==='design-review'&&role.capability==='edit'||['user-review','brief','consultation'].includes(task.kind)&&role.name!=='user')throw new Error('Reassign to a registered, suitable independent role; User decisions stay with user.');
     }
-    const scope=args.scope||args.reviewFocus?reviewPlan(entry.run,{...task,...args}):{};
+    const scope=args.scope||args.reviewFocus||args.analysisIds!==undefined?reviewPlan(entry.run,{...task,...args}):{};
     validateWriteScopes(roleOf(entry,reassign?args.assignee:task.assignee),access.writeScopes??task.writeScopes);
-    if(task.state==='running'&&JSON.stringify(taskAccess(entry.run,task))!==JSON.stringify(taskAccess(entry.run,{...task,...scope})))throw new Error('Changing review scope would change a running access lease. Finish the existing slice and scope a queued follow-up.');
-    if(args.writeScopes!==undefined){const native=ctx.agentTeams.getTask(entry.root,task.id);await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'edit',writeScopes:access.writeScopes});}
-    Object.assign(task,scope,access);if(reassign){task.assignee=args.assignee;task.consultations=[];}
-    if(args.instructions)task.instructions=args.instructions;if(args.title)task.title=args.title;if(args.priority!==undefined)task.priority=args.priority;
+    if(task.state==='running'&&(reassign||JSON.stringify(taskAccess(entry.run,task))!==JSON.stringify(taskAccess(entry.run,{...task,...scope,...access}))))throw new Error('Do not change the owner/access lease of a running task. Finish its slice first; reassign/scope queued or blocked follow-ups.');
+    const plan=args.codePlan?await codePlan(entry,{...task,...scope,...access,...(reassign?{assignee:args.assignee}:{})},args.codePlan):null;
+    const changes={...scope,...access,...(plan?{codePlan:plan,planStale:false,stalePlanFiles:[]}:{}),...(reassign?{assignee:args.assignee}:{}),...(args.instructions?{instructions:args.instructions}:{}),...(args.title?{title:args.title}:{}),...(args.priority!==undefined?{priority:args.priority}:{})};
+    const fields=Object.keys(changes).filter(key=>JSON.stringify(task[key])!==JSON.stringify(changes[key]));
+    if(!fields.length)return {status:'unchanged',updated:false,task:taskSummaries([task],true)[0],next:'The requested values already match. The task, assignment and remaining requirements are unchanged.'};
+    const reason=args.reason?.trim()||`Updated ${fields.join(', ')} on existing ${task.id}. Remaining human requirements and owned follow-ups stay binding.`;
+    if(fields.includes('writeScopes')){const native=ctx.agentTeams.getTask(entry.root,task.id);await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'edit',writeScopes:access.writeScopes});}
+    Object.assign(task,changes);if(reassign)task.consultations=[];
+    task.lastUpdate={at:new Date().toISOString(),reason,reasonSource:args.reason?.trim()?'provided':'derived',fields};
     await commit(entry);
-    if(task.state==='running')await ctx.agentTeams.sendMessage(entry.root,{target:task.assignee,content:[{type:'text',text:`UPDATED EXISTING ${task.id}: ${args.reason}\nREVIEW FOCUS: ${task.reviewFocus??'visual'}; scope=${task.scope??'full'}. Source focus is only static/source increment evidence, never visual or final acceptance.\nCURRENT ASSIGNMENT: ${task.instructions}\nContinue this same task/identity; old unrelated work remains owned in follow-up tasks and the full goal is still binding.`}],signal:exec.signal});
-    await schedule(entry,exec.signal);return {task:taskSummaries([task],true)[0]};
+    if(task.state==='running'){
+     const message=`UPDATED EXISTING ${task.id}: ${reason}\nREVIEW FOCUS: ${task.reviewFocus??'visual'}; scope=${task.scope??'full'}. Source focus is only static/source increment evidence, never visual or final acceptance.\nCURRENT ASSIGNMENT: ${task.instructions}\nCOORDINATOR CODE PLAN: ${JSON.stringify(task.codePlan??null)}\nContinue this same task/identity; old unrelated work remains owned in follow-up tasks and the full goal is still binding.`;
+     const delivery=assignmentDelivery(message,[],`UPDATED EXISTING ${task.id}: ${reason}. Read gvs_task action:list taskId:${task.id} for the full current instructions and coordinator codePlan before implementing. Preserve the same task/identity and every remaining human requirement.`);
+     await ctx.agentTeams.sendMessage(entry.root,{target:task.assignee,content:delivery.content,signal:exec.signal});
+    }
+    await schedule(entry,exec.signal);return {updated:true,update:task.lastUpdate,task:taskSummaries([task],true)[0]};
    }
    if(['retry','dependencies'].includes(args.action)){
     lead(member);const task=entry.run.tasks.find(task=>task.id===args.taskId);
@@ -301,6 +338,13 @@ export function apply(ctx,config={}){
    if(args.reviewFocus!==undefined&&args.reviewFocus!==(task.reviewFocus??'visual'))throw new Error('Review focus belongs to the coordinator assignment. Ask Lead to update an actual source-only increment; do not waive an assigned visual review yourself.');
    if(!args.verdict||!args.summary||!Array.isArray(args.findings))throw new Error(`Provide verdict, summary and findings as TOP-LEVEL gvs_task fields for ${task.id}. Required shape: {action:"complete",taskId:"${task.id}",verdict:"pass|revise|blocked",summary:"actual result",findings:["required fixes/blockers"]}. Use findings:[] only when there are no required fixes. Keep all assigned evidence and review fields; this error did not complete the task.`);
    if(args.verdict==='pass'&&args.findings.length)throw new Error('For pass, findings must be []. Put positive observations in summary; findings is only for required fixes or blockers.');
+   if(args.verdict==='pass'&&needsCodePlan(entry.run,task)&&task.codePlan){
+    const currentSources=await planSources(task.codePlan,entry.io.bytes);
+    const successful=entry.run.checks.filter(check=>check.taskId===task.id&&check.at>=task.startedAt&&check.finished&&!check.error&&check.exitCode===0&&JSON.stringify(check.codePlanSources)===JSON.stringify(currentSources)).map(check=>check.command);
+    const missing=task.codePlan.checks.filter(command=>!successful.includes(command)||!args.checks?.includes(command));
+    if(missing.length)throw new Error(`Coordinator plan checks must actually pass in this assignment and be listed verbatim in checks: ${JSON.stringify(missing)}. Ask Lead to correct an unsuitable plan; do not fabricate results.`);
+    if(!(await stalePlanFiles(task.codePlan,entry.io.bytes)).length)throw new Error('No planned file changed from the coordinator source snapshot. Implement the plan or report the actual blocker; a prose acknowledgement is not code delivery.');
+   }
    if((args.coveredRequirements??[]).some(id=>!entry.run.goal.requirements.some(req=>req.id===id))||(args.addressedIssues??[]).some(id=>!entry.run.goal.issues.some(issue=>issue.id===id)))throw new Error('Attest only actual requirement/issue IDs from gvs_goal status.');
    if(task.kind==='brief'&&args.verdict==='pass'&&entry.run.analysis?.state!=='ready')throw new Error('The User must first call gvs_analysis plan, selecting only analyses this task needs. Use [] with a concrete rationale for a simple task.');
    if(task.kind==='brief'&&args.verdict==='pass'&&(!entry.run.goal.requirements.length||goalStatus(entry.run).unassessed.length))throw new Error('First call gvs_goal plan to cover the actual human messages; a local subset cannot replace the human contract.');

@@ -13,6 +13,13 @@ function fixture(config={}){
   agents:{get:id=>id==='main'?agent:{session:{}}}};
  apply(ctx,config);return {agent,hooks,sent,queued,steering,mutations,ctx,saved,projections};
 }
+test('code planning instructions apply to GVS and its children, preserving ordinary Harness presets',()=>{
+ const f=fixture(),sections=new Map();f.ctx.systemPrompt={section:value=>sections.set(value.name,value)};f.ctx.agentTeams.tryMembership=agent=>agent.id==='child'?{root:f.agent}:undefined;apply(f.ctx);
+ const section=sections.get('gvs-coordinator-code-planning');assert.match(section.text({scope:f.agent}),/COORDINATOR OWNS CODE PLANNING/);
+ assert.match(section.text({scope:{id:'child',session:{header:{origin:'subagent'}}}}),/COORDINATOR OWNS CODE PLANNING/);
+ assert.equal(section.text({scope:{id:'ordinary',session:{header:{agentPreset:'standard'}}}}),'');assert.equal(section.text({}),'');
+});
+
 test('status intent recognizes direct human questions, without hijacking task changes or teammate messages',()=>{
  for(const text of ['какой статус?','Какой сейчас статус?','что сейчас делают агенты?','Статус','ну что там?','How is it going?'])assert.equal(isStatusQuestion(human(text)),true,text);
  for(const text of ['Проверь статус заказа','какой статус? и затем измени код','Сделай кнопку «статус»','После анализа напиши статус','Потом скомпилируй Windows версию'])assert.equal(isStatusQuestion(human(text)),false,text);

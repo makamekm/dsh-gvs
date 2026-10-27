@@ -38,3 +38,7 @@ test('a waiting UI review explains that its preview is not ready',()=>{
  const view=render({tasks:[task('visual','waiting')],roles:[{name:'builder',title:'QA',sessionId:'child',scheduling:{kind:'preview-not-ready'}}]});
  assert.ok(view.nodes.some(node=>node.props.className==='gvs-dependency'&&node.children.includes('previewWait')));
 });
+test('an editor waiting for source-grounded planning names the coordinator as its actual dependency',()=>{
+ const view=render({tasks:[task('planned','waiting')],roles:[{name:'builder',title:'Engineer',sessionId:'child',scheduling:{kind:'coordinator-plan'}}]});
+ assert.ok(view.nodes.some(node=>node.props.className==='gvs-dependency'&&node.children.includes('planWait')));
+});

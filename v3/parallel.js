@@ -1,6 +1,7 @@
 import path from 'node:path';
 import {goalStatus} from './goal.js';
 import {needsPreview} from './preview.js';
+import {needsCodePlan} from './planning.js';
 
 // Literal workspace paths (optionally ending in /**), not arbitrary globs.
 // Unknown scopes retain a workspace-wide lease; [] is an explicit declaration.
@@ -53,6 +54,7 @@ export function parallelBlocker(run,task,limit=run.parallelLimit??4){
  if(role?.retired||role?.error)return {kind:'role-unavailable'};
  const missing=(task.dependsOn??[]).filter(id=>run.tasks.find(other=>other.id===id)?.state!=='done');
  if(missing.length)return {kind:'dependencies',taskIds:missing};
+ if(needsCodePlan(run,task)&&(!task.codePlan||task.planStale))return {kind:'coordinator-plan',stale:task.planStale??false,files:task.stalePlanFiles??[],next:'Coordinator inspects current files and supplies gvs_task update codePlan before implementation starts.'};
  if(role?.capability==='edit'&&!goalStatus(run).discoveryReady)return {kind:'initial-discovery'};
  if(role?.capability!=='user'&&run.analysis&&(run.analysis.state!=='ready'||run.tasks.some(other=>other.kind==='brief'&&other.state!=='done')))return {kind:'user-brief-analysis'};
  if(needsPreview(run,task)&&run.preview.ready===false)return {kind:'preview-not-ready',url:run.preview.url};

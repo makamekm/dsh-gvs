@@ -4,6 +4,7 @@ import {z} from 'zod';
 import {clip,view} from './domain.js';
 import {progressStatus} from './flow.js';
 import {PARALLEL} from './prompts.js';
+import {CODE_PLANNING} from './planning.js';
 
 export const inject=['agents','agentTeams','tools','workingDirectory','fs','sessionProjections','systemPrompt'];
 export function retryableStop(reason){
@@ -50,6 +51,14 @@ export async function statusSnapshot(ctx,agent,signal){
   next:tasks.filter(task=>task.state==='waiting').slice(0,6).map(({title,assignee,dependsOn})=>({title,assignee,dependsOn}))};
 }
 export function apply(ctx,config={}){
+ ctx.systemPrompt?.section({name:'gvs-coordinator-code-planning',order:103,text:({scope})=>{
+  let agent=scope;
+  for(let depth=0;agent&&depth<16;depth++){
+   if(isLead(agent)||isLead(ctx.agentTeams.tryMembership?.(agent)?.root))return CODE_PLANNING;
+   agent=agent.session?.header.parentSession?ctx.agents.get(agent.session.header.parentSession):undefined;
+  }
+  return '';
+ }});
  ctx.systemPrompt?.section({name:'gvs-read-pages',order:101,text:({scope})=>{const description=ctx.tools.get('read',scope)?.parameters?.properties?.limit?.description??'Use the configured Native read default.';return `GVS FILE READING: ${description} Use the configured default rather than guessing a larger limit. The byte budget may return fewer lines: continue with offset equal to the LAST RETURNED NUMBERED LINE + 1 until the relevant range is actually read. A partial page is not a full source review. Do not retry the same rejected limit or replace bounded reading with an unbounded shell dump.`;}});
  ctx.systemPrompt?.section({name:'gvs-tool-contracts',order:102,text:'GVS TOOL CONTRACTS: gvs_task complete requires top-level action, taskId, verdict, summary and findings (explicit [] only if no defects); do not nest completion inside result. scope:increment requires explicit analysisIds; [] is only an actual static slice and never waives assigned analysis. For a missing User consultation first read gvs_ask_user action:status for current valid task IDs and relevant summaries; historical User decisions may be stale. checks contains ONLY exact successful command strings actually executed by this task, never prose or a colleague’s claimed test run; a source-only auditor may honestly report source inspection with checks:[] where its contract permits. Use actual recorded artifact paths and glob the supplied parent when uncertain; do not invent filenames from task numbers or claim missing files were inspected. After an edit mismatch reread the current exact file before editing; do not repeat identical old_string/new_string. Legitimate failed checks, missing evidence and Native permission guards stay binding.'});
  ctx.systemPrompt?.section({name:'gvs-verification-outputs',order:100,text:'For verify tasks, explicitly lease narrow report/evidence writeScopes under artifacts/, test-results/ or playwright-report/ when files are needed. Direct write/edit to those leased reports is allowed; production source and analyzer scripts remain read-only. Generated dist/build/cache paths can be declared for real build commands and participate in scheduler conflicts; do not directly forge build output. Assign source repairs to an edit role. already-running/already-completed retry responses reflect an advanced task and apply no instruction/dependency changes; an update on a completed task returns updated:false. Read current results and use a real follow-up for new work instead of retry loops. Failed analysis diagnostics expose exit status and stderr/assertion cause. Repair the actual failed product behavior/analyzer defect as evidenced; never manufacture a report or waive a check to satisfy JSON formatting.'});

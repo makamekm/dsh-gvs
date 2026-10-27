@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import path from 'node:path';import {randomUUID} from 'node:crypto';
 import {apply} from '../v3/runtime.js';
-function fixture(){
+function fixture(config={}){
  const files=new Map(),members=new Map(),tasks=new Map(),sent=[];let serial=0,spawns=0,source='initial source',nextSpawnError=null;
  const root={id:`mock-${randomUUID()}`,session:{header:{}},ctx:{}};const hooks={},definitions=new Map(),effects=[];let guard;
  const team={membership(agent){return {root,name:agent===root?'lead':members.get(agent.id).name,role:agent===root?'lead':'teammate'};},tryMembership(agent){return team.membership(agent);},
@@ -13,7 +13,7 @@ function fixture(){
  const ctx={agentTeams:team,on:(name,fn)=>{hooks[name]=fn;},effect:fn=>effects.push(fn),jobs:{attachController:()=>()=>{}},tools:{register:definition=>definitions.set(definition.name,definition),guard:fn=>{guard=fn;}},
   workingDirectory:{ensure:async()=>path.resolve('work/in-memory-fixture')},sandboxPolicy:{resolve:()=>({mode:'workspace-write'})},
   fs:{resolve:async file=>({file}),contains:()=>true,listDir:async()=>[{name:'app.js',type:'file'}],lstat:async()=>({type:'file'}),readBytes:async()=>Buffer.from(source),readText:async target=>{if(!files.has(target.file))throw Object.assign(new Error('missing'),{code:'ENOENT'});return files.get(target.file);},writeText:async(target,value)=>{files.set(target.file,value);}}};
- apply(ctx);
+ apply(ctx,{requireCoordinatorPlan:false,...config});
  const actor=name=>{const member=[...members.values()].find(member=>member.name===name);return {id:member.id,session:{header:{parentSession:root.id}},ctx:{}};};
  async function call(name,args={},agent=root){const exec={agent,name,arguments:args,signal:new AbortController().signal};await hooks['tools/pre-execute'](exec,async()=>({kind:'allow'}));const denied=guard(exec);if(denied)throw new Error(denied);return definitions.get(name).execute(args,exec);}
  const complete=async(id,agent,extra={})=>{const saved=JSON.parse([...files.values()][0]);if(saved.tasks.find(task=>task.id===id)?.kind==='brief'){
@@ -23,6 +23,49 @@ function fixture(){
  async function consult(agent){let cached;const pending=call('gvs_ask_user',{question:'Confirm the exact goal'},agent).then(value=>(cached=value,value));await new Promise(resolve=>setImmediate(resolve));if(cached)return cached;let list=await call('gvs_task',{action:'list'});const question=list.tasks.find(task=>task.kind==='consultation'&&task.state==='running');assert.ok(question);await complete(question.id,actor('user'));return pending;}
  return {root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,effects,failNextSpawn:()=>{nextSpawnError=new Error('Temporary spawn failure');},changeSource:value=>{source=value;},get spawns(){return spawns;}};
 }
+test('missing update reasons derive a factual audit; identical updates do not notify or reassign and real running lease changes remain denied',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Keep the complete human goal',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});
+ const work=await f.call('gvs_task',{action:'create',title:'Original',instructions:'Original requirement remains',kind:'work',assignee:'developer',writeScopes:['app.js'],readScopes:['app.js'],resources:[]});
+ const goal=JSON.parse([...f.files.values()][0]).goal;
+ const request={action:'update',taskId:work.task.id,title:'Precise slice',instructions:'Implement exact slice; preserve follow-ups',priority:95,readScopes:['app.js'],writeScopes:['app.js'],resources:[]};
+ const updated=await f.call('gvs_task',request);assert.equal(updated.updated,true);assert.equal(updated.update.reasonSource,'derived');assert.deepEqual(updated.update.fields.sort(),['instructions','priority','title']);assert.ok(!f.sent.at(-1).content[0].text.includes('undefined'));
+ const sent=f.sent.length,revision=f.tasks.get(work.task.id).revision;const repeat=await f.call('gvs_task',request);assert.equal(repeat.status,'unchanged');assert.equal(f.sent.length,sent);assert.equal(f.tasks.get(work.task.id).revision,revision);
+ await assert.rejects(f.call('gvs_task',{...request,writeScopes:['other.js']}),/running task/);
+ await assert.rejects(f.call('gvs_task',{action:'update',taskId:'not-real',title:'Unknown'}),/Unknown task/);
+ assert.deepEqual(JSON.parse([...f.files.values()][0]).goal,goal);
+});
+
+test('coordinator plans gate editing, source drift stops dispatch, and completion requires actual changed code with fresh exact checks',async()=>{
+ const f=fixture({requireCoordinatorPlan:true}),start=await f.call('gvs_run',{task:'Implement actual source changes',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement the plan',capability:'edit'});
+ const work=await f.call('gvs_task',{action:'create',title:'Precise patch',instructions:'Actual implementation',kind:'work',assignee:'developer',writeScopes:['app.js'],readScopes:['app.js'],resources:[]});
+ assert.equal(work.status,'needs-coordinator-plan');assert.equal(work.task.state,'waiting');assert.equal((await f.call('gvs_parallel',{action:'status'})).parallel.waiting[0].reason.kind,'coordinator-plan');
+ const plan={summary:'Correct actual source',changes:[{path:'app.js',anchor:'initial source',edit:'Replace initial source with the required implemented behavior.'}],checks:['node check.mjs'],acceptance:['Required behavior works in the actual app.']};
+ const updated=await f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan});assert.equal(updated.task.state,'running');assert.equal(updated.task.codePlan.authoredBy,f.root.id);
+ const agent=f.actor('developer');await assert.rejects(f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan},agent),/coordinator/);
+ const denial=await f.hooks['tools/pre-execute']({agent:f.root,name:'write',arguments:{file_path:path.resolve('work/in-memory-fixture/app.js')},signal:new AbortController().signal},async()=>({kind:'allow'}));assert.equal(denial.kind,'deny');
+ await f.consult(agent);
+ const exec={agent,name:'pwsh',arguments:{command:'node check.mjs'}},result={isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'passed'}},content:[]};
+ await f.hooks['tools/post-execute'](exec,result,async()=>({kind:'accept'}));f.hooks['tools/result'](exec,result);
+ await assert.rejects(f.complete(work.task.id,agent,{checks:['node check.mjs']}),/No planned file changed/);
+ f.changeSource('actual implemented code');await assert.rejects(f.complete(work.task.id,agent,{checks:['node check.mjs']}),/plan checks/,'A check before the edit cannot certify the changed source');
+ await f.hooks['tools/post-execute'](exec,result,async()=>({kind:'accept'}));f.hooks['tools/result'](exec,result);
+ await f.complete(work.task.id,agent,{checks:['node check.mjs']});assert.equal(f.tasks.get(work.task.id).status,'completed');
+});
+
+test('a queued plan whose source changes waits for Lead to inspect and refresh it, preserving the same task ID',async()=>{
+ const f=fixture({requireCoordinatorPlan:true}),start=await f.call('gvs_run',{task:'Fresh exact plans',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});
+ const dependency=await f.call('gvs_task',{action:'create',title:'Independent source review',instructions:'Review',kind:'consultation',assignee:'user'});
+ const plan={summary:'Grounded patch',changes:[{path:'app.js',anchor:'initial source',edit:'Implement required code.'}],checks:['node check.mjs'],acceptance:['Actual required behavior.']};
+ const work=await f.call('gvs_task',{action:'create',title:'Planned after dependency',instructions:'Implement exact plan',kind:'work',assignee:'developer',writeScopes:['app.js'],readScopes:['app.js'],resources:[],dependsOn:[dependency.task.id],codePlan:plan});assert.equal(work.task.state,'waiting');
+ f.changeSource('new current source');await f.complete(dependency.task.id,f.actor('user'));
+ const waiting=await f.call('gvs_task',{action:'list',taskId:work.task.id});assert.equal(waiting.tasks[0].state,'waiting');assert.equal(waiting.tasks[0].planning.state,'stale');
+ await assert.rejects(f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan}),/anchor not found/);
+ plan.changes[0].anchor='new current source';const refreshed=await f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan});assert.equal(refreshed.task.id,work.task.id);assert.equal(refreshed.task.state,'running');
+});
+
 test('specialists discover current reusable User IDs and Lead messages without weakening task completion',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Fix implementation',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
  await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});
@@ -108,7 +151,7 @@ test('a stale retry/update reports an advanced task without duplicating work or 
  const update=await f.call('gvs_task',{action:'update',taskId:start.briefTaskId,title:'Must not overwrite accepted result',reason:'The task completed after the stale status read'});assert.equal(update.updated,false);assert.equal(update.status,'already-completed');assert.equal(update.task.title,before.tasks[0].title);assert.equal(f.tasks.size,count);
  await assert.rejects(f.call('gvs_task',{action:'dependencies',taskId:start.briefTaskId,dependsOn:[]}),/blocked or waiting/);
  await assert.rejects(f.call('gvs_task',{action:'retry',taskId:'not-real'}),/Unknown task/);
- await assert.rejects(f.call('gvs_task',{action:'update',taskId:start.briefTaskId,title:'No reason'}),/concrete reason/);
+ const staleUpdate=await f.call('gvs_task',{action:'update',taskId:start.briefTaskId,title:'No reason'});assert.equal(staleUpdate.status,'already-completed');assert.equal(staleUpdate.updated,false);
 });
 test('UI reviews wait for actual preview readiness while isolated source work continues, then wake automatically',async()=>{
  const {createServer}=await import('node:http');let healthy=false;
@@ -118,7 +161,7 @@ test('UI reviews wait for actual preview readiness while isolated source work co
   for(const [name,capability] of [['visual','verify'],['source','verify'],['backend','edit']])await f.call('gvs_agent',{action:'create',name,title:name,purpose:'Independent work',capability});
   const state=JSON.parse([...f.files.values()][0]);state.preview={url:`http://127.0.0.1:${server.address().port}/`,jobId:'preview-fixture'};for(const key of f.files.keys())f.files.set(key,JSON.stringify(state));
   f.ctx.jobs.get=()=>({status:'running'});f.ctx.jobs.read=()=>({chunks:[{channel:'stderr',text:'Preview still starting'}]});
-  const fresh=await import(`../v3/runtime.js?preview=${randomUUID()}`);fresh.apply(f.ctx);
+  const fresh=await import(`../v3/runtime.js?preview=${randomUUID()}`);fresh.apply(f.ctx,{requireCoordinatorPlan:false});
   const visual=await f.call('gvs_task',{action:'create',title:'Visual QA',instructions:'Actual screenshots',kind:'review',assignee:'visual',scope:'increment',analysisIds:[],readScopes:['src'],writeScopes:['artifacts/visual'],resources:[]});
   assert.equal(visual.task.state,'waiting');assert.equal((await f.call('gvs_parallel',{action:'status'})).parallel.waiting[0].reason.kind,'preview-not-ready');assert.equal(f.sent.filter(m=>m.target==='visual').length,0);
   const source=await f.call('gvs_task',{action:'create',title:'Native source',instructions:'Static ABI',kind:'review',assignee:'source',scope:'increment',analysisIds:[],reviewFocus:'source',readScopes:['native'],resources:[]});assert.equal(source.task.state,'running');
@@ -207,7 +250,7 @@ test('a passed increment still saves out-of-scope visual defects as mandatory go
  const warning={id:'layout-overlap',kind:'overlap',targets:[{label:'An unrelated dialog brand'}],images:['mobile']};
  saved.visualChecks=[{ok:true,revision:saved.revision,capturedBy:'other',images:['desktop','mobile'].map(viewport=>({viewport,stage:'initial',attachment:{attachmentId:viewport}})),views:['desktop','mobile'].map(viewport=>({viewport,layout:{schema:'gvs.layout/1',captures:[{stage:'initial',imageId:viewport,warningIds:viewport==='mobile'?[warning.id]:[]}],warnings:viewport==='mobile'?[warning]:[]}}))}];
  for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));
- const fresh=await import(`../v3/runtime.js?visual=${randomUUID()}`);fresh.apply(f.ctx);
+ const fresh=await import(`../v3/runtime.js?visual=${randomUUID()}`);fresh.apply(f.ctx,{requireCoordinatorPlan:false});
  const work=await f.call('gvs_task',{action:'create',title:'Focused visual review',instructions:'Review the current increment',assignee:'qa',kind:'review',scope:'increment',analysisIds:[]});
  await f.call('gvs_ask_user',{reuseTaskId:start.briefTaskId},f.actor('qa'));
  f.hooks['tools/result']({agent:f.actor('qa'),name:'pwsh',arguments:{command:'node actual-review.mjs'}},{isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'Observed'}},content:[]});
@@ -226,13 +269,13 @@ test('a claimed agent turn ending without completion becomes a visible blocker',
 });
 test('restart preserves the active goal and resume reuses its original actor',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Recover',kind:'code'});const id=f.actor('user').id;
- const isolated=await import(`../v3/runtime.js?recovery=${randomUUID()}`);isolated.apply(f.ctx);
+ const isolated=await import(`../v3/runtime.js?recovery=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false});
  const status=await f.call('gvs_status');assert.equal(status.status,'running');assert.equal(status.gvsTeam.tasks.find(task=>task.id===start.briefTaskId).state,'blocked');
  await f.call('gvs_resume');assert.equal(f.actor('user').id,id);assert.equal(f.spawns,1);assert.equal(f.tasks.get(start.briefTaskId).status,'in_progress');
 });
 test('automatic recovery reuses interrupted assignments but never resumes a human pause or retries genuine blockers',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Automatic recovery',kind:'code'}),id=f.actor('user').id;
- const isolated=await import(`../v3/runtime.js?boot=${randomUUID()}`);isolated.apply(f.ctx);
+ const isolated=await import(`../v3/runtime.js?boot=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false});
  const recovered=await f.call('gvs_recover');assert.equal(recovered.continued,true);assert.deepEqual(recovered.recovered,[start.briefTaskId]);assert.equal(f.actor('user').id,id);assert.equal(f.spawns,1);assert.equal(f.tasks.get(start.briefTaskId).status,'in_progress');
  assert.deepEqual((await f.call('gvs_recover')).recovered,[],'No duplicate wake of an already running task');
  await f.call('gvs_pause');const messages=f.sent.length;
@@ -246,12 +289,12 @@ test('a verbose assignment fits the native team limit and old oversize delivery 
  await f.call('gvs_agent',{action:'create',name:'reviewer',title:'Reviewer',purpose:'Independent work',capability:'verify'});
  const saved=JSON.parse([...f.files.values()][0]);saved.goal.messages.push({id:'large-human-source',text:'Полный реальный контракт '.repeat(20000)});
  for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));
- const isolated=await import(`../v3/runtime.js?budget=${randomUUID()}`);isolated.apply(f.ctx);
+ const isolated=await import(`../v3/runtime.js?budget=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false});
  const work=await f.call('gvs_task',{action:'create',title:'Inspect',instructions:'Inspect current source',kind:'work',assignee:'reviewer'});
  const sent=f.sent.filter(message=>message.target==='reviewer').at(-1);assert.ok(Buffer.byteLength(JSON.stringify(sent.content),'utf8')<120001);assert.match(sent.content[0].text,/COMPACT ASSIGNMENT/);assert.match(sent.content[0].text,new RegExp(work.task.id));
  const state=JSON.parse([...f.files.values()][0]),task=state.tasks.find(task=>task.id===work.task.id);task.state='blocked';task.result={verdict:'blocked',summary:'team message exceeds 131072 bytes',findings:[]};
  for(const key of f.files.keys())f.files.set(key,JSON.stringify(state));
- const reboot=await import(`../v3/runtime.js?retry=${randomUUID()}`);reboot.apply(f.ctx);
+ const reboot=await import(`../v3/runtime.js?retry=${randomUUID()}`);reboot.apply(f.ctx,{requireCoordinatorPlan:false});
  const recovered=await f.call('gvs_recover');assert.deepEqual(recovered.recovered,[work.task.id]);assert.equal(f.spawns,2);assert.equal(f.tasks.get(work.task.id).status,'in_progress');
 });
 
