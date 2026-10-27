@@ -1,7 +1,7 @@
 window.__ModuleLoader__.load({id:'@makame/dsh-gvs',factory(require){
  const React=require('react'),h=React.createElement,NS='gvs.team';
- const en={team:'GVS team',plan:'Task plan',hide:'Hide plan',running:'Working',assigned:'Assigned',stopped:'Not running',waiting:'Waiting',blocked:'Blocked',idle:'Standby',error:'Error',done:'Done',coordinator:'Coordinator',unknown:'Status unknown',open:'Open agent chat',waitFor:'Waiting for',waitingUser:'Waiting for the User advocate',tasks:'tasks',issues:'issues',automatic:'GVS · automatic team',goal:'Goal',verified:'Verified',paused:'Paused',ready:'Ready',noWork:'Waiting for new work'};
- const ru={team:'Команда GVS',plan:'План задач',hide:'Скрыть план',running:'В работе',assigned:'Назначено',stopped:'Не запущен',waiting:'Ждёт',blocked:'Нужна помощь',idle:'Ожидает',error:'Ошибка',done:'Готово',coordinator:'Координатор',unknown:'Статус неизвестен',open:'Открыть чат агента',waitFor:'Ждёт',waitingUser:'Ждёт ответа Пользователя',tasks:'задач',issues:'замечаний',automatic:'GVS · команда под задачу',goal:'Цель',verified:'Проверено',paused:'Приостановлено',ready:'Можно начать',noWork:'Ожидает новую задачу'};
+ const en={team:'GVS team',plan:'Task plan',hide:'Hide plan',running:'Working',assigned:'Assigned',stopped:'Not running',waiting:'Waiting',blocked:'Blocked',idle:'Standby',error:'Error',done:'Done',slots:'Assigned',capacity:'Waiting for a parallel slot',coordinator:'Coordinator',unknown:'Status unknown',open:'Open agent chat',waitFor:'Waiting for',waitingUser:'Waiting for the User advocate',tasks:'tasks',issues:'issues',automatic:'GVS · automatic team',goal:'Goal',verified:'Verified',paused:'Paused',ready:'Ready',noWork:'Waiting for new work'};
+ const ru={team:'Команда GVS',plan:'План задач',hide:'Скрыть план',running:'В работе',assigned:'Назначено',stopped:'Не запущен',waiting:'Ждёт',blocked:'Нужна помощь',idle:'Ожидает',error:'Ошибка',done:'Готово',slots:'Назначено',capacity:'Ждёт свободного слота',coordinator:'Координатор',unknown:'Статус неизвестен',open:'Открыть чат агента',waitFor:'Ждёт',waitingUser:'Ждёт ответа Пользователя',tasks:'задач',issues:'замечаний',automatic:'GVS · команда под задачу',goal:'Цель',verified:'Проверено',paused:'Приостановлено',ready:'Можно начать',noWork:'Ожидает новую задачу'};
  const css=`
 .gvs-team{box-sizing:border-box;width:calc(100% - 2 * var(--dsh-composer-side-clearance,16px));max-width:var(--dsh-composer-card-max-width,840px);min-width:0;align-self:center;margin:0 auto 2px;padding:0;color:var(--dsw-alias-label-primary);font-size:12px}
 .gvs-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-height:28px;padding:0 3px 5px}.gvs-head strong{font-size:11px;font-weight:600;letter-spacing:.035em}.gvs-subtle{color:var(--dsw-alias-label-tertiary);font-size:11px}.gvs-head .gvs-plan{margin-left:auto}
@@ -25,6 +25,7 @@ window.__ModuleLoader__.load({id:'@makame/dsh-gvs',factory(require){
   const completed=team.taskCounts?.done??tasks.filter(task=>task.state==='done').length;
   return h('section',{className:'gvs-team','aria-label':t('team')},h('style',null,css),
    h('div',{className:'gvs-head'},h('strong',null,t('team')),h('span',{className:'gvs-subtle'},`${team.roles.length} · ${completed}/${team.taskCounts?.total??tasks.length}`),
+    team.parallel&&h('span',{className:'gvs-subtle'},`${t('slots')}: ${team.parallel.assigned}/${team.parallel.limit}`),
     h('span',{className:'gvs-coordinator',role:'status'},h('span',{className:`gvs-dot ${coordinating===true?'running':''}`}),`${t('coordinator')}: ${t(team.status!=='running'?(team.status==='verified'?'verified':'paused'):coordinating===true?'running':coordinating===false?'stopped':'unknown')}`),h('button',{className:'gvs-plan',onClick:()=>setExpanded(value=>!value),'aria-expanded':expanded},t(expanded?'hide':'plan'))),
    h('div',{className:'gvs-roles'},...team.roles.map(role=>h(Agent,{key:role.name,role,roles:team.roles,tasks,rootId,sessionId,useSessionStatus,openAgent,t,onError:setError}))),
    error&&h('p',{role:'alert'},error),
@@ -40,11 +41,12 @@ window.__ModuleLoader__.load({id:'@makame/dsh-gvs',factory(require){
   const deps=((active??pending)?.dependsOn??[]).map(id=>tasks.find(task=>task.id===id)).filter(task=>task&&task.state!=='done');
   const status=active?(waitingUser?'waiting':live===true?'running':live===false?'stopped':'assigned'):blocked?'blocked':pending?'waiting':role.state==='blocked'?'blocked':role.state==='error'?'error':'idle';
   const activity=active?.title??blocked?.summary??pending?.title??t('noWork');
+  const lockWait=!active&&role.scheduling?.kind==='resources'?`${t('waitFor')}: ${role.scheduling.conflicts.map(lock=>`${roles.find(item=>item.name===lock.assignee)?.title??lock.assignee} · ${[...lock.files,...lock.resources].join(', ')}`).join('; ')}`:!active&&role.scheduling?.kind==='parallel-limit'?t('capacity'):null;
   return h('button',{className:'gvs-agent','data-state':status,disabled:!role.sessionId||role.sessionId===sessionId,title:`${t('open')}: ${role.title}\n${role.purpose}`,
    onClick:()=>{try{openAgent(rootId,role.sessionId);onError('');}catch(error){onError(error.message);}}},
    h('span',{className:'gvs-name'},h('span',{className:`gvs-dot ${status}`}),h('strong',null,role.title),h('span',{className:'gvs-status'},t(status))),
    h('span',{className:'gvs-activity'},activity),
-   waitingUser?h('span',{className:'gvs-dependency'},t('waitingUser')):deps.length>0?h('span',{className:'gvs-dependency'},`${t('waitFor')}: ${deps.map(dep=>`${roles.find(role=>role.name===dep.assignee)?.title??dep.assignee} — ${dep.title}`).join('; ')}`):h('span',{className:'gvs-subtle'},`${role.completed??own.filter(task=>task.state==='done').length} ${t('tasks')}`));
+   waitingUser?h('span',{className:'gvs-dependency'},t('waitingUser')):lockWait?h('span',{className:'gvs-dependency'},lockWait):deps.length>0?h('span',{className:'gvs-dependency'},`${t('waitFor')}: ${deps.map(dep=>`${roles.find(role=>role.name===dep.assignee)?.title??dep.assignee} — ${dep.title}`).join('; ')}`):h('span',{className:'gvs-subtle'},`${role.completed??own.filter(task=>task.state==='done').length} ${t('tasks')}`));
  }
  return {inject:['slots','locale','sessions','uiWorkspace'],apply(ctx){
   ctx.effect(()=>ctx.locale.register(NS,{en,ru}));

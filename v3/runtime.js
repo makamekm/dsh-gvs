@@ -9,6 +9,8 @@ import {refreshRevision} from './revision.js';
 import {decisionKey,reusableDecision,consultationKey,progressStatus,modelResult} from './flow.js';
 import {previewState} from './preview.js';
 import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus} from './visual.js';
+import {parallelFields,parallelBlocker,parallelStatus,taskAccess,writeAllowed} from './parallel.js';
+import {assignmentDelivery} from './delivery.js';
 
 export const inject=['tools','agentTeams','subagents','fs','workingDirectory','sandboxPolicy','attachments','llm','jobs','sessionProjections'];
 const entries=new Map(),instance=randomUUID();
@@ -23,7 +25,7 @@ const liveImages=run=>{
  const temporal=(run.analysisChecks??[]).filter(c=>c.ok&&c.revision===run.revision&&c.planVersion===run.analysis?.version).slice(-1).flatMap(c=>c.images);
  return [...ui,...run.viewports.flatMap(viewport=>temporal.filter(i=>i.viewport===viewport).slice(-2))].filter((image,i,all)=>all.findIndex(item=>item.attachment.attachmentId===image.attachment.attachmentId)===i).slice(0,20);
 };
-const taskSummaries=(tasks,detail=false)=>tasks.map(({id,title,assignee,kind,dependsOn,state,result,instructions,startedAt,priority,scope,analysisIds})=>({id,title,assignee,kind,dependsOn,state,startedAt,priority,scope,analysisIds,...(detail?{instructions}:{}),...(result?{result:detail?result:{...result,summary:clip(result.summary,800),findings:result.findings.map(item=>clip(item,600)),inventory:result.inventory?.slice(0,10).map(item=>({...item,evidence:clip(item.evidence,400)}))}}:{})}));
+const taskSummaries=(tasks,detail=false)=>tasks.map(({id,title,assignee,kind,dependsOn,state,result,instructions,startedAt,priority,scope,analysisIds,readScopes,writeScopes,resources})=>({id,title,assignee,kind,dependsOn,state,startedAt,priority,scope,analysisIds,readScopes,writeScopes,resources,...(detail?{instructions}:{}),...(result?{result:detail?result:{...result,summary:clip(result.summary,800),findings:result.findings.map(item=>clip(item,600)),inventory:result.inventory?.slice(0,10).map(item=>({...item,evidence:clip(item.evidence,400)}))}}:{})}));
 
 function reviewPlan(run,input){
  const scope=input.scope??'full';
@@ -33,7 +35,7 @@ function reviewPlan(run,input){
 
 export function apply(ctx,config={}){
  const owned=new Set();
- const maxParallel=config.maxParallel??2,maxTasks=!config.goalProtocol&&[64,160].includes(config.maxTasks)?10000:config.maxTasks??10000;
+ const maxParallel=config.maxParallel??4,maxTasks=!config.goalProtocol&&[64,160].includes(config.maxTasks)?10000:config.maxTasks??10000;
  ctx.effect(()=>ctx.jobs.attachController('gvs-team-preview'));
  async function storage(root,signal){
   const cwd=await ctx.workingDirectory.ensure(root,signal),policy=ctx.sandboxPolicy.resolve({session:root.session});
@@ -61,6 +63,7 @@ export function apply(ctx,config={}){
   const member=ctx.agentTeams.membership(exec.agent),entry=await load(member.root,exec.signal);
   if(required&&!entry)throw new Error('The coordinator must call gvs_run first.');
   if(entry){
+   entry.run.parallelLimit??=maxParallel;
    if(entry.run.status==='running'&&entry.run.visualRequired)entry.run.visualPolicy=1;
    entry.run.progress??={startedAt:Date.now(),metadataSinceWrite:0,writes:0};
    if(member.role==='lead'){
@@ -109,9 +112,10 @@ export function apply(ctx,config={}){
   if(input.kind==='design-review'&&role.capability==='edit')throw new Error('The rendered design reviewer must be separate from the editing role.');
   if(['user-review','brief','consultation'].includes(input.kind)&&input.assignee!=='user')throw new Error('User decisions belong to the central User role.');
   const scope=reviewPlan(entry.run,input);
-  const native=await ctx.agentTeams.createTask(entry.root,{subject:clip(input.title,180),description:clip(input.instructions,15000),blockedBy:dependsOn,writeScopes:input.writeScopes??[]});
+  const access=parallelFields(input);
+  const native=await ctx.agentTeams.createTask(entry.root,{subject:clip(input.title,180),description:clip(input.instructions,15000),blockedBy:dependsOn,writeScopes:access.writeScopes??[]});
   const inherited=entry.run.tasks.filter(task=>task.assignee===input.assignee).flatMap(task=>task.consultations??[]).filter(id=>reusableDecision(entry.run,id));
-  const task={id:native.id,title:clip(input.title,180),instructions:clip(input.instructions,15000),assignee:input.assignee,kind:input.kind,dependsOn,state:'waiting',receivedImages:[],consultations:[...new Set(inherited)],priority:input.priority??0,...scope};
+  const task={id:native.id,title:clip(input.title,180),instructions:clip(input.instructions,15000),assignee:input.assignee,kind:input.kind,dependsOn,state:'waiting',receivedImages:[],consultations:[...new Set(inherited)],priority:input.priority??0,...scope,...access};
   entry.run.progress.metadataSinceWrite++;
   entry.run.tasks.push(task);await commit(entry);await schedule(entry,signal);return task;
  }
@@ -121,13 +125,10 @@ export function apply(ctx,config={}){
    if(entry.run.status!=='running')return;
    for(const task of readyTasks(entry.run).sort((a,b)=>(b.priority??0)-(a.priority??0))){
     if(entry.abort.signal.aborted||signal.aborted)break;
-    const role=roleOf(entry,task.assignee),running=entry.run.tasks.filter(task=>task.state==='running');
+    const role=roleOf(entry,task.assignee);
     if(role.capability==='edit'&&!goalStatus(entry.run).discoveryReady)continue;
     if(role.capability!=='user'&&entry.run.analysis&&(entry.run.analysis.state!=='ready'||entry.run.tasks.some(task=>task.kind==='brief'&&task.state!=='done')))continue;
-    if(role.retired||running.some(task=>task.assignee===role.name))continue;
-    if(role.capability!=='user'&&running.filter(task=>task.assignee!=='user').length>=maxParallel)continue;
-    if(role.capability==='edit'&&running.some(task=>['edit','verify'].includes(roleOf(entry,task.assignee)?.capability)))continue;
-    if(role.capability==='verify'&&running.some(task=>['edit','verify'].includes(roleOf(entry,task.assignee)?.capability)))continue;
+    if(role.retired||parallelBlocker(entry.run,task,entry.run.parallelLimit??maxParallel))continue;
     const native=ctx.agentTeams.getTask(entry.root,task.id);
     await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'reassign',owner:role.name});
     task.state='running';task.startedAt=Date.now();task.startedRevision=entry.run.revision;task.nonce=randomUUID();delete task.executionTurn;
@@ -138,9 +139,11 @@ export function apply(ctx,config={}){
     const prompt=`${COMMON}\n${role.capability==='user'?USER:role.instructions}\n${entry.run.kind.startsWith('game')?GAME:''}\n\nCURRENT HUMAN TASK: ${entry.run.task}\nROLE: ${role.title}\nASSIGNED TASK ID: ${task.id}\nTASK NONCE: ${task.nonce}\nKIND: ${task.kind}\nWORK: ${task.instructions}\nCONDITIONAL ANALYSIS PLAN: ${JSON.stringify(entry.run.analysis??null)}\nANALYSIS REPORTS: ${JSON.stringify((entry.run.analysisChecks??[]).filter(check=>task.receivedAnalysisReports.includes(check.id)).map(({id,engine,analyzer,results,frameSummary})=>({id,engine,analyzer,results:results.map(({frames,samples,...result})=>result),frameSummary})))}\nDEPENDENCY RESULTS: ${JSON.stringify(deps)}\nSHARED USER DECISIONS: ${JSON.stringify(entry.run.tasks.filter(task=>task.assignee==='user'&&task.result).slice(-4).map(task=>task.result))}\nRECORDED BROWSER EVIDENCE: ${JSON.stringify(observations)}\nPREVIEW: ${JSON.stringify(entry.run.preview)}\nACTUAL ATTACHED IMAGES: ${JSON.stringify(images.map(image=>({viewport:image.viewport,id:image.attachment.attachmentId,atMs:image.atMs})))}\nFinish with gvs_task complete for this exact task. Include actual image IDs, analysisReports IDs and exact commands when reviewing. Other members wake automatically; do not poll them.`;
     const messages=entry.run.goal?.messages??[],selected=messages.filter((_,i)=>i<2||i>=messages.length-8);
     const contract=`REAL HUMAN CONTRACT (unaltered excerpts; ${messages.length} messages stored, paginate gvs_goal status for all): ${JSON.stringify(selected)}\nGOAL COVERAGE: ${JSON.stringify(view(entry.run).goal)}\nUser brief MUST first call gvs_goal status then gvs_goal plan with sourceIds/assessedMessages and expertise/staffingRationale. Infer needed roles; the human need not name them. Discovery inventories must map to requirements. Reviews MUST attest coveredRequirements IDs and scopeReviewed=true after independent completeness analysis; repairs attest addressedIssues IDs. Every required mismatch belongs in findings, never only in summary. Simulated User decisions cannot waive the human goal.`;
-    const flow=`DELIVER AN INCREMENT, NOT A PLANNING LOOP. Review scope: ${task.scope??'full'}, analysisIds: ${JSON.stringify(task.analysisIds??'ALL')}. An increment pass attests only this slice/selected criteria and NEVER full-goal acceptance. [] allows only a static slice, not a motion acceptance claim. Established User decisions for this role: ${JSON.stringify(task.consultations)}. Reuse a current decision with gvs_ask_user reuseTaskId; consult only for an actual consequential unknown, never to approve the same scope again. Read a dependency's exact assignment/result with gvs_task list taskId when needed; summaries above are not a claim that you read the whole evidence. For implementation, produce a coherent runnable slice with a real build/render check, normally within 20 minutes. If this assignment is too broad, message Lead with the completed slice and remaining work so it can be split without dropping requirements. Do not expand an in-progress mobile fix into every backend/product feature or postpone all product work until universal readiness. Independent final acceptance remains mandatory.`;
-    try{await ctx.agentTeams.sendMessage(entry.root,{target:role.name,content:[{type:'text',text:flow+'\n'+contract+'\n'+prompt},...imageParts(images)],signal});}
-    catch(error){task.state='blocked';task.result={verdict:'blocked',summary:clip(error.message),findings:[clip(error.message)],revision:entry.run.revision};}
+    const flow=`PARALLEL ACCESS CONTRACT: ${JSON.stringify(taskAccess(entry.run,task))}. Edit only leased write paths. Shell commands must obey the same contract; leases coordinate agents and are not OS isolation. Do not mutate shared servers/databases, run dependency installs/shared builds or overwrite another task's artifacts without the named exclusive resource (project-runtime for the common preview/build/test environment). Use task-specific artifacts and isolated checks for parallel work. Ask Lead to update a queued task's scopes/resources before an undeclared operation. Full final reviews read the whole frozen source; scoped increment results never replace integration acceptance.\nDELIVER AN INCREMENT, NOT A PLANNING LOOP. Review scope: ${task.scope??'full'}, analysisIds: ${JSON.stringify(task.analysisIds??'ALL')}. An increment pass attests only this slice/selected criteria and NEVER full-goal acceptance. [] allows only a static slice, not a motion acceptance claim. Established User decisions for this role: ${JSON.stringify(task.consultations)}. Reuse a current decision with gvs_ask_user reuseTaskId; consult only for an actual consequential unknown, never to approve the same scope again. Read a dependency's exact assignment/result with gvs_task list taskId when needed; summaries above are not a claim that you read the whole evidence. For implementation, produce a coherent runnable slice with a real build/render check, normally within 20 minutes. If this assignment is too broad, message Lead with the completed slice and remaining work so it can be split without dropping requirements. Do not expand an in-progress mobile fix into every backend/product feature or postpone all product work until universal readiness. Independent final acceptance remains mandatory.`;
+    const fallback=`${COMMON}\n${role.capability==='user'?USER:role.instructions}\n${entry.run.kind.startsWith('game')?GAME:''}\nASSIGNED TASK ID: ${task.id}\nTASK NONCE: ${task.nonce}\nROLE: ${role.title}\nKIND: ${task.kind}\nWORK: ${task.instructions}\n${flow}\nThe complete human goal is unchanged. First read gvs_goal status, then gvs_task list taskId=${task.id}; inspect dependency IDs ${JSON.stringify(task.dependsOn)} and relevant evidence via their paged tools. Finish only with gvs_task complete for this exact ID/nonce. PREVIEW: ${JSON.stringify(entry.run.preview)}`;
+    const delivery=assignmentDelivery(flow+'\n'+contract+'\n'+prompt,images,fallback);task.receivedImages=delivery.images.map(image=>image.attachment.attachmentId);task.compactAssignment=delivery.compact;
+    try{await ctx.agentTeams.sendMessage(entry.root,{target:role.name,content:delivery.content,signal});}
+    catch(error){task.state='blocked';task.result={verdict:'blocked',summary:clip(error.message),findings:[clip(error.message)],deliveryError:true,revision:entry.run.revision};}
     await commit(entry);
    }
   })();try{await entry.scheduling;}finally{entry.scheduling=null;}
@@ -171,6 +174,10 @@ export function apply(ctx,config={}){
   if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause'].includes(exec.name))return 'Only the coordinator may control the run.';
   if(role.capability==='user'&&exec.name==='gvs_ask_user')return 'The User advocate cannot consult itself.';
   if(['write','edit'].includes(exec.name)&&role.capability!=='edit')return 'This role may not edit project files.';
+  if(['write','edit'].includes(exec.name)&&role.capability==='edit'){
+   const task=entry.run.tasks.find(task=>task.assignee===member.name&&task.state==='running'),target=exec.arguments?.file_path??exec.arguments?.path;
+   if(task&&(!target||!writeAllowed(task,target,entry.io.cwd)))return 'The file is outside this task writeScopes. Ask Lead to schedule a separate scoped task; do not modify another parallel branch.';
+  }
   if(['pwsh','bash','gvs_native_game_check'].includes(exec.name)&&!['edit','verify'].includes(role.capability))return 'This role has no command execution capability.';
   if(!entry.run.tasks.some(task=>task.assignee===member.name&&task.state==='running')&&['write','edit','pwsh','bash','gvs_native_game_check','gvs_browser_check','gvs_game_check'].includes(exec.name))return 'No dependency-ready task is assigned. Wait for the scheduler; do not start this work early.';
   if(entry.run.status!=='running'&&!basic.includes(exec.name))return 'The run is paused or finished.';
@@ -232,7 +239,7 @@ export function apply(ctx,config={}){
   return {status:assigned.state,taskId:assigned.id,dependsOn:assigned.dependsOn,sessionId:role.sessionId,reused:true,next:assigned.state==='blocked'?'Resolve the blocker and use gvs_task retry.':assigned.state==='waiting'?'Dependencies/resources are not ready; the scheduler wakes this agent automatically.':'This agent is already working on the existing task.'};
  });
  register('gvs_task','Create tasks with real dependencies; waiting tasks automatically wake their named agents. Teammates complete their own task. Reviews must report actual checks/images and concrete findings; blocked tasks keep downstream work waiting.',
-  {action:{type:'string',enum:['create','list','complete','retry','dependencies','update']},taskId:text(40),offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:60},title:text(180),instructions:text(15000),assignee:text(40),kind:{type:'string',enum:taskKinds},dependsOn:strings,writeScopes:strings,priority:{type:'integer',minimum:-100,maximum:100},reason:text(1000),scope:{type:'string',enum:['increment','full']},analysisIds:strings,
+  {action:{type:'string',enum:['create','list','complete','retry','dependencies','update']},taskId:text(40),offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:60},title:text(180),instructions:text(15000),assignee:text(40),kind:{type:'string',enum:taskKinds},dependsOn:strings,writeScopes:strings,readScopes:strings,resources:{...strings,description:'Exclusive resource names. Omit for conservative project-runtime locking on edit/verify tasks; [] only for isolated work. Literal workspace read/write paths may end in /**.'},priority:{type:'integer',minimum:-100,maximum:100},reason:text(1000),scope:{type:'string',enum:['increment','full']},analysisIds:strings,
    verdict:{type:'string',enum:['pass','revise','blocked']},summary:text(4000),findings:{...strings,description:'ALL required fixes, missing functionality, visual mismatches or blockers; do not hide scope gaps in summary. For pass use [].'},scopeReviewed:{type:'boolean',description:'Independently compared the entire human goal and feature inventory against implementation; accepting the recent repair alone is insufficient.'},coveredRequirements:{...strings,maxItems:1000},addressedIssues:{...strings,maxItems:1000},inventory:{type:'array',maxItems:100,items:{...object({feature:text(500),evidence:text(1500),status:{type:'string',enum:['confirmed','unknown']},requirementIds:strings}),required:['feature','evidence','status','requirementIds']}},checks:{...strings,description:'ONLY exact verbatim foreground command strings, e.g. node test.mjs. No commentary, prefixes, read tools or annotations.'},images:{...strings,maxItems:1000},analysisReports:strings,simple:{type:'boolean'},scopePreserved:{type:'boolean'},adapterReviewed:{type:'boolean'},visualReview:{...object({manualCoverage:text(2000),checked:{type:'array',items:{type:'string',enum:VISUAL_CHECKS},maxItems:7},assessments:{type:'array',maxItems:1000,items:{...object({warningId:text(60),imageId:text(150),disposition:{type:'string',enum:['intentional','defect','outside-scope']},reason:text(1000)}),required:['warningId','imageId','disposition','reason']}}}),required:['checked','assessments']}},['action'],async(args,exec)=>{
    const {member,entry,name}=await current(exec);
    if(args.action==='list'){
@@ -248,7 +255,16 @@ export function apply(ctx,config={}){
    if(args.action==='update'){
     lead(member);const task=entry.run.tasks.find(task=>task.id===args.taskId);
     if(!task||!['waiting','running','blocked'].includes(task.state)||!args.reason?.trim())throw new Error('Update an outstanding task with the concrete reason; preserve remaining requirements in owned follow-up tasks.');
-    if(args.scope)Object.assign(task,reviewPlan(entry.run,args));
+    const access=parallelFields(args),reassign=args.assignee&&args.assignee!==task.assignee;
+    if((Object.keys(access).length||reassign)&&task.state==='running')throw new Error('Do not change the owner/access lease of a running task. Finish its slice first; reassign/scope queued or blocked follow-ups.');
+    if(reassign){
+     const role=roleOf(entry,args.assignee);
+     if(!role?.sessionId||role.retired||['review','game-review'].includes(task.kind)&&role.capability!=='verify'||task.kind==='discovery'&&!['read','verify'].includes(role.capability)||task.kind==='design-review'&&role.capability==='edit'||['user-review','brief','consultation'].includes(task.kind)&&role.name!=='user')throw new Error('Reassign to a registered, suitable independent role; User decisions stay with user.');
+    }
+    const scope=args.scope?reviewPlan(entry.run,args):{};
+    if(task.state==='running'&&JSON.stringify(taskAccess(entry.run,task))!==JSON.stringify(taskAccess(entry.run,{...task,...scope})))throw new Error('Changing review scope would change a running access lease. Finish the existing slice and scope a queued follow-up.');
+    if(args.writeScopes!==undefined){const native=ctx.agentTeams.getTask(entry.root,task.id);await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'edit',writeScopes:access.writeScopes});}
+    Object.assign(task,scope,access);if(reassign){task.assignee=args.assignee;task.consultations=[];}
     if(args.instructions)task.instructions=args.instructions;if(args.title)task.title=args.title;if(args.priority!==undefined)task.priority=args.priority;
     await commit(entry);
     if(task.state==='running')await ctx.agentTeams.sendMessage(entry.root,{target:task.assignee,content:[{type:'text',text:`UPDATED EXISTING ${task.id}: ${args.reason}\nCURRENT ASSIGNMENT: ${task.instructions}\nContinue this same task/identity; old unrelated work remains owned in follow-up tasks and the full goal is still binding.`}],signal:exec.signal});
@@ -310,11 +326,16 @@ export function apply(ctx,config={}){
    own.consultations.push(task.id);return {answer:result,userTaskId:task.id,userSessionId:roleOf(entry,'user').sessionId};
   }finally{role.waitingForUser=false;await commit(entry);}
  },600000);
+ register('gvs_parallel','Inspect actual parallel capacity, file/resource conflicts and dependency waits. Lead may configure 1..8 non-User slots; agents are created/reused through gvs_agent and assigned real scoped tasks, not by this tool.',{action:{type:'string',enum:['status','configure']},maxParallel:{type:'integer',minimum:1,maximum:8}},['action'],async(args,exec)=>{
+  const {member,entry}=await current(exec);
+  if(args.action==='configure'){lead(member);if(!Number.isInteger(args.maxParallel)||args.maxParallel<1||args.maxParallel>8)throw new Error('Choose 1..8 parallel slots.');entry.run.parallelLimit=args.maxParallel;await commit(entry);await schedule(entry,exec.signal);}
+  return {status:entry.run.status,parallel:parallelStatus(entry.run,entry.run.parallelLimit??maxParallel)};
+ });
  register('gvs_wait','Wait up to 30 seconds for actual team activity, then inspect results. Dependencies wake agents automatically; do not poll inactive teammates.',{seconds:{type:'integer',minimum:10,maximum:30}},[],async(args,exec)=>{
   const {member,entry}=await current(exec);lead(member);await schedule(entry,exec.signal);const progress=progressStatus(entry.run,Date.now(),config.maxSliceMs??1200000);if(progress.needsIntervention)return {status:'needs-coordination',progress};if(!entry.run.tasks.some(task=>task.state==='running'))return {status:'needs-coordination',progress};await ctx.agentTeams.waitForChange(exec.agent,(args.seconds??20)*1000,exec.signal);return {status:entry.run.status,progress};
  },35000);
  register('gvs_status','Read saved GVS team state, decisions and evidence in this session.',{},[],async(_args,exec)=>{
-  const {entry,root}=await current(exec,false);if(entry)return {status:entry.run.status,quality:entry.run.quality,
+  const {entry,root}=await current(exec,false);if(entry)return {status:entry.run.status,quality:entry.run.quality,parallel:parallelStatus(entry.run,entry.run.parallelLimit??maxParallel),
    checks:entry.run.checks.slice(-8).map(({agent,taskId,command,exitCode,finished,error,output})=>({agent,taskId,command,exitCode,finished,error,output:clip(output,800)})),
    gameChecks:entry.run.gameChecks.slice(-8).map(({mode,ok,revision,capturedBy,coverage,scenario,assertions,advancedFrames,views})=>({mode,ok,revision,capturedBy,coverage,scenario,assertions,advancedFrames,errors:(views??[]).flatMap(view=>view.errors)})),preview:entry.run.preview,progress:progressStatus(entry.run)};
   try{const io=await storage(root,exec.signal);const legacy=JSON.parse(await io.read('.gvs/latest.json'));return {status:legacy.status,legacy:true,summary:legacy.summary};}catch(error){if(['ENOENT','FS_NOT_FOUND'].includes(error.code))return {status:'no-runs'};throw error;}
@@ -424,7 +445,7 @@ export function apply(ctx,config={}){
  register('gvs_pause','Pause this team’s work and its managed preview, preserving named agents, tasks and memory.',{},[],async(_args,exec)=>{const {member,entry}=await current(exec);lead(member);await pause(entry);return {status:'paused'};});
  async function restoreTasks(entry,signal,automatic=false){
   const recovered=[];
-  for(const task of entry.run.tasks.filter(task=>task.state==='blocked'&&(automatic?/^Interrupted by service restart;/.test(task.result?.summary??''):task.result?.interrupted===true||/^(?:Interrupted by service restart;|Paused;)/.test(task.result?.summary??'')))){
+  for(const task of entry.run.tasks.filter(task=>task.state==='blocked'&&(automatic?/^Interrupted by service restart;|^team message exceeds 131072 bytes$/.test(task.result?.summary??''):task.result?.interrupted===true||/^(?:Interrupted by service restart;|Paused;)/.test(task.result?.summary??'')))){
    signal.throwIfAborted();if(entry.run.status!=='running')break;
    const native=ctx.agentTeams.getTask(entry.root,task.id);if(['in_progress','completed'].includes(native.status))await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:native.status==='completed'?'reopen':'release'});
    task.state='waiting';delete task.result;recovered.push(task.id);
@@ -442,6 +463,11 @@ export function apply(ctx,config={}){
  });
  register('gvs_preview','Start, inspect or stop this team’s managed local dev server. Use the existing project command and free port; the coordinator owns it across agent tasks.',{action:{type:'string',enum:['start','status','stop']},command:text(4000),port:{type:'integer',minimum:1024,maximum:65535}},['action'],async(args,exec)=>{
   const {entry}=await current(exec),jobs=ctx.jobs;
+  const previewMember=ctx.agentTeams.membership(exec.agent);
+  if(args.action!=='status'&&previewMember.role!=='lead'){
+   const task=entry.run.tasks.find(task=>task.assignee===previewMember.name&&task.state==='running');
+   if(!task||!taskAccess(entry.run,task).resources.includes('project-runtime'))throw new Error('Preview startup/stop needs the exclusive project-runtime lease. Ask Lead; do not restart another parallel task’s environment.');
+  }
   if(args.action==='status')return previewState(entry.run.preview,jobs,entry.root.id,exec.signal,fetch,true);
   if(args.action==='stop'){if(!entry.run.preview?.jobId)return {status:'not-running'};const id=entry.run.preview.jobId;jobs.kill(id,entry.root.id,'Stop GVS preview');const settled=await jobs.wait(id,5000,entry.root.id,exec.signal);return {status:settled.status,jobId:id};}
   const membership=ctx.agentTeams.membership(exec.agent),role=roleOf(entry,membership.name);

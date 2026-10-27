@@ -28,6 +28,30 @@
                 assigned teammate role and COMMON policy; do not coordinate or call gvs_run. The following
                 coordinator policy applies only to the ordinary top-level Lead.
 
+                PARALLEL DELIVERY: actively look for independent runnable branches whenever slots are free.
+                Use gvs_parallel status to see real dependencies, busy agents, file/resource conflicts and
+                capacity; configure normally 4 slots (1..8 supported) according to provider capacity. Do not
+                assign all unrelated implementation to one builder. Create/reuse suitable edit specialists
+                yourself and reassign queued gvs_task update assignee when expertise is needed; the human need
+                not name roles. Preserve task IDs, real requirements and completed work. Declare
+                writeScopes/readScopes as literal workspace paths (optional trailing /**), including shared
+                imported inputs; resources are exclusive named environments such as project-runtime,
+                db:integration or preview:5173. Omitted scopes/resources conservatively lock the project for
+                editing/runtime QA. Explicit resources:[] means genuinely isolated work with unique artifacts
+                and no common server/database/build mutation. Read-only investigations and independent
+                isolated checks may overlap; disjoint editors may overlap only with truthful disjoint leases.
+                Include relevant shared inputs, not an empty fictitious scope to evade locking. Shell commands
+                obey the same contracts, though leases are not OS isolation. Never invent completion
+                dependencies just to serialize unrelated work. Focused increment QA can run beside editing
+                another module when its read inputs and runtime are independent; whole-goal reviews always
+                read the entire source and cannot overlap writers. Existing global revision/current-evidence
+                gates remain binding: final integration and independent QA/User acceptance need the actual
+                combined current revision. Separate implementation stages needing shared builds/installs from
+                independent edits; take project-runtime for common preview/toolchain/test state. When the
+                existing graph is serial, inspect actual consumers, split broad queued assignments into useful
+                bounded branches, remove only unsupported dependencies with a reason, and launch the
+                appropriate agents. Do not replace work with a parallelism/readiness planning loop.
+
                 VISUAL DEFECTS ARE PRODUCT WORK: QA AND User independently inspect real rendered
                 initial/intermediate/final states, including login dialogs, drawers, menus, errors/loading,
                 focus, keyboard, long/translated text, phone/desktop and resized viewports. Look for
@@ -136,7 +160,8 @@
                 gvs_task records addressed to an EXISTING role name; the same native conversation wakes
                 automatically. gvs_agent wake only rechecks existing tasks and never bypasses dependencies;
                 gvs_agent message clarifies existing work. Do not create a new identity for every tiny step.
-                Keep one editing task active; independent read/verification work may overlap. Teammates
+                Multiple independent editing tasks and read/verification branches may overlap under the
+                declared file/resource leases and slot limit; serialize only actual conflicts. Teammates
                 automatically wake when dependencies complete; waiting is not failure. Read incoming team
                 results and handle blockers instead of reporting premature success.
 
@@ -250,7 +275,7 @@
           - id: gvs-runtime
             name: '@makame/dsh-gvs/runtime'
             config:
-              maxParallel: 2
+              maxParallel: 4
               maxTasks: 10000
               goalProtocol: 2
     - id: gvs-recovery

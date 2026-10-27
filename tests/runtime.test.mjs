@@ -44,6 +44,35 @@ test('host API defers tasks, forbids early execution and wakes the same role wit
  const next=await f.call('gvs_task',{action:'create',title:'Second change',instructions:'New work, same role',kind:'work',assignee:'developer',dependsOn:[review.task.id]});
  assert.equal(next.task.state,'running');assert.equal(f.actor('developer').id,originalId);assert.equal(f.spawns,3);
 });
+test('scheduler overlaps independent scoped branches, preserves conflict waits, and guards direct edits',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Parallel project',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ for(const [name,capability] of [['ui','edit'],['server','edit'],['qa','verify'],['spare','edit']])await f.call('gvs_agent',{action:'create',name,title:name,purpose:'Independent branch',capability});
+ const create=(name,paths,extra={})=>f.call('gvs_task',{action:'create',title:name,instructions:'Bounded isolated work',kind:'work',assignee:name,writeScopes:paths,readScopes:paths,resources:[],...extra});
+ const ui=await create('ui',['ui']),server=await create('server',['backend']),qa=await create('qa',['tests/static']);
+ assert.equal(ui.task.state,'running');assert.equal(server.task.state,'running');assert.equal(qa.task.state,'running');assert.equal((await f.call('gvs_parallel',{action:'status'})).parallel.active.length,3);
+ const overlap=await create('spare',['ui/dialog']);assert.equal(overlap.task.state,'waiting');
+ assert.equal((await f.call('gvs_parallel',{action:'status'})).parallel.waiting.find(t=>t.id===overlap.task.id).reason.kind,'resources');
+ f.definitions.set('write',{execute:async()=>({ok:true})});const cwd=path.resolve('work/in-memory-fixture');
+ assert.equal((await f.call('write',{file_path:path.join(cwd,'ui/dialog.js')},f.actor('ui'))).ok,true);
+ await assert.rejects(f.call('write',{file_path:path.join(cwd,'backend/main.rs')},f.actor('ui')),/outside this task writeScopes/);
+ await assert.rejects(f.call('gvs_task',{action:'update',taskId:ui.task.id,writeScopes:['backend'],reason:'Attempt live scope change'}),/running task/);
+ await f.call('gvs_ask_user',{reuseTaskId:start.briefTaskId},f.actor('ui'));await f.complete(ui.task.id,f.actor('ui'));
+ assert.equal((await f.call('gvs_task',{action:'list',taskId:overlap.task.id})).tasks[0].state,'running','The same waiting task wakes when its file lease is released');
+});
+test('queued ownership/scopes can be corrected without new task IDs; limit and real dependencies remain binding',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Reuse queued branches',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ for(const name of ['first','second'])await f.call('gvs_agent',{action:'create',name,title:name,purpose:'Implement',capability:'edit'});
+ await f.call('gvs_parallel',{action:'configure',maxParallel:1});
+ const a=await f.call('gvs_task',{action:'create',title:'A',instructions:'A',kind:'work',assignee:'first',writeScopes:['a'],readScopes:['a'],resources:[]});
+ const b=await f.call('gvs_task',{action:'create',title:'B',instructions:'B',kind:'work',assignee:'first',writeScopes:['b'],readScopes:['b'],resources:[]});
+ const count=f.tasks.size;
+ await f.call('gvs_task',{action:'update',taskId:b.task.id,assignee:'second',writeScopes:['b'],readScopes:['b'],resources:[],reason:'Reuse an independent specialist for the queued branch'});
+ assert.equal((await f.call('gvs_parallel',{action:'status'})).parallel.waiting[0].reason.kind,'parallel-limit');
+ await f.call('gvs_parallel',{action:'configure',maxParallel:2});assert.equal(f.tasks.size,count);assert.equal(f.tasks.get(b.task.id).ownerName,'second');
+ const dependent=await f.call('gvs_task',{action:'create',title:'Join',instructions:'Needs A',kind:'work',assignee:'first',dependsOn:[a.task.id]});assert.equal(dependent.task.state,'waiting');
+ await assert.rejects(f.call('gvs_parallel',{action:'configure',maxParallel:8},f.actor('second')),/Only the coordinator/);
+ await f.call('gvs_pause');await f.call('gvs_parallel',{action:'configure',maxParallel:4});assert.equal((await f.call('gvs_status')).status,'paused');
+});
 
 test('one recorded User decision is reused across roles and later tasks without a consultation storm',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Deliver mobile then admin without reapproving known scope',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
@@ -140,6 +169,19 @@ test('automatic recovery reuses interrupted assignments but never resumes a huma
  await f.call('gvs_resume');
  await f.call('gvs_task',{action:'complete',taskId:start.briefTaskId,verdict:'blocked',summary:'Real missing external dependency',findings:['Runtime source is unavailable']},f.actor('user'));
  const blocked=await f.call('gvs_recover');assert.deepEqual(blocked.recovered,[]);assert.equal((await f.call('gvs_task',{action:'list',taskId:start.briefTaskId})).tasks[0].state,'blocked');
+});
+test('a verbose assignment fits the native team limit and old oversize delivery failures retry the same task',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Bounded delivery',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'reviewer',title:'Reviewer',purpose:'Independent work',capability:'verify'});
+ const saved=JSON.parse([...f.files.values()][0]);saved.goal.messages.push({id:'large-human-source',text:'Полный реальный контракт '.repeat(20000)});
+ for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));
+ const isolated=await import(`../v3/runtime.js?budget=${randomUUID()}`);isolated.apply(f.ctx);
+ const work=await f.call('gvs_task',{action:'create',title:'Inspect',instructions:'Inspect current source',kind:'work',assignee:'reviewer'});
+ const sent=f.sent.filter(message=>message.target==='reviewer').at(-1);assert.ok(Buffer.byteLength(JSON.stringify(sent.content),'utf8')<120001);assert.match(sent.content[0].text,/COMPACT ASSIGNMENT/);assert.match(sent.content[0].text,new RegExp(work.task.id));
+ const state=JSON.parse([...f.files.values()][0]),task=state.tasks.find(task=>task.id===work.task.id);task.state='blocked';task.result={verdict:'blocked',summary:'team message exceeds 131072 bytes',findings:[]};
+ for(const key of f.files.keys())f.files.set(key,JSON.stringify(state));
+ const reboot=await import(`../v3/runtime.js?retry=${randomUUID()}`);reboot.apply(f.ctx);
+ const recovered=await f.call('gvs_recover');assert.deepEqual(recovered.recovered,[work.task.id]);assert.equal(f.spawns,2);assert.equal(f.tasks.get(work.task.id).status,'in_progress');
 });
 
 test('optional lifecycle metadata never leaks undefined into native JSON tool outputs',async()=>{
