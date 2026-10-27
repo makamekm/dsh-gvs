@@ -1,10 +1,12 @@
 import {createHash} from 'node:crypto';
+import {isStatusText} from './requests.js';
 
 export const fullTransfer=text=>/1\s*в\s*1|пиксел|pixel.{0,15}pixel|реверс|reverse.{0,5}engineer|весь функционал|полны[йяоеую]+\s+(?:перенос|копи|функционал)/iu.test(text);
 export function syncGoal(run,messages){
  if(!run.goal)run.goal={version:1,autonomous:true,messages:[],requirements:[],issues:[],assessed:[],discoveryRequired:false};
  const goal=run.goal;
  for(const message of messages??[]){
+  if(isStatusText(message.text))continue;
   if(goal.messages.some(item=>item.id===message.id))continue;
   goal.messages.push({id:message.id,text:message.text});
   goal.discoveryRequired ||= fullTransfer(message.text);

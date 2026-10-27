@@ -6,6 +6,8 @@ import {progressStatus} from './flow.js';
 import {PARALLEL} from './prompts.js';
 import {CODE_PLANNING} from './planning.js';
 import {USER_TESTING} from './journeys.js';
+import {isStatusQuestion} from './requests.js';
+export {isStatusQuestion} from './requests.js';
 
 export const inject=['agents','agentTeams','tools','workingDirectory','fs','sessionProjections','systemPrompt'];
 export function retryableStop(reason){
@@ -13,12 +15,6 @@ export function retryableStop(reason){
  if(reason?.kind!=='error')return false;
  const error=reason.error??{};
  return error.retryable===true||/overload|rate.?limit|temporar|timeout|timed.?out|ECONNREFUSED|ECONNRESET|fetch failed|context.{0,20}(?:overflow|exceed)|CONTEXT_WINDOW_EXCEEDED|\b(?:429|502|503|504)\b/iu.test(`${error.code??''} ${error.message??''}`);
-}
-export function isStatusQuestion(message){
- if(message?.source?.kind!=='user'||!message.content?.length||message.content.some(part=>part.type!=='text'))return false;
- const text=message.content.map(part=>part.text).join(' ').trim().replace(/[?!.…]+$/u,'').trim();
- if(text.length>240)return false;
- return /^(?:(?:скажи|покажи|расскажи|напиши)(?: мне)?[,:]?\s+)?(?:какой(?: сейчас| текущий)? статус(?: задачи| работы| агентов| команды)?|статус(?: работы| задачи| агентов| команды)?|что(?: сейчас)? делают агенты|чем(?: сейчас)? занят[аы]?(?: агенты| команда)?|как(?:ой)? прогресс|как (?:ид[её]т|продвигается) (?:работа|задача)|что (?:уже )?готово|сколько (?:ещ[её] )?осталось|ну что(?: там)?|есть (?:новости|результат)|как дела(?: с задачей| у агентов)?|status(?: update)?|what(?:'s| is) (?:the )?(?:status|progress)|what are (?:the )?agents doing|how(?:'s| is) (?:it|the work|the task) (?:going|progressing))$/iu.test(text);
 }
 function isLead(agent){
  return agent?.session.header.agentPreset==='gvs-local'&&agent.session.header.origin!=='subagent';
@@ -69,7 +65,7 @@ export function apply(ctx,config={}){
  ctx.systemPrompt?.section({name:'gvs-visual-acceptance',order:97,text:'For GVS visual reviews: QA AND User independently inspect actual pixels for overlap, clipping, spacing, alignment, readability, responsive states and interaction/hit areas. Inspect initial dialogs and open/intermediate/error states, not only a clean final screenshot. gvs_browser_check records rendered geometry candidates and intermediate images; gvs_visual pages them with evidence. A candidate needs screenshot-based classification, not automatic rejection or a blanket source-matches dismissal. Visual pass needs visualReview.checked for all seven categories, current images and assessments. Confirmed defects require findings, an owned editing repair and fresh independent recheck. An increment can report an outside-scope defect without blocking unrelated work; it remains a mandatory whole-goal issue. Full acceptance cannot waive it. Independent QA and User classification is required even when a source/test summary claimed success. No need for extra agents or another readiness/approval loop for routine visual defects.'});
  ctx.systemPrompt?.section({name:'gvs-complete-goal',order:96,text:'For the top-level GVS coordinator: the entire real human goal is binding until gvs_finish returns verified. Use gvs_goal to assess immutable requirements and needed expertise, create/reuse the appropriate specialists yourself and assign real dependency tasks; the human does not choose technical roles. Resolve every review finding with repair and independent recheck. Discover unknown functionality and consequences before dependent implementation. A prototype or needs-review is not completion. Continue the same run across normal model stops; only explicit human cancellation or a documented external dependency can suspend actionable work. On upgrade/recovery preserve agent identities and completed work, inspect gvs_goal status and the paginated gvs_task list; if the User brief predates goal tracking, assign the same User a consultation to assess all humanMessages and needed expertise. Never overwrite the human contract with an agent summary. DELIVERY DISCIPLINE: 100% final acceptance is not 100% planning before any code. Bound each implementation assignment to one runnable increment, normally 20 minutes before a build/render checkpoint; split unrelated remaining obligations into subsequent owned tasks with gvs_task update/create and link them in batches with gvs_goal links. Do not append every discovered feature to the same active task. Do not repeat source/readiness/ownership audits after evidence is established unless a concrete new blocker affects that work. Existing passed discovery remains valid for independent work; use explicit DAG dependencies for new unknowns. Reuse passed User decisions for the current contract through gvs_ask_user reuseTaskId. Progress diagnostics needsIntervention requires actual coordinator action: inspect the editor/blocker, get a bounded artifact and real check, change a bad dependency, or assign the next implementable slice. Repeating waits, ledger relinks or acknowledgements is not progress. Never report an assigned mobile/backend task as implemented; use actual runtime evidence and identify remaining unimplemented journeys.'});
  const humanGoal=z.object({messages:z.array(z.object({id:z.string(),text:z.string()}))});
- ctx.sessionProjections.register({key:'gvsHumanGoal',stateVersion:1,stateSchema:humanGoal,init:()=>({messages:[]}),
+ ctx.sessionProjections.register({key:'gvsHumanGoal',stateVersion:2,stateSchema:humanGoal,init:()=>({messages:[]}),
   apply(state,event){
    if(event.type!=='user/message'||event.data.source?.kind!=='user'||isStatusQuestion(event.data))return state;
    const text=event.data.content.filter(part=>part.type==='text').map(part=>part.text).join('\n');

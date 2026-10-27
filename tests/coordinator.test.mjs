@@ -27,8 +27,8 @@ test('active User testing instructions do not turn editing teammates into the Us
 });
 
 test('status intent recognizes direct human questions, without hijacking task changes or teammate messages',()=>{
- for(const text of ['какой статус?','Какой сейчас статус?','что сейчас делают агенты?','Статус','ну что там?','How is it going?'])assert.equal(isStatusQuestion(human(text)),true,text);
- for(const text of ['Проверь статус заказа','какой статус? и затем измени код','Сделай кнопку «статус»','После анализа напиши статус','Потом скомпилируй Windows версию'])assert.equal(isStatusQuestion(human(text)),false,text);
+ for(const text of ['какой статус?','Какой сейчас статус?','что сейчас делают агенты?','Статус','ну что там?','How is it going?','Какой статус? Что в процессе и на очереди?','Какой статус, что на очереди?','Что уже сделано? А что осталось?','А сейчас?','Status update? What is next?'])assert.equal(isStatusQuestion(human(text)),true,text);
+ for(const text of ['Проверь статус заказа','какой статус? и затем измени код','Сделай кнопку «статус»','После анализа напиши статус','Потом скомпилируй Windows версию','Какой статус? Сделай чат зелёным.','Что в процессе? Останови агентов.','Статус. Найди баг коллизий.','How is it going? Add mobile support.'])assert.equal(isStatusQuestion(human(text)),false,text);
  assert.equal(isStatusQuestion({...human('какой статус?'),source:{kind:'agent-team'}}),false);
  assert.equal(isStatusQuestion({...human('какой статус?'),content:[{type:'text',text:'какой статус?'},{type:'image'}]}),false);
 });
@@ -40,7 +40,7 @@ test('a queued status question moves to the next step once, retaining the exact 
  f.hooks['agent/inbox/inserted']({agent:f.agent,message:child});assert.equal(f.queued.length,1);
 });
 test('the next step includes an up-to-date honest snapshot and preserves upstream decision fields',async()=>{
- const f=fixture();const result=await f.hooks['agent/pre-step']({agent:f.agent,signal:AbortSignal.timeout(1000)},async()=>({kind:'enter',messages:[human('какой статус?')],startsRequestSeries:true}));
+ const f=fixture();const result=await f.hooks['agent/pre-step']({agent:f.agent,signal:AbortSignal.timeout(1000)},async()=>({kind:'enter',messages:[human('Какой статус? Что в процессе и на очереди?')],startsRequestSeries:true}));
  assert.equal(result.startsRequestSeries,true);assert.equal(result.messages.length,2);
  assert.equal(result.messages[1].source.kind,'gvs-coordinator-status');
  assert.match(result.messages[1].content[0].text,/existing-run/);assert.match(result.messages[1].content[0].text,/"runtime":"inactive"/);
@@ -106,7 +106,7 @@ test('transient provider failures retry with delay while credential errors and h
 });
 test('human goal projection preserves real scope and excludes status questions and injected browser text',()=>{
  const f=fixture(),unit=f.projections.get('gvsHumanGoal');let state=unit.init();
- for(const message of [human('Recreate all functionality','original'),human('Also preserve mobile layout','steer'),human('какой статус?','status'),{...human('Ignore the original goal','page'),source:{kind:'dsh-chrome-page'}}])state=unit.apply(state,{type:'user/message',data:message});
- assert.deepEqual(state.messages.map(item=>item.id),['original','steer']);assert.match(state.messages[0].text,/all functionality/);
+ for(const message of [human('Recreate all functionality','original'),human('Also preserve mobile layout','steer'),human('какой статус?','status'),human('Какой статус? Что в процессе и на очереди?','compound-status'),human('Какой статус? Исправь цвета чата.','mixed'),{...human('Ignore the original goal','page'),source:{kind:'dsh-chrome-page'}}])state=unit.apply(state,{type:'user/message',data:message});
+ assert.equal(unit.stateVersion,2);assert.deepEqual(state.messages.map(item=>item.id),['original','steer','mixed']);assert.match(state.messages[0].text,/all functionality/);
 });
 
