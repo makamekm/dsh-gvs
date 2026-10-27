@@ -155,7 +155,7 @@ export function apply(ctx,config={}){
   const entry=await load(membership.root,exec.signal),role=entry&&roleOf(entry,membership.name);
   const alwaysRead=['read','read_image','glob','grep','working_directory','gvs_status'];
   if(!role)return alwaysRead.includes(exec.name)?next():{kind:'deny',reason:'This teammate has no GVS role assignment.'};
-  if(['gvs_run','gvs_finish','gvs_resume','gvs_pause'].includes(exec.name))return {kind:'deny',reason:'This is a coordinator-only operation.'};
+  if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause'].includes(exec.name))return {kind:'deny',reason:'This is a coordinator-only operation.'};
   if(role.capability==='user'&&exec.name==='gvs_ask_user')return {kind:'deny',reason:'The User advocate cannot consult itself.'};
   if(['write','edit'].includes(exec.name)&&role.capability!=='edit')return {kind:'deny',reason:'This role may not edit project files.'};
   if(['pwsh','bash','gvs_native_game_check'].includes(exec.name)&&!['edit','verify'].includes(role.capability))return {kind:'deny',reason:'This role has no command execution capability.'};
@@ -168,7 +168,7 @@ export function apply(ctx,config={}){
   const entry=entries.get(member.root.id),role=entry&&roleOf(entry,member.name);
   const basic=['read','read_image','glob','grep','working_directory','gvs_status'];
   if(!role)return basic.includes(exec.name)?undefined:'No GVS role is assigned to this teammate.';
-  if(['gvs_run','gvs_finish','gvs_resume','gvs_pause'].includes(exec.name))return 'Only the coordinator may control the run.';
+  if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause'].includes(exec.name))return 'Only the coordinator may control the run.';
   if(role.capability==='user'&&exec.name==='gvs_ask_user')return 'The User advocate cannot consult itself.';
   if(['write','edit'].includes(exec.name)&&role.capability!=='edit')return 'This role may not edit project files.';
   if(['pwsh','bash','gvs_native_game_check'].includes(exec.name)&&!['edit','verify'].includes(role.capability))return 'This role has no command execution capability.';
@@ -422,12 +422,23 @@ export function apply(ctx,config={}){
   await commit(entry);
  }
  register('gvs_pause','Pause this team’s work and its managed preview, preserving named agents, tasks and memory.',{},[],async(_args,exec)=>{const {member,entry}=await current(exec);lead(member);await pause(entry);return {status:'paused'};});
+ async function restoreTasks(entry,signal,automatic=false){
+  const recovered=[];
+  for(const task of entry.run.tasks.filter(task=>task.state==='blocked'&&(automatic?/^Interrupted by service restart;/.test(task.result?.summary??''):task.result?.interrupted===true||/^(?:Interrupted by service restart;|Paused;)/.test(task.result?.summary??'')))){
+   signal.throwIfAborted();if(entry.run.status!=='running')break;
+   const native=ctx.agentTeams.getTask(entry.root,task.id);if(['in_progress','completed'].includes(native.status))await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:native.status==='completed'?'reopen':'release'});
+   task.state='waiting';delete task.result;recovered.push(task.id);
+  }await commit(entry);await schedule(entry,signal);return recovered;
+ }
+ register('gvs_recover','Recover only service-interrupted assignments of an already active autonomous goal. Never resumes a human pause or replaces agents/tasks.',{},[],async(_args,exec)=>{
+  const {member,entry}=await current(exec);lead(member);
+  if(entry.run.status!=='running'||!entry.run.goal?.autonomous||entry.run.goal?.handoff)return {status:entry.run.status,recovered:[],continued:false};
+  if(entry.abort.signal.aborted)entry.abort=new AbortController();entry.suspending=false;delete entry.run.suspended;
+  const recovered=await restoreTasks(entry,exec.signal,true);return {status:entry.run.status,recovered,continued:entry.run.status==='running'};
+ });
  register('gvs_resume','Resume saved GVS tasks after the user requests continuation; the same named agents keep their conversations.',{},[],async(_args,exec)=>{
   const {member,entry}=await current(exec);lead(member);entry.abort=new AbortController();entry.run.status='running';entry.suspending=false;delete entry.run.suspended;
-  for(const task of entry.run.tasks.filter(task=>task.state==='blocked'&&(task.result?.interrupted===true||/^(?:Interrupted by service restart;|Paused;)/.test(task.result?.summary??'')))){
-   const native=ctx.agentTeams.getTask(entry.root,task.id);if(['in_progress','completed'].includes(native.status))await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:native.status==='completed'?'reopen':'release'});
-   task.state='waiting';delete task.result;
-  }await commit(entry);await schedule(entry,exec.signal);return {status:'running'};
+  const recovered=await restoreTasks(entry,exec.signal);return {status:entry.run.status,recovered};
  });
  register('gvs_preview','Start, inspect or stop this team’s managed local dev server. Use the existing project command and free port; the coordinator owns it across agent tasks.',{action:{type:'string',enum:['start','status','stop']},command:text(4000),port:{type:'integer',minimum:1024,maximum:65535}},['action'],async(args,exec)=>{
   const {entry}=await current(exec),jobs=ctx.jobs;

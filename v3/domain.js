@@ -39,7 +39,7 @@ export function view(run){
    const waiting=run.tasks.find(task=>task.assignee===role.name&&task.state==='waiting');
    const dependencies=waiting?.dependsOn.filter(id=>run.tasks.find(task=>task.id===id)?.state!=='done').map(id=>run.tasks.find(task=>task.id===id));
    return {name:role.name,title:role.title,purpose:role.purpose,sessionId:role.sessionId??null,
-    state:role.waitingForUser?'waiting':current?'running':blocked?'blocked':waiting?'waiting':role.error?'error':'idle',
+    waitingForUser:role.waitingForUser===true,state:role.waitingForUser?'waiting':current?'running':blocked?'blocked':waiting?'waiting':role.error?'error':'idle',
     activity:clip(role.waitingForUser?'Ждёт ответа Пользователя':current?.title??blocked?.result?.summary??waiting?.title??'Ожидает новую задачу',280),
     waitingFor:(dependencies??[]).filter(Boolean).map(task=>({id:task.id,title:task.title,agent:run.roles.find(role=>role.name===task.assignee)?.title??task.assignee})),
     completed:run.tasks.filter(task=>task.assignee===role.name&&task.state==='done').length,error:role.error??null};

@@ -130,6 +130,17 @@ test('restart preserves the active goal and resume reuses its original actor',as
  const status=await f.call('gvs_status');assert.equal(status.status,'running');assert.equal(status.gvsTeam.tasks.find(task=>task.id===start.briefTaskId).state,'blocked');
  await f.call('gvs_resume');assert.equal(f.actor('user').id,id);assert.equal(f.spawns,1);assert.equal(f.tasks.get(start.briefTaskId).status,'in_progress');
 });
+test('automatic recovery reuses interrupted assignments but never resumes a human pause or retries genuine blockers',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Automatic recovery',kind:'code'}),id=f.actor('user').id;
+ const isolated=await import(`../v3/runtime.js?boot=${randomUUID()}`);isolated.apply(f.ctx);
+ const recovered=await f.call('gvs_recover');assert.equal(recovered.continued,true);assert.deepEqual(recovered.recovered,[start.briefTaskId]);assert.equal(f.actor('user').id,id);assert.equal(f.spawns,1);assert.equal(f.tasks.get(start.briefTaskId).status,'in_progress');
+ assert.deepEqual((await f.call('gvs_recover')).recovered,[],'No duplicate wake of an already running task');
+ await f.call('gvs_pause');const messages=f.sent.length;
+ const paused=await f.call('gvs_recover');assert.equal(paused.status,'paused');assert.equal(paused.continued,false);assert.equal(f.sent.length,messages);
+ await f.call('gvs_resume');
+ await f.call('gvs_task',{action:'complete',taskId:start.briefTaskId,verdict:'blocked',summary:'Real missing external dependency',findings:['Runtime source is unavailable']},f.actor('user'));
+ const blocked=await f.call('gvs_recover');assert.deepEqual(blocked.recovered,[]);assert.equal((await f.call('gvs_task',{action:'list',taskId:start.briefTaskId})).tasks[0].state,'blocked');
+});
 
 test('optional lifecycle metadata never leaks undefined into native JSON tool outputs',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Serialization',kind:'code'});

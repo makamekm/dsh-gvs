@@ -10,8 +10,15 @@ test('boot recovery resumes opted-in active goals and the explicit upgrade targe
  const result=await recoverGoals(ctx,{recoverSessions:['old']});assert.deepEqual(called,['active','old']);assert.equal(result.resumed.length,2);assert.deepEqual(result.errors,[]);
 });
 test('boot wakes a resumed coordinator even when old teammate results are still queued',async()=>{
- const sent=[],agent={id:'active',status:'inactive',inbox:{nextTurn:[{id:'old-team-result'}],nextStep:[]},followup:message=>sent.push(message)};
+ const sent=[],calls=[],agent={id:'active',status:'idle',ctx:{tools:{execute:async request=>{calls.push(request.name);return {value:{continued:true,recovered:['existing-task']}};}}},inbox:{nextTurn:[{id:'old-team-result'},{id:'old-recovery',source:{kind:'gvs-coordinator-continuation'}}],nextStep:[],remove:id=>{agent.inbox.nextTurn=agent.inbox.nextTurn.filter(message=>message.id!==id);}},steer:message=>sent.push(message),followup:()=>assert.fail('Cold starts can race with teammate wakes; recovery must use steer even while idle')};
  const ctx={effect:fn=>fn(),sessionPersistence:{list:async()=>[{header:{id:'active',cwd:'/project',agentPreset:'gvs-local'}}]},
   fs:{resolve:async name=>name,readText:async()=>JSON.stringify({sessionId:'active',status:'running',goal:{autonomous:true}})},sessionController:{resolveAgent:async()=>({agent})}};
- apply(ctx);await new Promise(resolve=>setImmediate(resolve));assert.equal(sent.length,1);assert.equal(sent[0].source.kind,'gvs-coordinator-continuation');assert.equal(agent.inbox.nextTurn[0].id,'old-team-result');
+ apply(ctx);await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(calls,['gvs_recover']);assert.equal(sent.length,1);assert.equal(sent[0].source.kind,'gvs-coordinator-continuation');assert.deepEqual(agent.inbox.nextTurn.map(message=>message.id),['old-team-result']);
+});
+test('boot restores assignments before steering a busy coordinator and respects a concurrent human pause',async()=>{
+ const calls=[],sent=[];let continued=true;
+ const agent={id:'active',status:'running',ctx:{tools:{execute:async request=>{calls.push(request.name);return {value:{continued,recovered:['same-task']}};}}},steer:message=>sent.push(message),followup:()=>assert.fail('A busy coordinator needs next-step delivery, not next-turn queueing')};
+ const ctx={effect:fn=>fn(),sessionPersistence:{list:async()=>[{header:{id:'active',cwd:'/project',agentPreset:'gvs-local'}}]},fs:{resolve:async name=>name,readText:async()=>JSON.stringify({sessionId:'active',status:'running',goal:{autonomous:true}})},sessionController:{resolveAgent:async()=>({agent})}};
+ apply(ctx);await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(calls,['gvs_recover']);assert.equal(sent.length,1);
+ continued=false;apply(ctx);await new Promise(resolve=>setImmediate(resolve));assert.equal(sent.length,1,'A paused goal must not be woken by boot recovery');
 });
