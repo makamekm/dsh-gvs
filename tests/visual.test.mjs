@@ -59,3 +59,14 @@ test('source-only increments do not require screenshots and cannot contribute vi
  run.tasks=[{...source,state:'done',result}];assert.equal(visualAuditStatus(run).warnings[0].qaReviewed,false);
  for(const other of [{...source,scope:'full'},{...source,kind:'user-review'},{...source,kind:'design-review'},{...source,analysisIds:['motion']}])assert.throws(()=>validateVisualReview(run,other,{verdict:'pass'}),/Visual acceptance/);
 });
+
+test('failed journeys keep real initial and error screenshots inspectable and audited without becoming successful proof',()=>{
+ const {run,task,result}=fixture(),failed=structuredClone(run.visualChecks[0]);failed.ok=false;failed.taskId=task.id;
+ for(const view of failed.views){const id='failed-'+view.viewport;view.errors=['Actual assertion failed after capture'];view.layout.captures.forEach(c=>c.imageId=id);view.layout.warnings.forEach(w=>w.images=[id]);}
+ failed.images.forEach(i=>i.attachment.attachmentId='failed-'+i.viewport);run.visualChecks.push(failed);
+ const states=visualStates(run,task);assert.deepEqual(states.map(s=>s.imageId),['desktop','mobile','failed-desktop','failed-mobile']);assert.equal(states.at(-1).contexts[0].checkOk,false);
+ assert.match(states.at(-1).contexts[0].errors[0],/assertion failed/);
+ assert.throws(()=>validateVisualReview(run,task,result),/Missing 2 of 4/);
+ result.images.push('failed-desktop','failed-mobile');assert.deepEqual(validateVisualReview(run,task,result),[],'Actual failed pixels are reviewed in addition to successful proof');
+ run.visualChecks=run.visualChecks.filter(c=>!c.ok);assert.throws(()=>validateVisualReview(run,task,result),/successful checks/);
+});

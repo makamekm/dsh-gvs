@@ -10,9 +10,9 @@ import {decisionKey,reusableDecision,availableDecisions,consultationKey,progress
 import {previewState,needsPreview} from './preview.js';
 import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus,visualStates} from './visual.js';
 import {USER_TESTING,planUserJourneys,userJourneyStatus,scenarioKey,userProbeInput,interruptedByLegacyPlan} from './journeys.js';
-import {recordToolFailure,recordToolSuccess,toolIdentity,diagnosticStatus} from './diagnostics.js';
+import {recordToolFailure,recordToolSuccess,toolIdentity,diagnosticStatus,toolFailureMessage,recoveryAdvice} from './diagnostics.js';
 import {providerRecoveryCandidates,providerFailureFor,readFailedSelection,inheritSelection} from './models.js';
-import {parallelFields,parallelBlocker,parallelStatus,taskAccess,writeAllowed,validateWriteScopes,evidencePath} from './parallel.js';
+import {parallelFields,parallelBlocker,parallelStatus,taskAccess,runningAccessChange,writeAllowed,validateWriteScopes,evidencePath} from './parallel.js';
 import {assignmentDelivery} from './delivery.js';
 import {prepareCodePlan,stalePlanFiles,planSources,needsCodePlan,missingPlanOutputs,migrateCodePlan} from './planning.js';
 import {taskArtifacts} from './artifacts.js';
@@ -29,7 +29,8 @@ const liveImages=run=>{
  const current=run.visualChecks.filter(c=>c.ok&&c.revision===run.revision),scene=current.filter(c=>c.views?.some(v=>v.layout)).at(-1);
  const ui=scene?.images??run.viewports.map(viewport=>current.flatMap(c=>c.images).filter(i=>i.viewport===viewport).at(-1)).filter(Boolean);
  const temporal=(run.analysisChecks??[]).filter(c=>c.ok&&c.revision===run.revision&&c.planVersion===run.analysis?.version).slice(-1).flatMap(c=>c.images);
- return [...ui,...run.viewports.flatMap(viewport=>temporal.filter(i=>i.viewport===viewport).slice(-2))].filter((image,i,all)=>all.findIndex(item=>item.attachment.attachmentId===image.attachment.attachmentId)===i).slice(0,20);
+ const failed=run.visualChecks.filter(c=>!c.ok&&c.revision===run.revision).at(-1)?.images??[];
+ return [...ui,...failed,...run.viewports.flatMap(viewport=>temporal.filter(i=>i.viewport===viewport).slice(-2))].filter((image,i,all)=>all.findIndex(item=>item.attachment.attachmentId===image.attachment.attachmentId)===i).slice(0,20);
 };
 const taskSummaries=(tasks,detail=false)=>tasks.map(({id,title,assignee,kind,dependsOn,state,result,instructions,startedAt,priority,scope,reviewFocus,analysisIds,readScopes,writeScopes,resources,externalReadScopes,externalWriteScopes,scopeNotices,codePlan,planRequired,planStale,lastUpdate})=>({id,title,assignee,kind,dependsOn,state,startedAt,priority,scope,reviewFocus,analysisIds,readScopes,writeScopes,resources,externalReadScopes,externalWriteScopes,scopeNotices,...(detail?{instructions,codePlan,lastUpdate}:{}),planning:codePlan?{state:planStale?'stale':'planned',summary:clip(codePlan.summary,300)}:planRequired?{state:'needs-coordinator-plan'}:null,...(result?{result:detail?result:{...result,summary:clip(result.summary,800),findings:result.findings.map(item=>clip(item,600)),inventory:result.inventory?.slice(0,10).map(item=>({...item,evidence:clip(item.evidence,400)}))}}:{})}));
 
@@ -258,10 +259,20 @@ export function apply(ctx,config={}){
   }
   return next();
  });
+ ctx.on('tools/execute',async(exec,next)=>{
+  const result=await next();
+  const member=exec.agent&&ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);
+  if(!entry||entry.run.status!=='running')return result;
+  const message=toolFailureMessage(result),advice=message&&recoveryAdvice(message);
+  if(!advice)return result;
+  // Keep the canonical outcome/error and all images. Context survives Native
+  // definition-owned content finalizers and is delivered after this failed call.
+  return {...result,additionalContexts:[...(result.additionalContexts??[]),{id:randomUUID(),role:'user',source:{kind:'gvs-tool-recovery',form:'notice',summary:'Correct the failed tool operation before retrying'},content:[{type:'text',text:`GVS TOOL RECOVERY (${exec.name}): ${advice} This notice does not satisfy any test or acceptance gate.`}]}]};
+ });
  ctx.on('tools/result',(exec,result)=>{
   if(!exec.agent)return;const member=ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);if(!entry||entry.run.status!=='running')return;
   const role=roleOf(entry,member.name),task=entry.run.tasks.find(task=>task.assignee===member.name&&task.state==='running');
-  if(!exec.name.startsWith('gvs_')){if(result.isError||result.value?.kind==='foreground'&&result.value.exitCode!==0){const message=result.isError?result.content?.filter(p=>p.type==='text').map(p=>p.text).join('\n'):`Command failed (exit ${result.value.exitCode}): ${result.value.stderr?.text??result.value.stdout?.text??''}`;void noteFailure(entry,exec,message||'Tool execution failed').catch(()=>{});}
+  if(!exec.name.startsWith('gvs_')){const message=toolFailureMessage(result);if(message){void noteFailure(entry,exec,message).catch(()=>{});}
   else if(recordToolSuccess(entry.run,operation(entry,exec)))void commit(entry).catch(()=>{});}
   if(['write','edit'].includes(exec.name)&&!result.isError){
    const file=exec.arguments?.file_path??exec.arguments?.path??'';
@@ -344,7 +355,8 @@ export function apply(ctx,config={}){
     }
     const scope=args.scope||args.reviewFocus||args.analysisIds!==undefined?reviewPlan(entry.run,{...task,...args}):{};
     validateWriteScopes(roleOf(entry,reassign?args.assignee:task.assignee),access.writeScopes??task.writeScopes);
-    if(task.state==='running'&&(reassign||JSON.stringify(taskAccess(entry.run,task))!==JSON.stringify(taskAccess(entry.run,{...task,...scope,...access}))))throw new Error('Do not change the owner/access lease of a running task. Finish its slice first; reassign/scope queued or blocked follow-ups.');
+    const leaseChange=task.state==='running'&&runningAccessChange(entry.run,task,{...scope,...access,...(reassign?{assignee:args.assignee}:{})});
+    if(leaseChange)throw new Error(`Do not change the owner/exclusive lease or shrink read access of a running task. Read-only expansion is allowed only without active write/resource conflicts. ${JSON.stringify(leaseChange)}. Preserve this slice; queue a scoped follow-up for conflicting changes.`);
     const plan=args.codePlan?await codePlan(entry,{...task,...scope,...access,...(reassign?{assignee:args.assignee}:{})},args.codePlan):null;
     const changes={...scope,...access,...(plan?{codePlan:plan,planStale:false,stalePlanFiles:[]}:{}),...(reassign?{assignee:args.assignee}:{}),...(args.instructions?{instructions:args.instructions}:{}),...(args.title?{title:args.title}:{}),...(args.priority!==undefined?{priority:args.priority}:{})};
     const fields=Object.keys(changes).filter(key=>JSON.stringify(task[key])!==JSON.stringify(changes[key]));
@@ -475,7 +487,7 @@ export function apply(ctx,config={}){
   }
   const ordered=[...status.warnings.filter(w=>!w.qaReviewed||!w.userReviewed),...status.warnings.filter(w=>w.qaReviewed&&w.userReviewed)];
   const warnings=args.warningId?ordered.filter(w=>w.id===args.warningId):ordered.slice(offset,offset+limit),images=[];
-  const available=entry.run.visualChecks.filter(c=>c.ok&&c.revision===entry.run.revision).flatMap(c=>c.images);
+  const available=entry.run.visualChecks.filter(c=>c.revision===entry.run.revision).flatMap(c=>c.images);
   for(const warning of warnings){const image=available.find(i=>warning.images.includes(i.attachment.attachmentId));if(image&&!images.some(i=>i.attachment.attachmentId===image.attachment.attachmentId))images.push(image);}
   const own=entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');if(own){own.receivedImages=[...new Set([...(own.receivedImages??[]),...images.map(i=>i.attachment.attachmentId)])];await commit(entry);}
   return {ready:status.ready,total:ordered.length,warnings,images,nextOffset:!args.warningId&&offset+limit<ordered.length?offset+limit:null,requiredChecks:VISUAL_CHECKS,coverageLimits:entry.run.visualChecks.filter(c=>c.ok&&c.revision===entry.run.revision).flatMap(c=>(c.views??[]).filter(v=>v.layout?.truncated||v.uncapturedTransitions>0).map(v=>({viewport:v.viewport,truncated:v.layout?.truncated??false,uncapturedTransitions:v.uncapturedTransitions??0}))),next:'Classify visible candidates with actual image IDs and specific pixel/readability/hit-area evidence. Defects require revise+repair/recheck. An out-of-scope defect in an increment is saved as a mandatory global issue, never waived. No findings does not replace manual visual inspection of all states. Split long journeys to capture omitted transitions; bounded scans require explicit manualCoverage.'};

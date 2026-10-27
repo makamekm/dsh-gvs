@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {captureBrowser,validateBrowserActions,browserPlans} from '../v3/browser.js';
+import {captureBrowser,validateBrowserActions,browserPlans,captureViewport} from '../v3/browser.js';
 test('unsupported viewport action is rejected before any browser or screenshot capture with a specific correction',async()=>{
  let captured=false;await assert.rejects(captureBrowser({url:'http://127.0.0.1:5173/',actions:[{kind:'viewport',value:'1440x960'}]},{signal:new AbortController().signal,saveImage:async()=>{captured=true;}}),error=>/Unsupported browser action "viewport"/.test(error.message)&&/automatically/.test(error.message));assert.equal(captured,false);
 });
@@ -16,4 +16,11 @@ test('press accepts key and legacy value without letting contradictory or missin
 test('responsive action branches override only their viewport while preserving shared fallback and validation for both',()=>{
  const desktop=[{kind:'click',role:'button',name:'Desktop options'}],mobile=[{kind:'click',role:'button',name:'Phone options'}];assert.deepEqual(browserPlans({actions:desktop,actionsByViewport:{mobile}}),{desktop,mobile});
  assert.throws(()=>browserPlans({actionsByViewport:{mobile:[{kind:'viewport'}]}}),/Unsupported browser action/);assert.throws(()=>browserPlans({actionsByViewport:{tablet:mobile}}),/desktop\/mobile/);
+});
+
+test('capture retries a transient protocol failure once on the same page and never invents pixels on persistent failure',async()=>{
+ let attempts=0;const bytes=Buffer.from('actual captured bytes'),page={evaluate:async()=>{},screenshot:async()=>{if(++attempts===1)throw Error('Page.captureScreenshot: Unable to capture screenshot');return bytes;}};
+ assert.equal(await captureViewport(page),bytes);assert.equal(attempts,2);
+ attempts=0;page.screenshot=async()=>{attempts++;throw Error('Page.captureScreenshot: persistent failure');};await assert.rejects(captureViewport(page),/persistent failure/);assert.equal(attempts,2);
+ attempts=0;page.screenshot=async()=>{attempts++;throw Error('Target page closed');};await assert.rejects(captureViewport(page),/page closed/);assert.equal(attempts,1);
 });

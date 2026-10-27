@@ -74,6 +74,16 @@ export function taskConflict(run,task,other){
  const resources=a.resources.filter(name=>b.resources.includes(name));
  return files.length||resources.length?{taskId:other.id,assignee:other.assignee,files,resources}:null;
 }
+export function runningAccessChange(run,task,patch){
+ const next={...task,...patch},before=taskAccess(run,task),after=taskAccess(run,next);
+ const same=(a=[],b=[])=>JSON.stringify([...a].sort())===JSON.stringify([...b].sort());
+ if(next.assignee!==task.assignee||!['writes','resources','externalWrites'].every(key=>same(before[key],after[key])))return {kind:'exclusive-lease-change'};
+ if(same(before.reads,after.reads)&&same(before.externalReads,after.externalReads))return null;
+ // Expand read access only: never drop the scope that protects an in-flight read.
+ if(!before.reads.every(file=>after.reads.some(scope=>scope==='*'||file===scope||file.startsWith(scope+'/')))||!(before.externalReads??[]).every(file=>(after.externalReads??[]).some(scope=>file===scope||file.startsWith(scope+'/'))))return {kind:'read-lease-contraction'};
+ const conflicts=run.tasks.filter(other=>other.id!==task.id&&other.state==='running').map(other=>taskConflict(run,next,other)).filter(Boolean);
+ return conflicts.length?{kind:'resources',conflicts}:null;
+}
 export function parallelBlocker(run,task,limit=run.parallelLimit??4){
  if(run.status&&run.status!=='running')return {kind:'run-stopped',status:run.status};
  const role=run.roles.find(role=>role.name===task.assignee);

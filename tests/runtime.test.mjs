@@ -36,6 +36,31 @@ test('missing update reasons derive a factual audit; identical updates do not no
  assert.deepEqual(JSON.parse([...f.files.values()][0]).goal,goal);
 });
 
+test('running discovery can add an immutable shared input without abandoning its assignment or changing its write lease',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Inspect complete captured source',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'researcher',title:'Researcher',purpose:'Inspect actual source',capability:'read'});
+ await f.call('gvs_agent',{action:'create',name:'editor',title:'Editor',purpose:'Isolated edits',capability:'edit'});
+ const research=await f.call('gvs_task',{action:'create',title:'Source contract',instructions:'Inspect',kind:'discovery',scope:'increment',analysisIds:[],assignee:'researcher',readScopes:['artifacts/source'],writeScopes:[],resources:[]});
+ const edit=await f.call('gvs_task',{action:'create',title:'Other isolated branch',instructions:'Implement',kind:'work',assignee:'editor',readScopes:['src'],writeScopes:['src'],resources:[]});
+ const id=research.task.id,session=f.actor('researcher').id;
+ const expanded=await f.call('gvs_task',{action:'update',taskId:id,readScopes:['artifacts/source','artifacts/picker/main-decoded.txt']});
+ assert.equal(expanded.task.state,'running');assert.equal(f.actor('researcher').id,session);assert.deepEqual(expanded.task.writeScopes,[]);
+ const reorder=await f.call('gvs_task',{action:'update',taskId:id,readScopes:['artifacts/picker/main-decoded.txt','artifacts/source']});assert.equal(reorder.task.state,'running');
+ await assert.rejects(f.call('gvs_task',{action:'update',taskId:id,readScopes:['artifacts/source','artifacts/picker/main-decoded.txt','src']}),/resources/);
+ await assert.rejects(f.call('gvs_task',{action:'update',taskId:id,readScopes:[]}),/read-lease-contraction/);
+ assert.equal(f.tasks.get(edit.task.id).status,'in_progress');
+});
+
+test('Native failure recovery context preserves errors, outputs and images and is not injected into success or paused work',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Correct an actual tool error',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ const exec={agent:f.root,name:'edit',arguments:{file_path:'app.js'}},image={type:'image',attachment:{attachmentId:'actual-image'}},error={isError:true,error:{message:'old_string was not found in app.js'},content:[image]};
+ const recovered=await f.hooks['tools/execute'](exec,async()=>error);assert.equal(recovered.isError,true);assert.equal(recovered.error,error.error);assert.equal(recovered.content,error.content);assert.match(recovered.additionalContexts[0].content[0].text,/leading spaces/);
+ const command={isError:false,value:{kind:'foreground',exitCode:1,stderr:{text:''},stdout:{text:'Page.captureScreenshot: Unable to capture screenshot'}},content:[]};
+ const hinted=await f.hooks['tools/execute']({...exec,name:'pwsh'},async()=>command);assert.equal(hinted.value,command.value);assert.match(hinted.additionalContexts[0].content[0].text,/no new image/);
+ const success={isError:false,value:{kind:'foreground',exitCode:0},content:[]};assert.equal(await f.hooks['tools/execute'](exec,async()=>success),success);
+ await f.call('gvs_pause',{});assert.equal(await f.hooks['tools/execute'](exec,async()=>error),error);
+});
+
 test('coordinator plans gate editing, source drift stops dispatch, and completion requires actual changed code with fresh exact checks',async()=>{
  const f=fixture({requireCoordinatorPlan:true}),start=await f.call('gvs_run',{task:'Implement actual source changes',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
  await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement the plan',capability:'edit'});

@@ -105,6 +105,17 @@ async function perform(page, action) {
   throw new Error(`Unsupported browser action: ${action.kind}`);
 }
 
+export async function captureViewport(page){
+ const rendered=()=>page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+ await rendered();
+ try{return await page.screenshot({type:'jpeg',quality:82,animations:'disabled',timeout:10000});}
+ catch(error){
+  if(!/Page.captureScreenshot|Unable to capture screenshot/.test(error.message))throw error;
+  await rendered();
+  return page.screenshot({type:'jpeg',quality:82,animations:'disabled',timeout:10000});
+ }
+}
+
 export async function captureBrowser(args, {config = {}, signal, saveImage}) {
   const url = previewURL(args.url);
   const plans=browserPlans(args);
@@ -140,17 +151,16 @@ export async function captureBrowser(args, {config = {}, signal, saveImage}) {
         if (!response || response.status() >= 400) throw new Error(`Preview returned HTTP ${response?.status() ?? 'no response'}`);
         // Fixed/absolute app shells can render correctly with a zero-height body.
         await page.locator('body').waitFor({state: 'attached'});
+        // DOMContentLoaded can precede a dynamic app import. Capture the actual
+        // initial UI, without dismissing a dialog or manufacturing an app state.
+        await page.waitForFunction(()=>{
+          const body=document.body;if(!body)return false;
+          return !!body.innerText.trim()||[...body.querySelectorAll('canvas,img,svg,video,input,button,[role]')].some(element=>{const r=element.getBoundingClientRect();return r.width>0&&r.height>0&&getComputedStyle(element).visibility!=='hidden';});
+        },undefined,{timeout:15000});
+        await page.waitForFunction(()=>document.fonts.status==='loaded',undefined,{timeout:7000});
         Object.assign(view,await page.evaluate(()=>({userAgent:navigator.userAgent,touchPoints:navigator.maxTouchPoints,entryUrl:location.href})),{isMobile:viewport.name==='mobile'});
         const screenshot = async stage => {
-          const rendered = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-          await rendered();
-          let bytes;
-          try {bytes = await page.screenshot({type: 'jpeg', quality: 82, animations: 'disabled', timeout: 10000});}
-          catch (error) {
-            if (!error.message.includes('Page.captureScreenshot')) throw error;
-            await rendered();
-            bytes = await page.screenshot({type: 'jpeg', quality: 82, animations: 'disabled', timeout: 10000});
-          }
+          const bytes=await captureViewport(page);
           await canvasErrors(page,view);
           const attachment = await saveImage({data: bytes, mediaType: 'image/jpeg', name: `gvs-${viewport.name}-${stage}.jpg`});
           report.images.push({viewport: viewport.name, stage, attachment});

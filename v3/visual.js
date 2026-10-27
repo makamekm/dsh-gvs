@@ -76,11 +76,11 @@ export function addLayoutCapture(view,snapshot,{imageId,stage,url}){
 }
 
 export function visualStates(run,task){
- const checks=run.visualChecks.filter(c=>c.ok&&c.revision===run.revision),states=new Map();
+ const checks=run.visualChecks.filter(c=>c.revision===run.revision),states=new Map();
  for(const check of checks)for(const view of check.views??[])for(const capture of view.layout?.captures??[]){
   const image=check.images.find(i=>i.attachment.attachmentId===capture.imageId);if(!image)continue;
   const state=states.get(capture.imageId)??{imageId:capture.imageId,image,contexts:[]};
-  state.contexts.push({taskId:check.taskId,capturedBy:check.capturedBy,scenario:check.scenario,viewport:view.viewport,stage:capture.stage,scope:capture.scope,warningIds:capture.warningIds??[],truncated:view.layout.truncated===true});states.set(capture.imageId,state);
+  state.contexts.push({taskId:check.taskId,capturedBy:check.capturedBy,scenario:check.scenario,checkOk:check.ok===true,errors:view.errors??[],viewport:view.viewport,stage:capture.stage,scope:capture.scope,warningIds:capture.warningIds??[],truncated:view.layout.truncated===true});states.set(capture.imageId,state);
  }
  const required=new Set([...(task.receivedImages??[]),...checks.filter(c=>c.taskId===task.id).flatMap(c=>c.images).map(i=>i.attachment.attachmentId)]);
  return [...states.values()].filter(state=>required.has(state.imageId));
@@ -92,9 +92,9 @@ export function validateVisualReview(run,task,result){
  const review=result.visualReview;
  if(!review||VISUAL_CHECKS.some(id=>!review.checked?.includes(id)))throw new Error('Visual acceptance needs visualReview.checked: overlap, clipping, spacing, alignment, readability, responsive, interaction. Inspect real screenshots and states, not test totals or JSX.');
  const selected=new Set(result.images??[]),received=new Set(task.receivedImages??[]);
- const checks=run.visualChecks.filter(c=>c.ok&&c.revision===run.revision);
+ const checks=run.visualChecks.filter(c=>c.revision===run.revision),successful=checks.filter(c=>c.ok);
  const images=checks.flatMap(c=>c.images).filter(i=>selected.has(i.attachment.attachmentId)&&(received.has(i.attachment.attachmentId)||checks.some(c=>c.capturedBy===task.assignee&&c.images.some(image=>image.attachment.attachmentId===i.attachment.attachmentId))));
- if(!run.viewports.every(viewport=>images.some(i=>i.viewport===viewport)))throw new Error('Both QA and User must cite actual received current images for every planned viewport.');
+ if(!run.viewports.every(viewport=>images.some(i=>i.viewport===viewport&&successful.some(c=>c.images.some(image=>image.attachment.attachmentId===i.attachment.attachmentId)))))throw new Error('Both QA and User must cite actual received current images from successful checks for every planned viewport. Failed-check images remain inspectable but cannot replace successful evidence.');
  const audits=checks.flatMap(c=>c.views??[]).map(v=>v.layout).filter(Boolean);
  const audited=new Set(audits.flatMap(a=>a.captures.map(c=>c.imageId)));
  if(audits.some(a=>a.truncated&&a.captures.some(c=>selected.has(c.imageId)))&&(review.manualCoverage?.trim().length??0)<40)throw new Error('The automatic scan was bounded. Describe actual manualCoverage of the remaining pixels/states with screenshot evidence; do not equate a truncated scan with no defects.');
@@ -121,7 +121,7 @@ export function visualReviewAccepted(run,task){try{validateVisualReview(run,task
 export function visualAuditStatus(run){
  if(!run.visualPolicy||!run.visualRequired)return {ready:true,legacy:true,warnings:[]};
  const map=new Map();
- for(const check of run.visualChecks.filter(c=>c.ok&&c.revision===run.revision))for(const view of check.views??[])for(const warning of view.layout?.warnings??[]){
+ for(const check of run.visualChecks.filter(c=>c.revision===run.revision))for(const view of check.views??[])for(const warning of view.layout?.warnings??[]){
   const previous=map.get(warning.id);map.set(warning.id,{...warning,viewport:view.viewport,images:[...new Set([...(previous?.images??[]),...warning.images])]});
  }
  const reviews=run.tasks.filter(t=>t.reviewFocus!=='source'&&t.state==='done'&&t.result?.verdict==='pass'&&t.result.revision===run.revision&&['review','design-review','user-review'].includes(t.kind)&&visualReviewAccepted(run,t));
