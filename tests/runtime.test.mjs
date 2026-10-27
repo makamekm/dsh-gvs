@@ -66,6 +66,40 @@ test('a queued plan whose source changes waits for Lead to inspect and refresh i
  plan.changes[0].anchor='new current source';const refreshed=await f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan});assert.equal(refreshed.task.id,work.task.id);assert.equal(refreshed.task.state,'running');
 });
 
+test('a promised report must actually exist and be nonempty; writing that report does not invalidate code checks',async()=>{
+ const f=fixture({requireCoordinatorPlan:true}),start=await f.call('gvs_run',{task:'Deliver actual files',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});
+ let report=null;const bytes=f.ctx.fs.readBytes;f.ctx.fs.readBytes=async target=>{if(target.file.replaceAll('\\','/').endsWith('/artifacts/job/HANDOFF.md')){if(report===null)throw Object.assign(Error('missing'),{code:'ENOENT'});return Buffer.from(report);}return bytes(target);};
+ const codePlan={summary:'Actual implementation and handoff',changes:[{path:'app.js',anchor:'initial source',edit:'Implement behavior.'},{path:'artifacts/job/HANDOFF.md',anchor:'# Guessed heading',edit:'Write actual integration instructions.'}],checks:['node test.mjs'],acceptance:['Behavior works; real handoff is supplied.']};
+ const work=await f.call('gvs_task',{action:'create',title:'Deliver code',instructions:'Implement',kind:'work',assignee:'developer',writeScopes:['app.js','artifacts/job'],readScopes:['app.js'],resources:[],codePlan});
+ const agent=f.actor('developer');await f.consult(agent);f.changeSource('implemented code');
+ const exec={agent,name:'pwsh',arguments:{command:'node test.mjs'}},result={isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'passed'}},content:[]};await f.hooks['tools/post-execute'](exec,result,async()=>({kind:'accept'}));f.hooks['tools/result'](exec,result);
+ await assert.rejects(f.complete(work.task.id,agent,{checks:['node test.mjs']}),/Planned outputs are missing/);
+ report='  ';await assert.rejects(f.complete(work.task.id,agent,{checks:['node test.mjs']}),/missing or empty/);
+ report='# Actual integration evidence\nObserved results and usage.';await f.complete(work.task.id,agent,{checks:['node test.mjs']});assert.equal(f.tasks.get(work.task.id).status,'completed');
+ const files=await f.call('gvs_artifacts',{taskId:work.task.id},agent);assert.ok(files.files.includes('artifacts/job/HANDOFF.md'));
+});
+
+test('task admission separates absolute environment leases before calling the Native task API',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Native fixture work',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});
+ const cwd=path.resolve('work/in-memory-fixture'),outside=path.resolve(cwd,'../external-fixture');let admitted;
+ const original=f.ctx.agentTeams.createTask;f.ctx.agentTeams.createTask=async(...args)=>{admitted=args[1];return original(...args);};
+ const task=await f.call('gvs_task',{action:'create',title:'Precise code and isolated fixture',instructions:'Use only the already permitted fixture',kind:'work',assignee:'developer',writeScopes:[path.join(cwd,'src'),outside],readScopes:[],resources:[]});
+ assert.deepEqual(admitted.writeScopes,['src']);assert.equal(task.task.externalWriteScopes.length,1);assert.equal(task.task.scopeNotices[1].kind,'external-environment-lease');
+ f.definitions.set('write',{execute:async()=>({ok:true})});await assert.rejects(f.call('write',{file_path:path.join(outside,'file')},f.actor('developer')),/outside this task writeScopes/);
+});
+
+test('a report-only plan delivers an actual document without demanding a fake production-code edit',async()=>{
+ const f=fixture({requireCoordinatorPlan:true}),start=await f.call('gvs_run',{task:'Provide integration instructions',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'writer',title:'Writer',purpose:'Document actual integration',capability:'edit'});
+ const work=await f.call('gvs_task',{action:'create',title:'Document integration',instructions:'Write actual instructions',kind:'work',assignee:'writer',writeScopes:['safety-ui/INTEGRATION.md'],readScopes:['safety-ui'],resources:[],codePlan:{summary:'Document verified integration',changes:[{path:'safety-ui/INTEGRATION.md',anchor:null,edit:'Record actual integration contract and usage.'}],checks:['node check-document.mjs'],acceptance:['Actual nonempty integration instructions exist.']}});
+ assert.equal(work.task.codePlan.sources.length,0);const actor=f.actor('writer');await f.consult(actor);
+ const exec={agent:actor,name:'pwsh',arguments:{command:'node check-document.mjs'}},result={isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'passed'}},content:[]};
+ await f.hooks['tools/post-execute'](exec,result,async()=>({kind:'accept'}));f.hooks['tools/result'](exec,result);
+ await f.complete(work.task.id,actor,{checks:['node check-document.mjs']});assert.equal(f.tasks.get(work.task.id).status,'completed');
+});
+
 test('specialists discover current reusable User IDs and Lead messages without weakening task completion',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Fix implementation',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
  await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});
@@ -283,6 +317,34 @@ test('automatic recovery reuses interrupted assignments but never resumes a huma
  await f.call('gvs_resume');
  await f.call('gvs_task',{action:'complete',taskId:start.briefTaskId,verdict:'blocked',summary:'Real missing external dependency',findings:['Runtime source is unavailable']},f.actor('user'));
  const blocked=await f.call('gvs_recover');assert.deepEqual(blocked.recovered,[]);assert.equal((await f.call('gvs_task',{action:'list',taskId:start.briefTaskId})).tasks[0].state,'blocked');
+});
+
+test('interrupted planned edits continue from their partial source, preserving the original baseline and requiring new checks',async()=>{
+ const f=fixture({requireCoordinatorPlan:true}),start=await f.call('gvs_run',{task:'Finish the planned implementation after restart',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});
+ const plan={summary:'Implement source',changes:[{path:'app.js',anchor:'initial source',edit:'Implement the required behavior.'}],checks:['node check.mjs'],acceptance:['Required behavior works.']};
+ const work=await f.call('gvs_task',{action:'create',title:'Implement',instructions:'Finish source and checks',kind:'work',assignee:'developer',writeScopes:['app.js'],readScopes:['app.js'],resources:[],codePlan:plan}),actor=f.actor('developer');await f.consult(actor);
+ f.changeSource('partial implementation');
+ const exec={agent:actor,name:'pwsh',arguments:{command:'node check.mjs'}},result={isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'passed'}},content:[]};
+ await f.hooks['tools/post-execute'](exec,result,async()=>({kind:'accept'}));f.hooks['tools/result'](exec,result);await f.call('gvs_status');
+ await new Promise(resolve=>setTimeout(resolve,5));
+ const isolated=await import(`../v3/runtime.js?planned-recovery=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:true});
+ const recovered=await f.call('gvs_recover');assert.deepEqual(recovered.recovered,[work.task.id]);
+ const resumed=(await f.call('gvs_task',{action:'list',taskId:work.task.id})).tasks[0];assert.equal(resumed.state,'running');assert.equal(resumed.codePlan.sources[0].sha256,work.task.codePlan.sources[0].sha256);assert.equal(f.actor('developer').id,actor.id);assert.match(f.sent.at(-1).content[0].text,/CONTINUING AN INTERRUPTED ASSIGNMENT/);
+ await assert.rejects(f.complete(work.task.id,actor,{checks:['node check.mjs']}),/plan checks/,'The interrupted assignment checks cannot certify the resumed assignment');
+ await f.hooks['tools/post-execute'](exec,result,async()=>({kind:'accept'}));f.hooks['tools/result'](exec,result);
+ await f.complete(work.task.id,actor,{checks:['node check.mjs']});assert.equal(f.tasks.get(work.task.id).status,'completed');
+});
+
+test('an interruption checkpoint still rejects later source drift and a replacement plan discards the continuation',async()=>{
+ const f=fixture({requireCoordinatorPlan:true}),start=await f.call('gvs_run',{task:'Preserve exact plans across pause',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});
+ const plan={summary:'Initial patch',changes:[{path:'app.js',anchor:'initial source',edit:'Implement behavior.'}],checks:['node check.mjs'],acceptance:['Required behavior works.']};
+ const work=await f.call('gvs_task',{action:'create',title:'Implement',instructions:'Implement',kind:'work',assignee:'developer',writeScopes:['app.js'],readScopes:['app.js'],resources:[],codePlan:plan});
+ f.changeSource('partial source');await f.call('gvs_pause');f.changeSource('different source after pause');
+ await f.call('gvs_resume');const waiting=(await f.call('gvs_task',{action:'list',taskId:work.task.id})).tasks[0];assert.equal(waiting.state,'waiting');assert.equal(waiting.planning.state,'stale');
+ const updated=await f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:{...plan,changes:[{path:'app.js',anchor:'different source after pause',edit:'Implement corrected patch.'}]}});assert.equal(updated.task.state,'running');
+ assert.equal(JSON.parse([...f.files.values()][0]).tasks.find(task=>task.id===work.task.id).planContinuation,undefined);
 });
 test('a verbose assignment fits the native team limit and old oversize delivery failures retry the same task',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Bounded delivery',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));

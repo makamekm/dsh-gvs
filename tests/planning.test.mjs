@@ -1,8 +1,17 @@
 import test from 'node:test';import assert from 'node:assert/strict';import path from 'node:path';
-import {prepareCodePlan,stalePlanFiles} from '../v3/planning.js';
+import {prepareCodePlan,stalePlanFiles,missingPlanOutputs,migrateCodePlan} from '../v3/planning.js';
 import {parallelBlocker} from '../v3/parallel.js';
 const cwd=path.resolve('fixture'),input=()=>({summary:'Center the report action in the connected remote pane',changes:[{path:'src/report.ts',anchor:'function report()',edit:'Replace the unconditional bottom bar with a centered compact action gated by the actual connected peer.'}],checks:['node report-contract.test.mjs'],acceptance:['Idle has no Report action; connected decoded video has one centered Report action.']});
 function storage(){const files=new Map([['src/report.ts',Buffer.from('export function report() { return "old"; }')]]);return {files,read:async file=>{if(!files.has(file))throw Object.assign(Error('missing'),{code:'ENOENT'});return files.get(file);}};}
+test('report headings are advisory outputs, while actual code anchors stay strict and CRLF/LF is normalized',async()=>{
+ const f=storage();f.files.set('src/report.ts',Buffer.from('export function report() {\r\n return "old";\r\n}'));f.files.set('artifacts/task215/notes.md',Buffer.from('# Actual old heading\nKeep this history.'));
+ const value=input();value.changes[0].anchor='function report() {\n';value.changes.push({path:'artifacts/task215/notes.md',anchor:'# Different guessed heading',edit:'Append actual resumed report and preserve earlier evidence.'});
+ const plan=await prepareCodePlan(value,{cwd,read:f.read,allowed:()=>true,author:'lead'});assert.equal(plan.sources.length,1);assert.deepEqual(plan.outputs,['artifacts/task215/notes.md']);assert.equal(plan.changes[1].kind,'report');
+ f.files.set('artifacts/task215/notes.md',Buffer.from('# Actual old heading\nMore actual diagnostics.'));assert.deepEqual(await stalePlanFiles(plan,f.read),[]);
+ f.files.delete('artifacts/task215/notes.md');assert.deepEqual(await missingPlanOutputs(plan,f.read),['artifacts/task215/notes.md']);
+ const old={...plan,version:undefined,sources:[...plan.sources,{path:'artifacts/task215/notes.md',sha256:null}],outputs:undefined};assert.deepEqual(migrateCodePlan(old).sources,plan.sources);
+ value.changes[0].anchor='invented function';await assert.rejects(prepareCodePlan(value,{cwd,read:f.read,allowed:()=>true,author:'lead'}),/anchor not found/);
+});
 test('coordinator plans use real source anchors and detect per-file drift without invalidating unrelated parallel work',async()=>{
  const f=storage(),plan=await prepareCodePlan(input(),{cwd,read:f.read,allowed:file=>file==='src/report.ts',author:'lead-session'});
  assert.equal(plan.authoredBy,'lead-session');assert.match(plan.sources[0].sha256,/^[a-f0-9]{64}$/);assert.deepEqual(await stalePlanFiles(plan,f.read),[]);

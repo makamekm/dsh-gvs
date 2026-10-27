@@ -11,7 +11,7 @@ export function normalizeScopes(scopes){
   if(typeof value!=='string'||!value.trim())throw new Error('An empty scope is ambiguous. Use [] or ["*"].');
   let scope=value.trim().replaceAll('\\','/').replace(/\/\*\*$/,'').replace(/\/+$/,'');
   if(['*','.'].includes(scope))return '*';
-  if(/^[a-z]:|^\/|[*?\[\]{}]/i.test(scope)||scope.split('/').some(part=>['..',''].includes(part)))throw new Error('Use literal paths inside the workspace, or * for the entire project.');
+  if(/^[a-z]:|^\/|[*?]/i.test(scope)||scope.split('/').some(part=>['..',''].includes(part)))throw new Error(`Invalid workspace scope ${JSON.stringify(value)}. Use a literal project path (optional /**), not a glob or traversal.`);
   scope=scope.replace(/^\.\//,'').toLowerCase();return scope||'*';
  }))];
 }
@@ -28,9 +28,33 @@ export function evidencePath(target,cwd){
  const relative=path.relative(cwd,path.resolve(cwd,target)).replaceAll('\\','/').toLowerCase();
  return reportRoots.some(root=>relative.startsWith(root+'/'));
 }
-export function parallelFields(input){
- const result={};for(const key of ['readScopes','writeScopes'])if(input[key]!==undefined)result[key]=normalizeScopes(input[key]);
+export function parallelFields(input,cwd){
+ const result={},notices=[];
+ for(const [key,externalKey] of [['readScopes','externalReadScopes'],['writeScopes','externalWriteScopes']]){
+  if(input[key]===undefined&&input[externalKey]===undefined)continue;
+  const relative=[],external=[];
+  function classify(value,explicitExternal=false){
+   if(typeof value!=='string')throw new Error('Scope paths must be strings.');
+   const file=value.trim().replace(/[\\/]\*\*$/,'');
+   const absolute=/^[a-z]:[\\/]|^[\\/]/i.test(file);
+   if(!absolute){if(explicitExternal)throw new Error('External environment leases require an absolute bounded path.');relative.push(value);return;}
+   if(!cwd)throw new Error('Absolute scope requires the current workspace to normalize its boundary.');
+   const api=/^[a-z]:|^\\\\/i.test(cwd)?path.win32:path.posix;
+   if(/[*?]/.test(file))throw new Error('Absolute environment scopes must be literal paths, optionally ending in /**.');
+   const target=api.resolve(cwd,file),delta=api.relative(cwd,target);
+   if(!delta||(!api.isAbsolute(delta)&&delta!=='..'&&!delta.startsWith('..'+api.sep))){relative.push(delta||'*');notices.push({path:value,kind:'workspace-absolute',normalized:delta||'*'});return;}
+   const ancestor=api.relative(target,cwd);
+   if(target===api.parse(target).root||(!api.isAbsolute(ancestor)&&ancestor!=='..'&&!ancestor.startsWith('..'+api.sep)))throw new Error('External environment lease must name a bounded fixture, not a drive root or workspace ancestor.');
+   const normalized=target.replaceAll('\\','/').replace(/\/+$/,'').toLowerCase();external.push(normalized);
+   notices.push({path:value,kind:'external-environment-lease',normalized,note:'Exclusive scheduling metadata only. Native permissions remain authoritative; this does not grant outside-workspace write/edit access.'});
+  }
+  if(input[key]!==undefined){if(!Array.isArray(input[key]))throw new Error('Scopes must be arrays.');for(const value of input[key])classify(value);result[key]=normalizeScopes(relative);}
+  if(input[externalKey]!==undefined){if(!Array.isArray(input[externalKey]))throw new Error('External scopes must be arrays.');for(const value of input[externalKey])classify(value,true);}
+  if(relative.length&&input[key]===undefined)result[key]=normalizeScopes(relative);
+  if(external.length||input[externalKey]!==undefined)result[externalKey]=[...new Set(external)];
+ }
  if(input.resources!==undefined){if(!Array.isArray(input.resources)||input.resources.some(name=>typeof name!=='string'||!name.trim()||name.length>128))throw new Error('Resources need nonempty names up to 128 characters.');result.resources=[...new Set(input.resources.map(name=>name.trim().toLowerCase()))];}
+ if(notices.length)result.scopeNotices=notices;
  return result;
 }
 export function taskAccess(run,task){
@@ -40,11 +64,13 @@ export function taskAccess(run,task){
  const fullReview=['review','design-review','game-review','user-review'].includes(task.kind)&&task.scope!=='increment';
  const reads=decision?[]:fullReview?['*']:[...new Set([...normalizeScopes(task.readScopes??['*']),...writes])];
  const resources=task.resources??(decision||capability==='read'?[]:['project-runtime']);
- return {reads,writes,resources};
+ const externalWrites=task.externalWriteScopes??[],externalReads=[...new Set([...(task.externalReadScopes??[]),...externalWrites])];
+ return {reads,writes,resources,...(externalReads.length||externalWrites.length?{externalReads,externalWrites}:{})};
 }
 export function taskConflict(run,task,other){
  const a=taskAccess(run,task),b=taskAccess(run,other);
- const files=[...new Set([...shared(a.writes,[...b.writes,...b.reads]),...shared(b.writes,a.reads)])];
+ const external=[...shared(a.externalWrites??[],b.externalReads??[]),...shared(b.externalWrites??[],a.externalReads??[])];
+ const files=[...new Set([...shared(a.writes,[...b.writes,...b.reads]),...shared(b.writes,a.reads),...external.map(file=>'external:'+file)])];
  const resources=a.resources.filter(name=>b.resources.includes(name));
  return files.length||resources.length?{taskId:other.id,assignee:other.assignee,files,resources}:null;
 }
