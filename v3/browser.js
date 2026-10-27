@@ -57,14 +57,14 @@ async function perform(page, action) {
   if (action.kind === 'scroll') return page.mouse.wheel(0, Number(action.value) || 600);
   const target = locator(page, action);
   if (action.kind === 'assertState') {
-    if (!['checked', 'pressed', 'invalid', 'focused', 'value'].includes(action.state)) throw new Error('Choose checked, pressed, invalid, focused or value.');
+    if (!['checked', 'pressed', 'expanded', 'disabled', 'invalid', 'focused', 'value'].includes(action.state)) throw new Error('Choose checked, pressed, expanded, disabled, invalid, focused or value.');
     if (typeof action.value !== 'string' || (action.state !== 'value' && !['true', 'false'].includes(action.value))) throw new Error('Provide the expected string value, or true/false for a boolean state.');
     const expected = action.state === 'value' ? action.value : action.value === 'true';
     let actual;
     for (let attempt = 0; attempt < 35; attempt++) {
       actual = await target.evaluate((element, state) => ({
         checked: 'checked' in element ? element.checked : element.getAttribute('aria-checked') === 'true',
-        pressed: element.getAttribute('aria-pressed') === 'true', invalid: element.getAttribute('aria-invalid') === 'true',
+        pressed: element.getAttribute('aria-pressed') === 'true', expanded: element.getAttribute('aria-expanded') === 'true',disabled: element.matches(':disabled,[aria-disabled=true]'),invalid: element.getAttribute('aria-invalid') === 'true',
         focused: element === document.activeElement, value: element.value ?? ''
       })[state], action.state);
       if (actual === expected) return;
@@ -78,6 +78,7 @@ async function perform(page, action) {
   if (action.kind === 'press') return target.press(action.value);
   if (action.kind === 'check') return target.setChecked(action.value !== 'false');
   if (action.kind === 'assertVisible') return target.waitFor({state: 'visible'});
+  if (action.kind === 'assertHidden') return target.waitFor({state: 'hidden'});
   throw new Error(`Unsupported browser action: ${action.kind}`);
 }
 
@@ -137,10 +138,10 @@ export async function captureBrowser(args, {config = {}, signal, saveImage}) {
         let states=0;view.uncapturedTransitions=0;
         for (const [index,action] of actions.entries()) {
           signal.throwIfAborted();
-          await perform(page, action);
+          try{await perform(page, action);}catch(error){view.steps.push({kind:action.kind,target:action.name??action.label??action.testId??'',value:clip(action.value,300),...(action.state?{state:action.state}:{}),passed:false,error:clip(error.message,1000)});await screenshot(`failed-step-${index+1}`).catch(()=>{});throw error;}
           const assertion = action.kind.startsWith('assert');
           if (assertion) report.assertions++; else report.interactions++;
-          view.steps.push({kind: action.kind, target: action.name ?? action.label ?? action.testId ?? '', value: clip(action.value, 300), passed: true});
+          view.steps.push({kind: action.kind, target: action.name ?? action.label ?? action.testId ?? '', value: clip(action.value, 300), ...(action.state?{state:action.state}:{}), passed: true});
           if(!assertion){if(states++<3)await screenshot(`step-${index+1}`);else view.uncapturedTransitions++;}
         }
         if (actions.length) await screenshot('journey');

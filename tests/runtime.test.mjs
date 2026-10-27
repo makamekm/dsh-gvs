@@ -276,6 +276,30 @@ test('source focus cannot be assigned to full, visual, User or motion-bearing re
  for(const input of [{kind:'review',assignee:'qa',scope:'full'},{kind:'design-review',assignee:'qa',scope:'increment',analysisIds:[]},{kind:'user-review',assignee:'user',scope:'increment',analysisIds:[]}])await assert.rejects(f.call('gvs_task',{action:'create',title:'Invalid waiver',instructions:'Review',reviewFocus:'source',...input}),/Source-only focus/);
 });
 
+test('all required existing states can be paged and reopened by exact ID even with no geometry warnings',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Inspect every actual state',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'qa',title:'QA',purpose:'Inspect',capability:'verify'});
+ const work=await f.call('gvs_task',{action:'create',title:'Visual review',instructions:'Inspect all states',kind:'design-review',assignee:'qa',scope:'increment',analysisIds:[],readScopes:[],writeScopes:[],resources:[]});
+ const saved=JSON.parse([...f.files.values()][0]),images=Array.from({length:48},(_,i)=>({viewport:i%2?'mobile':'desktop',stage:i===0?'initial':'step-'+i,attachment:{attachmentId:'actual-'+i}}));
+ saved.visualChecks=[{ok:true,revision:saved.revision,taskId:work.task.id,capturedBy:'qa',images,views:['desktop','mobile'].map(viewport=>({viewport,layout:{captures:images.filter(i=>i.viewport===viewport).map(i=>({imageId:i.attachment.attachmentId,stage:i.stage,warningIds:[]})),warnings:[],truncated:false}}))}];
+ for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));const isolated=await import(`../v3/runtime.js?all-states=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false});await f.call('gvs_recover');
+ const actor=f.actor('qa'),seen=[];let offset=0;do{const page=await f.call('gvs_visual',{action:'states',taskId:work.task.id,offset,limit:6},actor);assert.equal(page.total,48);assert.equal(page.images.length,page.states.length);seen.push(...page.states.map(s=>s.imageId));offset=page.nextOffset;}while(offset!==null);
+ assert.equal(new Set(seen).size,48);assert.ok(seen.includes('actual-0'));assert.deepEqual((await f.call('gvs_visual',{action:'states',imageId:'actual-0'},actor)).images,[images[0]]);
+ await assert.rejects(f.call('gvs_visual',{action:'states',imageId:'guessed-hash'},actor),/copy its literal ID/);assert.equal(f.tasks.size,2);
+});
+
+test('a runnable UI automatically queues the same User for exploration and coalesces later completed UI increments',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Continuously test current windows',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
+ let saved=JSON.parse([...f.files.values()][0]);saved.preview={url:'http://localhost:5173/',jobId:'not-running',ready:false};for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));
+ let isolated=await import(`../v3/runtime.js?user-probe=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false});await f.call('gvs_recover');
+ saved=JSON.parse([...f.files.values()][0]);const probe=saved.tasks.find(t=>t.autoUserProbe);assert.ok(probe);assert.equal(probe.assignee,'user');assert.equal(probe.state,'waiting');assert.equal(probe.kind,'user-review');assert.equal(f.spawns,1);assert.deepEqual(probe.resources,[]);
+ await f.call('gvs_recover');assert.equal(f.tasks.size,2);
+ saved.tasks.push({id:'new-ui-slice',kind:'work',assignee:'developer',state:'done',dependsOn:[],result:{verdict:'pass',summary:'Actual UI slice',findings:[]},codePlan:{version:2,sources:[],changes:[{path:'store-ui/Badge.tsx'}]}});for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));
+ isolated=await import(`../v3/runtime.js?coalesce-probe=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false});await f.call('gvs_recover');
+ saved=JSON.parse([...f.files.values()][0]);assert.equal(saved.tasks.filter(t=>t.autoUserProbe).length,1);assert.equal(saved.tasks.find(t=>t.autoUserProbe).id,probe.id);assert.deepEqual(saved.tasks.find(t=>t.autoUserProbe).userProbeFor,['new-ui-slice']);assert.equal(f.tasks.size,2);
+ await f.call('gvs_pause');await f.call('gvs_recover');assert.equal(JSON.parse([...f.files.values()][0]).status,'paused');
+});
+
 test('a passed increment still saves out-of-scope visual defects as mandatory goal issues',async()=>{
  const {VISUAL_CHECKS}=await import('../v3/visual.js');
  const f=fixture(),start=await f.call('gvs_run',{task:'Real UI review',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));

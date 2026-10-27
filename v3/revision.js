@@ -4,6 +4,14 @@ import {createHash} from 'node:crypto';
 // Source, assets, tests, configuration and reference inputs are hashed. Generated
 // outputs do not invalidate the source evidence that produced those outputs.
 const generated=new Set(['.git','.gvs','.tools','.godot','.venv','node_modules','target','dist','build','.next','.cache','coverage','artifacts','test-results','playwright-report']);
+async function cargoOutput(fs,cwd,directory,signal){
+ const marker=path.join(directory,'CACHEDIR.TAG'),compiler=path.join(directory,'.rustc_info.json');
+ try{
+  if((await fs.lstat(marker,{cwd},signal))?.type!=='file'||(await fs.lstat(compiler,{cwd},signal))?.type!=='file')return false;
+  const bytes=await fs.readBytes(await fs.resolve(marker,{cwd,signal}),signal,1024);
+  return new TextDecoder().decode(bytes).startsWith('Signature: 8a477f597d28d172789f06886806bc55');
+ }catch(error){if(['ENOENT','FS_NOT_FOUND'].includes(error.code))return false;throw error;}
+}
 export async function sourceFingerprint(fs,cwd,signal,cache=new Map()){
  const root=await fs.resolve(cwd,{cwd,signal}),hash=createHash('sha256');let count=0,bytes=0;
  async function walk(target,relative=''){
@@ -18,14 +26,14 @@ export async function sourceFingerprint(fs,cwd,signal,cache=new Map()){
    const resolved=await fs.resolve(absolute,{cwd,signal});
    if(!fs.contains(root,resolved))throw new Error(`Source input outside workspace: ${name}`);
    if(info.type==='symlink')throw new Error(`Source symlink requires an explicit in-workspace copy for verification: ${name}`);
-   if(info.type==='directory'){await walk(resolved,name);continue;}
+   if(info.type==='directory'){if(!await cargoOutput(fs,cwd,absolute,signal))await walk(resolved,name);continue;}
    if(info.type!=='file')throw new Error(`Unsupported source input: ${name}`);
    let cached=cache.get(name);
    if(!info.version||cached?.version!==info.version){
     const data=await fs.readBytes(resolved,signal,64*1024*1024);
     cached={version:info.version,size:data.length,digest:createHash('sha256').update(data).digest()};cache.set(name,cached);
    }
-   bytes+=cached.size;if(bytes>512*1024*1024)throw new Error('Source fingerprint exceeds 512 MiB; select a smaller project workspace.');
+   bytes+=cached.size;if(bytes>512*1024*1024)throw new Error(`Source fingerprint exceeds 512 MiB at ${name}; inspect whether this is a generated output or select a smaller project workspace.`);
    hash.update(JSON.stringify(name)).update('\0').update(cached.digest);
   }
  }

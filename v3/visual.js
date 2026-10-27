@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {validateUserJourneys} from './journeys.js';
 
 export const VISUAL_CHECKS=['overlap','clipping','spacing','alignment','readability','responsive','interaction'];
 
@@ -74,6 +75,17 @@ export function addLayoutCapture(view,snapshot,{imageId,stage,url}){
  audit.captures.push({stage,imageId,scope:snapshot.scope,warningIds:[...new Set(ids)].filter(id=>audit.warnings.some(w=>w.id===id))});
 }
 
+export function visualStates(run,task){
+ const checks=run.visualChecks.filter(c=>c.ok&&c.revision===run.revision),states=new Map();
+ for(const check of checks)for(const view of check.views??[])for(const capture of view.layout?.captures??[]){
+  const image=check.images.find(i=>i.attachment.attachmentId===capture.imageId);if(!image)continue;
+  const state=states.get(capture.imageId)??{imageId:capture.imageId,image,contexts:[]};
+  state.contexts.push({taskId:check.taskId,capturedBy:check.capturedBy,scenario:check.scenario,viewport:view.viewport,stage:capture.stage,scope:capture.scope,warningIds:capture.warningIds??[],truncated:view.layout.truncated===true});states.set(capture.imageId,state);
+ }
+ const required=new Set([...(task.receivedImages??[]),...checks.filter(c=>c.taskId===task.id).flatMap(c=>c.images).map(i=>i.attachment.attachmentId)]);
+ return [...states.values()].filter(state=>required.has(state.imageId));
+}
+
 export function validateVisualReview(run,task,result){
  if(task.reviewFocus==='source'&&task.kind==='review'&&task.scope==='increment'&&Array.isArray(task.analysisIds)&&task.analysisIds.length===0)return [];
  if(!run.visualPolicy||!run.visualRequired||!['review','design-review','user-review'].includes(task.kind)||result.verdict!=='pass')return [];
@@ -87,9 +99,9 @@ export function validateVisualReview(run,task,result){
  const audited=new Set(audits.flatMap(a=>a.captures.map(c=>c.imageId)));
  if(audits.some(a=>a.truncated&&a.captures.some(c=>selected.has(c.imageId)))&&(review.manualCoverage?.trim().length??0)<40)throw new Error('The automatic scan was bounded. Describe actual manualCoverage of the remaining pixels/states with screenshot evidence; do not equate a truncated scan with no defects.');
  if(run.kind==='ui'&&!run.viewports.every(viewport=>images.some(i=>i.viewport===viewport&&audited.has(i.attachment.attachmentId))))throw new Error('Capture fresh screenshots with the rendered layout audit; old image IDs alone cannot attest the new visual checks.');
- const required=[...(task.receivedImages??[]).filter(id=>audited.has(id)),...checks.filter(c=>c.taskId===task.id).flatMap(c=>c.images).map(i=>i.attachment.attachmentId).filter(id=>audited.has(id))];
- if(required.some(id=>!selected.has(id)))throw new Error('Inspect all supplied/captured audited states, including initial dialogs and intermediate states; do not select only the clean final screenshot.');
- const warnings=new Map();for(const audit of audits)for(const warning of audit.warnings)if(warning.images.some(id=>selected.has(id)))warnings.set(warning.id,warning);
+ const required=visualStates(run,task),missing=required.filter(state=>!selected.has(state.imageId));
+ if(missing.length)throw new Error(`Inspect all supplied/captured audited states, including initial dialogs and intermediate states; do not select only the clean final screenshot. Missing ${missing.length} of ${required.length} required images. Exact missing IDs (first 6): ${JSON.stringify(missing.slice(0,6).map(state=>({imageId:state.imageId,viewport:state.image.viewport,stages:[...new Set(state.contexts.map(c=>c.stage))]})))}. Read existing pixels with gvs_visual action:states taskId:${task.id}, imageId:<exact ID>, or offset/limit pages. Copy its literal imageIds into complete.images after inspection; do not guess hashes or recapture journeys to fix a citation error.`);
+ const warnings=new Map();for(const audit of audits)for(const warning of audit.warnings)if(warning.images.some(id=>selected.has(id))){const previous=warnings.get(warning.id);warnings.set(warning.id,{...warning,images:[...new Set([...(previous?.images??[]),...warning.images])]});}
  const external=[];
  for(const warning of warnings.values()){
   const assessment=review.assessments?.find(a=>a.warningId===warning.id);
@@ -100,6 +112,7 @@ export function validateVisualReview(run,task,result){
    external.push(`${warning.kind}: ${warning.targets.map(t=>t.label||t.key).join(' / ')}. ${assessment.reason} Evidence: ${assessment.imageId}`);
   }else if(assessment.disposition!=='intentional')throw new Error(`Unknown disposition for ${warning.id}`);
  }
+ validateUserJourneys(run,task);
  return external;
 }
 

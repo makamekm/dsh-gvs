@@ -8,7 +8,8 @@ import {syncGoal,planGoal,linkGoal,recordFindings,goalStatus,resolvedBlocker} fr
 import {refreshRevision} from './revision.js';
 import {decisionKey,reusableDecision,availableDecisions,consultationKey,progressStatus,modelResult} from './flow.js';
 import {previewState,needsPreview} from './preview.js';
-import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus} from './visual.js';
+import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus,visualStates} from './visual.js';
+import {USER_TESTING,planUserJourneys,userJourneyStatus,scenarioKey,userProbeInput} from './journeys.js';
 import {parallelFields,parallelBlocker,parallelStatus,taskAccess,writeAllowed,validateWriteScopes,evidencePath} from './parallel.js';
 import {assignmentDelivery} from './delivery.js';
 import {prepareCodePlan,stalePlanFiles,planSources,needsCodePlan,missingPlanOutputs,migrateCodePlan} from './planning.js';
@@ -73,6 +74,10 @@ export function apply(ctx,config={}){
    entry.run.requireCoordinatorPlan=config.requireCoordinatorPlan!==false;
    for(const task of entry.run.tasks){task.codePlan=migrateCodePlan(task.codePlan);task.planRequired=task.state!=='done'&&needsCodePlan(entry.run,task);}
    entry.run.parallelLimit??=maxParallel;
+   if(entry.run.kind==='ui'){
+    entry.run.userTestingPolicy=1;
+    if(!entry.run.userTestingSeen){entry.run.userTestingSeen=entry.run.tasks.filter(t=>t.state==='done').map(t=>t.id);entry.run.userTestingInitial=true;}
+   }
    if(entry.run.status==='running'&&entry.run.visualRequired)entry.run.visualPolicy=1;
    entry.run.progress??={startedAt:Date.now(),metadataSinceWrite:0,writes:0};
    if(member.role==='lead'){
@@ -123,7 +128,7 @@ export function apply(ctx,config={}){
   }catch(error){role.error=clip(error.message);throw error;}finally{await commit(entry);}
   return role;
  }
- async function createTask(entry,input,signal){
+ async function createTask(entry,input,signal,dispatch=true){
   if(entry.run.tasks.length>=maxTasks)throw new Error('Task budget exhausted; report the remaining work.');
   if(!roleOf(entry,input.assignee)||roleOf(entry,input.assignee).retired)throw new Error('Create an appropriate role first.');
   const dependsOn=input.dependsOn??[];assertDag([...entry.run.tasks,{id:'new-task',dependsOn}]);
@@ -141,15 +146,24 @@ export function apply(ctx,config={}){
   const native=await ctx.agentTeams.createTask(entry.root,{subject:clip(input.title,180),description:clip(input.instructions,15000),blockedBy:dependsOn,writeScopes:access.writeScopes??[]});
   const inherited=entry.run.tasks.filter(task=>task.assignee===input.assignee).flatMap(task=>task.consultations??[]).filter(id=>reusableDecision(entry.run,id));
   const task={id:native.id,title:clip(input.title,180),instructions:clip(input.instructions,15000),assignee:input.assignee,kind:input.kind,dependsOn,state:'waiting',receivedImages:[],consultations:[...new Set(inherited)],priority:input.priority??0,...scope,...access};
+  if(input.autoUserProbe)Object.assign(task,{autoUserProbe:true,userProbeFor:input.userProbeFor});
   if(plan)task.codePlan=plan;
   task.planRequired=needsCodePlan(entry.run,task);
   entry.run.progress.metadataSinceWrite++;
-  entry.run.tasks.push(task);await commit(entry);await schedule(entry,signal);return task;
+  entry.run.tasks.push(task);await commit(entry);if(dispatch)await schedule(entry,signal);return task;
+ }
+ async function ensureUserProbe(entry,signal){
+  const input=userProbeInput(entry.run);if(!input)return;
+  const queued=entry.run.tasks.find(t=>t.autoUserProbe&&t.state==='waiting');
+  if(queued){queued.userProbeFor=[...new Set([...queued.userProbeFor,...input.userProbeFor])];queued.readScopes=[...new Set([...queued.readScopes,...input.readScopes])];}
+  else await createTask(entry,input,signal,false);
+  entry.run.userTestingSeen=[...new Set([...entry.run.userTestingSeen,...input.userProbeFor])];entry.run.userTestingInitial=false;await commit(entry);
  }
  async function schedule(entry,signal){
   if(entry.scheduling)return entry.scheduling;
   entry.scheduling=(async()=>{
    if(entry.run.status!=='running')return;
+   await ensureUserProbe(entry,signal);
    const ready=readyTasks(entry.run).sort((a,b)=>(b.priority??0)-(a.priority??0));
    if(ready.some(task=>needsPreview(entry.run,task))){const observed=await previewState(entry.run.preview,ctx.jobs,entry.root.id,signal);entry.run.preview.ready=observed.ready;await commit(entry);}
    for(const task of ready){
@@ -303,7 +317,7 @@ export function apply(ctx,config={}){
      const tasks=taskSummaries(entry.run.tasks.filter(task=>task.id===args.taskId),true),offset=args.offset??0,limit=args.limit??4;
      for(const task of tasks)if(task.result){const {inventory=[],findings=[]}=task.result;task.result={...task.result,inventory:inventory.slice(offset,offset+limit),findings:findings.slice(offset,offset+limit),totals:{inventory:inventory.length,findings:findings.length},nextOffset:offset+limit<Math.max(inventory.length,findings.length)?offset+limit:null};}
      const original=entry.run.tasks.find(task=>task.id===args.taskId),manifest=original?await artifactManifest(entry,original,exec.signal):null;
-     return {tasks,artifacts:manifest?{...manifest,files:manifest.files.slice(0,20),total:manifest.files.length,nextOffset:manifest.files.length>20?20:null}:null};
+     return {tasks,...(original?{visualStateCount:visualStates(entry.run,original).length,userTesting:userJourneyStatus(entry.run,original),visualNext:'Inspect actual required pixels with gvs_visual action:states taskId and offset/limit; use its exact imageIds, never guessed hashes.'}:{}),artifacts:manifest?{...manifest,files:manifest.files.slice(0,20),total:manifest.files.length,nextOffset:manifest.files.length>20?20:null}:null};
     }
     const tasks=[...entry.run.tasks.filter(task=>task.state!=='done'),...entry.run.tasks.filter(task=>task.state==='done').reverse()],offset=args.offset??0,limit=args.limit??10;
     return {tasks:taskSummaries(tasks.slice(offset,offset+limit)),total:tasks.length,nextOffset:offset+limit<tasks.length?offset+limit:null};
@@ -428,14 +442,30 @@ export function apply(ctx,config={}){
   const manifest=await artifactManifest(entry,task,exec.signal),offset=args.offset??0,limit=args.limit??20;
   return {...manifest,files:manifest.files.slice(offset,offset+limit),total:manifest.files.length,nextOffset:offset+limit<manifest.files.length?offset+limit:null};
  });
- register('gvs_visual','Read rendered layout warnings and actual screenshots. QA and User independently inspect overlap, clipping, spacing, alignment, readability, responsive states and hit areas. Warnings are candidates, never automatic proof of a defect. Page through all pending warnings; do not substitute a clean final image for initial/intermediate states.',{warningId:text(60),offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:6}},[],async(args,exec)=>{
+ register('gvs_visual','Read existing screenshots: action states pages ALL required initial/intermediate/final frames, including those with no warnings; copy exact imageIds after inspection. Default warnings pages geometry candidates for independent pixel judgement. Never recapture to repair a citation error.',{action:{type:'string',enum:['warnings','states']},taskId:text(40),imageId:text(150),warningId:text(60),offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:6}},[],async(args,exec)=>{
   const {entry,name}=await current(exec),status=visualAuditStatus(entry.run),offset=args.offset??0,limit=args.limit??6;
+  if(args.action==='states'){
+   const task=args.taskId?entry.run.tasks.find(t=>t.id===args.taskId):entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');
+   if(!task)throw new Error('Provide an existing taskId, or use the assigned running review task.');
+   const all=visualStates(entry.run,task),states=args.imageId?all.filter(s=>s.imageId===args.imageId):all.slice(offset,offset+limit);
+   if(args.imageId&&!states.length)throw new Error('That imageId is not a current required audited state for this task. Read action:states without imageId and copy its literal ID.');
+   const images=states.map(s=>s.image),own=entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');
+   if(own){own.receivedImages=[...new Set([...(own.receivedImages??[]),...images.map(i=>i.attachment.attachmentId)])];await commit(entry);}
+   return {taskId:task.id,revision:entry.run.revision,total:all.length,states:states.map(({image,contexts,...state})=>({...state,contexts:contexts.slice(0,16),contextCount:contexts.length})),images,nextOffset:!args.imageId&&offset+limit<all.length?offset+limit:null,requiredChecks:VISUAL_CHECKS,next:'Inspect these actual pixels, including initial dialogs and intermediate states without warnings. Cite ALL required literal imageIds in complete.images and classify visible warning candidates via action:warnings. Retrieval is not a pass and does not auto-attest inspection. If there are no current states, capture fresh evidence for the current source.'};
+  }
   const ordered=[...status.warnings.filter(w=>!w.qaReviewed||!w.userReviewed),...status.warnings.filter(w=>w.qaReviewed&&w.userReviewed)];
   const warnings=args.warningId?ordered.filter(w=>w.id===args.warningId):ordered.slice(offset,offset+limit),images=[];
   const available=entry.run.visualChecks.filter(c=>c.ok&&c.revision===entry.run.revision).flatMap(c=>c.images);
   for(const warning of warnings){const image=available.find(i=>warning.images.includes(i.attachment.attachmentId));if(image&&!images.some(i=>i.attachment.attachmentId===image.attachment.attachmentId))images.push(image);}
   const own=entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');if(own){own.receivedImages=[...new Set([...(own.receivedImages??[]),...images.map(i=>i.attachment.attachmentId)])];await commit(entry);}
   return {ready:status.ready,total:ordered.length,warnings,images,nextOffset:!args.warningId&&offset+limit<ordered.length?offset+limit:null,requiredChecks:VISUAL_CHECKS,coverageLimits:entry.run.visualChecks.filter(c=>c.ok&&c.revision===entry.run.revision).flatMap(c=>(c.views??[]).filter(v=>v.layout?.truncated||v.uncapturedTransitions>0).map(v=>({viewport:v.viewport,truncated:v.layout?.truncated??false,uncapturedTransitions:v.uncapturedTransitions??0}))),next:'Classify visible candidates with actual image IDs and specific pixel/readability/hit-area evidence. Defects require revise+repair/recheck. An out-of-scope defect in an increment is saved as a mandatory global issue, never waived. No findings does not replace manual visual inspection of all states. Split long journeys to capture omitted transitions; bounded scans require explicit manualCoverage.'};
+ });
+ const userScenario={...object({id:text(40),category:{type:'string',enum:['primary','dismiss','negative','recovery']},target:text(1200),expected:text(1200)}),required:['id','category','target','expected']};
+ register('gvs_user_testing','Plan and inspect your OWN exploratory UI tests. User reviews must actually operate current windows/controls and assert outcomes on each viewport. Primary, dismiss/reopen and negative/recovery flows are required for full/live exploration; evidence-based inapplicability cannot waive real functionality.',{action:{type:'string',enum:['plan','status']},scenarios:{type:'array',minItems:1,maxItems:16,items:userScenario},notApplicable:{type:'array',maxItems:2,items:{...object({category:{type:'string',enum:['dismiss','adverse']},reason:text(1200),images:{...strings,maxItems:6}}),required:['category','reason','images']}}},['action'],async(args,exec)=>{
+  const {entry,name}=await current(exec),task=entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');
+  if(!task||!['review','design-review','user-review'].includes(task.kind))throw new Error('Use your assigned running UI review task; the initial brief is planning, not a completed product test.');
+  if(args.action==='plan'){planUserJourneys(entry.run,task,args);await commit(entry);}
+  return {...userJourneyStatus(entry.run,task),instructions:USER_TESTING,next:'Execute each scenario using gvs_browser_check scenarioId with real semantic actions and observable assertions. Status reads actual current tool traces; a plan does not mark a scenario passed.'};
  });
  const requirement={...object({id:text(40),reason:text(600),criterion:text(1000),method:{type:'string',enum:['runtime','rendered-sequence']}}),required:['id','reason','criterion','method']};
  register('gvs_analysis','Plan conditional task-specific evidence (User only), execute a real analysis runner (assigned verify agent only), or inspect status. Smoothness requires actual rendered pixels AND frame timing with a timestamped frame sequence. Static screenshots and transform-only reports cannot pass.',{action:{type:'string',enum:['plan','check','status']},rationale:text(1200),notRequiredReason:text(1000),requirements:{type:'array',maxItems:6,items:requirement},command:text(5000)},['action'],async(args,exec)=>{
@@ -586,11 +616,17 @@ export function apply(ctx,config={}){
  const action={...object({kind:text(30),role:text(50),name:text(180),label:text(180),testId:text(100),state:text(30),value:{type:['string','number','boolean']},key:text(60),frames:{type:'integer',minimum:1,maximum:600},scenario:text(100),x:{type:'number'},y:{type:'number'},click:{type:'boolean'},path:text(200),op:{type:'string',enum:['eq','gt','gte','lt','lte','near']},tolerance:{type:'number',minimum:0},category:{type:'string',enum:['collision','gameplay','controls','camera']}}),required:['kind']};
  async function browserCheck(args,exec,game){
   const {entry,name}=await current(exec);await vision(exec);
+  const own=entry.run.tasks.find(t=>t.assignee===name&&t.state==='running'),scenario=args.scenarioId?own?.userJourneys?.scenarios.find(s=>s.id===args.scenarioId):null;
+  if(args.scenarioId&&!scenario)throw new Error('Register this exact observed scenarioId with gvs_user_testing action:plan before running it.');
   const signal=AbortSignal.any([exec.signal,entry.abort.signal]);
+  const revision=entry.run.revision;
   const report=await (game?captureGame:captureBrowser)(args,{config,signal,saveImage:image=>ctx.attachments.saveImage(image),viewports:entry.run.viewports});
-  const record={...report,revision:entry.run.revision,capturedBy:name,taskId:entry.run.tasks.find(t=>t.assignee===name&&t.state==='running')?.id??null};entry.run.visualChecks.push(record);if(game)entry.run.gameChecks.push(record);await commit(entry);return report;
+  await refreshRevision(entry,ctx.fs,exec.signal);
+  const record={...report,id:`browser-${randomUUID()}`,at:Date.now(),revision,capturedBy:name,taskId:own?.id??null,...(scenario?{scenarioId:scenario.id,scenarioKey:scenarioKey(scenario)}:{})};entry.run.visualChecks.push(record);if(game)entry.run.gameChecks.push(record);await commit(entry);
+  if(!report.ok&&own&&name!=='lead')try{await ctx.agentTeams.sendMessage(exec.agent,{target:'lead',content:[{type:'text',text:`GVS LIVE UI TEST FAILURE ${JSON.stringify({taskId:own.id,checkId:record.id,scenario:args.scenario,scenarioId:args.scenarioId,failures:report.views.flatMap(v=>v.errors.map(error=>({viewport:v.viewport,error})))})}. Investigate now: distinguish an automation/selector failure from a reproducible product defect. The User should continue exploring other visible windows and send confirmed expected/actual findings; confirmed defects need owned repairs and independent rechecks.`}],signal:exec.signal});}catch(error){own.notificationError=clip(error.message,500);await commit(entry);}
+  return {...report,id:record.id,revision,scenarioId:record.scenarioId,sourceChanged:revision!==entry.run.revision,...(own?{visualStateCount:visualStates(entry.run,own).length,next:'Inspect existing required frames via gvs_visual action:states; copy literal imageIds. Do not recapture journeys to fix completion citations.'}:{})};
  }
- register('gvs_browser_check','Inspect the real local UI at desktop/phone sizes with semantic actions and assertions. Returns actual screenshots, errors and layout evidence. Game collision evidence needs gvs_game_check.',{url:text(2000),scenario:text(500),actions:{type:'array',items:action,maxItems:12}},['url'],(args,exec)=>browserCheck(args,exec,false));
+ register('gvs_browser_check','Exercise the actual local UI at desktop/phone sizes with semantic actions and assertions (including assertHidden/assertState for closing and controls). User scenarios require an exact registered scenarioId. Returns real screenshots, errors and layout evidence. Game collision checks need gvs_game_check.',{url:text(2000),scenario:text(500),scenarioId:text(40),actions:{type:'array',items:action,maxItems:12}},['url'],(args,exec)=>browserCheck(args,exec,false));
  register('gvs_game_check','Exercise an actual Canvas/WebGL game using its test-build __gvsGame v1 bridge. reset/step/hold/press/pointer drive real simulation; assert compares state paths. Returns actual frames, images and category coverage. It never treats a screenshot as collision proof.',{url:text(2000),scenario:text(500),actions:{type:'array',items:action,minItems:1,maxItems:32}},['url','actions'],(args,exec)=>browserCheck(args,exec,true));
  register('gvs_native_game_check','Run the actual native engine test command in foreground and read its GVS_GAME_RESULT JSON report. Accepts engine-generated screenshot files under the workspace. Independent code review must verify the adapter uses real game/physics logic.',{command:text(5000)},['command'],async(args,exec)=>{
   const {entry,name}=await current(exec);const result=await exec.agent.ctx.tools.execute({callId:randomUUID(),agent:exec.agent,signal:exec.signal,name:process.platform==='win32'?'pwsh':'bash',arguments:{description:'Run actual engine gameplay tests',command:args.command,workdir:entry.io.cwd,timeoutMs:120000}});
