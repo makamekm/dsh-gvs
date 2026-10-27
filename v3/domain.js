@@ -3,6 +3,7 @@ import {goalStatus} from './goal.js';
 import {sameEntry} from './browser.js';
 import {visualReviewAccepted,visualAuditStatus} from './visual.js';
 import {responsiveRunReady,responsiveStatus,needsResponsive} from './responsive.js';
+import {requiresWebVerification} from './project-qa.js';
 import {parallelBlocker} from './parallel.js';
 export const clip=(value,max=4000)=>String(value??'').slice(0,max);
 export const ID=/^[a-z][a-z0-9-]{0,39}$/;
@@ -63,7 +64,7 @@ export function quality(run){
   ['collision','gameplay','controls',...(run.kind==='game3d'?['camera']:[])].every(category=>coverage.has(category))&&technical?.result.adapterReviewed===true;
  const current=run.visualChecks.filter(check=>check.ok&&check.revision===run.revision);
  const interaction=!run.visualRequired||current.some(check=>check.interactions>0&&check.assertions>0);
- const entry=run.kind!=='ui'||!run.visualRequired||!run.preview?.url||current.some(check=>sameEntry(check.url,run.preview.url)&&run.viewports.every(viewport=>check.views?.some(view=>view.viewport===viewport&&(viewport!=='mobile'||view.isMobile===true&&view.touchPoints>0&&/Android|iPhone|iPad/.test(view.userAgent??'')))));
+ const entry=!requiresWebVerification(run)||!run.visualRequired||!run.preview?.url||current.some(check=>sameEntry(check.url,run.preview.url)&&run.viewports.every(viewport=>check.views?.some(view=>view.viewport===viewport&&(viewport!=='mobile'||view.isMobile===true&&view.touchPoints>0&&/Android|iPhone|iPad/.test(view.userAgent??'')))));
  return {goal:goalStatus(run).ready,source:!run.sourceError,entry,technical:accepted(technical)&&technical.result.simple===true&&technical.result.scopePreserved===true&&technical.result.checks.length>0&&visualReviewAccepted(run,technical),
   design:!run.visualRequired||accepted(designer)&&imageAcceptance(run,designer)&&analysisAcceptance(run,designer)&&visualReviewAccepted(run,designer),
   user:accepted(user)&&user.assignee==='user'&&imageAcceptance(run,user)&&analysisAcceptance(run,user)&&visualReviewAccepted(run,user),

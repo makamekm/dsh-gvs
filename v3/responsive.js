@@ -1,8 +1,9 @@
 import {createHash} from 'node:crypto';
 import {exercised,scenarioKey} from './journeys.js';
 import {validateVisualReview} from './visual.js';
+import {requiresWebVerification} from './project-qa.js';
 
-export const RESPONSIVE_TESTING='For assigned UI QA/design/User REVIEW tasks only (never briefs/consultations, editing or source-only tasks), use gvs_responsive status, check and review. Work through the current device/parameter/CSS-boundary matrix in batches of at most two cases. Observe first, then replay real journeys with actionsByCase when controls differ. Personally inspect every returned initial/intermediate/error/final frame and classify its warning candidates using review; these saved reviews avoid reciting hundreds of image IDs in the final task completion. A failed or stale capture is not proof. Report defects immediately with review verdict:revise and findings; do not wait for the entire matrix. Emulation is not a real phone, and bundled WebKit is not certification on physical Safari. Missing browser engines and untested conditions must remain explicit.';
+export const RESPONSIVE_TESTING='For assigned WEB/browser UI QA/design/User REVIEW tasks only; native engines/apps and CLI/bots use their actual project adapters (never briefs/consultations, editing or source-only tasks), use gvs_responsive status, check and review. Work through the current device/parameter/CSS-boundary matrix in batches of at most two cases. Observe first, then replay real journeys with actionsByCase when controls differ. Personally inspect every returned initial/intermediate/error/final frame and classify its warning candidates using review; these saved reviews avoid reciting hundreds of image IDs in the final task completion. A failed or stale capture is not proof. Report defects immediately with review verdict:revise and findings; do not wait for the entire matrix. Emulation is not a real phone, and bundled WebKit is not certification on physical Safari. Missing browser engines and untested conditions must remain explicit.';
 const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const preset=(id,width,height,extra={})=>({id,name:width<1100?'mobile':'desktop',width,height,deviceScaleFactor:width<1100?2:1,isMobile:width<1100,hasTouch:width<1100,colorScheme:'light',reducedMotion:'no-preference',contrast:'no-preference',forcedColors:'none',rootFontScale:1,...extra});
 export const DEVICE_CASES=[
@@ -48,7 +49,7 @@ export function responsiveMatrix(run){
   const value={...c,id:`${engine}-${c.id}`,engine,...(c.inputMode==='keyboard'?{keyboardNavigation:features?.keyboardNavigation??'Tab'}:{}),...(engine==='firefox'&&c.isMobile?{isMobile:false,limitations:['Firefox viewport/touch emulation; isMobile is unsupported. This is not an Android device.']}:{}),...(c.rootFontScale!==1?{fontCondition:'CSS root-font stress, not browser zoom or OS text autosizing'}:{})};return [{...value,key:digest(value)}];}));
  return {cases,limits:{strategy:'Representative device/parameter combinations plus both sides and exact values of discovered CSS breakpoints; not an exhaustive Cartesian product or physical-device certification.',unavailableEngines:(run.responsiveEngines??[]).filter(e=>!e.available),unsupportedCombinations,unreadableStylesheets:hints.unreadable??[],omittedConditions:omitted,truncated:!!hints.truncated||omitted.length>0,fonts:'Root-font stress does not reproduce every browser zoom/text-autosizing setting.',devices:'No physical OS keyboard, browser chrome/safe-area hardware, native permissions or pinch/multitouch certification. Wheel scrolling is recorded as wheel, not a touch swipe.'}};
 }
-export function needsResponsive(run,task){return !!run.responsivePolicy&&run.kind==='ui'&&run.visualRequired!==false&&task.reviewFocus!=='source'&&['review','design-review','user-review'].includes(task.kind);}
+export function needsResponsive(run,task){return !!run.responsivePolicy&&requiresWebVerification(run)&&run.visualRequired!==false&&task.reviewFocus!=='source'&&['review','design-review','user-review'].includes(task.kind);}
 export function responsiveScenarios(task){return task.userJourneys?.scenarios?.length?task.userJourneys.scenarios:[{id:'current-surface',category:'primary',target:'Current assigned UI surface and its actual controls',expected:'Real actions produce the assigned observable state without layout defects.'}];}
 export function responsiveStatus(run,task){
  if(!needsResponsive(run,task))return {required:false,ready:true,completed:0,total:0,missing:[]};
@@ -75,7 +76,7 @@ export function inspectResponsiveCheck(run,task,check,input){
  check.inspection={verdict:input.verdict,findings:input.findings,images:input.images??[],visualReview:input.visualReview??null,revision:run.revision,at:Date.now()};return check.inspection;
 }
 export function responsiveRunReady(run){
- if(!run.responsivePolicy||run.kind!=='ui'||run.visualRequired===false)return true;
+ if(!run.responsivePolicy||!requiresWebVerification(run)||run.visualRequired===false)return true;
  const accepted=run.tasks.filter(t=>t.state==='done'&&t.result?.verdict==='pass'&&t.result.revision===run.revision&&needsResponsive(run,t)&&responsiveStatus(run,t).ready);
  return accepted.some(t=>t.assignee==='user')&&accepted.some(t=>run.roles.some(r=>r.name===t.assignee&&r.capability==='verify'));
 }

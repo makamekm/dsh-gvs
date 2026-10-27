@@ -17,6 +17,7 @@ import {parallelFields,parallelBlocker,parallelStatus,taskAccess,runningAccessCh
 import {assignmentDelivery} from './delivery.js';
 import {prepareCodePlan,stalePlanFiles,planSources,needsCodePlan,missingPlanOutputs,migrateCodePlan,CodePlanSourceError} from './planning.js';
 import {taskArtifacts} from './artifacts.js';
+import {classifyProjectQA,isInteractiveProject,requiresWebVerification} from './project-qa.js';
 
 export const inject=['tools','agentTeams','agents','sessionController','subagents','fs','workingDirectory','sandboxPolicy','attachments','llm','jobs','sessionProjections'];
 const entries=new Map(),instance=randomUUID();
@@ -55,6 +56,17 @@ export function apply(ctx,config={}){
    write:async(file,value)=>ctx.fs.writeText(await target(file),value,undefined,signal,policy),policy};
  }
  const stateFile=root=>path.join('.gvs',`team-${root.id}.json`);
+ async function inspectProject(root,signal,engineHint=''){
+  const io=await storage(root,signal),files=[],documents={},warnings=[],queue=[{directory:'',depth:0}],ignored=new Set(['.git','.gvs','.godot','.codex','node_modules','artifacts','dist','build','target','library','temp','obj','bin','.venv','venv','content','assets']);let scanned=0;
+  while(queue.length&&scanned++<64){const {directory,depth}=queue.shift();let rows;try{rows=await ctx.fs.listDir(await ctx.fs.resolve(path.resolve(io.cwd,directory),{cwd:io.cwd,signal}),signal);}catch{warnings.push(`Cannot inspect directory ${directory||'.'}; target discovery is incomplete.`);continue;}
+   for(const row of rows){const relative=(directory?directory+'/':'')+row.name;files.push(relative);if(/^(?:package\.json|Cargo\.toml|pyproject\.toml|requirements\.txt|project\.godot)$/i.test(row.name)||/\.(?:csproj|uproject)$/i.test(row.name)){try{documents[relative]=new TextDecoder().decode(await io.bytes(relative));}catch{warnings.push(`Cannot read metadata ${relative}; inspect permissions/source before accepting its target.`);}}
+    if(row.type==='directory'&&depth<2&&!ignored.has(row.name.toLowerCase())&&!row.name.startsWith('.'))queue.push({directory:relative,depth:depth+1});
+   }
+  }
+  try{documents['ProjectSettings/ProjectVersion.txt']=new TextDecoder().decode(await io.bytes('ProjectSettings/ProjectVersion.txt'));}catch{}
+  if(queue.length)warnings.push('Metadata discovery was bounded at 64 directories. An assigned source specialist must inspect remaining targets.');
+  const target=classifyProjectQA({files,documents,engineHint});return {...target,warnings:[...target.warnings,...warnings],revision:entries.get(root.id)?.run.revision??null};
+ }
  async function load(root,signal){
   if(entries.has(root.id)){const entry=entries.get(root.id);entry.root=root;return entry;}
   const io=await storage(root,signal);
@@ -78,7 +90,7 @@ export function apply(ctx,config={}){
    entry.run.requireCoordinatorPlan=config.requireCoordinatorPlan!==false;
    for(const task of entry.run.tasks){task.codePlan=migrateCodePlan(task.codePlan);task.planRequired=task.state!=='done'&&needsCodePlan(entry.run,task);}
    entry.run.parallelLimit??=maxParallel;
-   if(entry.run.kind==='ui'){
+   if(isInteractiveProject(entry.run)){
     if(config.responsiveTesting!==false)entry.run.responsivePolicy=1;
     entry.run.userTestingPolicy=1;
     if(!entry.run.userTestingSeen){entry.run.userTestingSeen=entry.run.tasks.filter(t=>t.state==='done').map(t=>t.id);entry.run.userTestingInitial=true;}
@@ -94,6 +106,7 @@ export function apply(ctx,config={}){
    syncGoal(entry.run,messages?.length?messages:!entry.run.goal?[{id:'initial-request',text:entry.run.task}]:[]);
    if(migrating){for(const task of entry.run.tasks)recordFindings(entry.run,task);entry.run.revision++;}
    await refreshRevision(entry,ctx.fs,exec.signal);
+   if(config.projectInspection!==false&&entry.run.qaTarget?.revision!==entry.run.revision){const target=await inspectProject(member.root,exec.signal,entry.run.engine);if(target.surfaces.includes('code-or-unknown')&&entry.run.qaTarget?.sourceConfirmed){target.surfaces=entry.run.qaTarget.surfaces;target.engines=entry.run.qaTarget.engines;target.warnings.push('Preserved previously confirmed targets while current metadata is incomplete; source changes cannot silently waive verification.');}entry.run.qaTarget=target;if(entry.run.viewportsAuto&&entry.run.visualRequired&&requiresWebVerification(entry.run))entry.run.viewports=[...new Set([...entry.run.viewports,'desktop','mobile'])];await commit(entry);}
   }
   return {member,entry,root:member.root,name:member.name};
  }
@@ -296,15 +309,19 @@ export function apply(ctx,config={}){
   const io=await storage(root,exec.signal);if(io.policy.mode==='read-only')throw new Error('GVS work requires Workspace Write.');
   const visualRequired=args.kind!=='code';
   const run={schema:3,sessionId:root.id,runId:`${new Date().toISOString().replace(/[:.]/g,'-')}-${randomUUID().slice(0,8)}`,task:args.task,kind:args.kind,engine:args.engine??'',status:'running',revision:0,
-   visualRequired,visualPolicy:visualRequired?1:0,viewports:args.viewports??(args.kind==='ui'?['desktop','mobile']:['desktop']),roles:previous?.run.roles??[],tasks:[],checks:[],visualChecks:[],gameChecks:[],analysis:{state:'pending',version:0,requirements:[],rationale:'',motionHint:motionHint(args.task)},analysisChecks:[],preview:null,quality:null,summary:'',progress:{startedAt:Date.now(),metadataSinceWrite:0,writes:0}};
+   visualRequired,visualPolicy:visualRequired?1:0,viewports:args.viewports??(args.kind==='ui'?['desktop','mobile']:['desktop']),viewportsAuto:args.viewports===undefined,roles:previous?.run.roles??[],tasks:[],checks:[],visualChecks:[],gameChecks:[],analysis:{state:'pending',version:0,requirements:[],rationale:'',motionHint:motionHint(args.task)},analysisChecks:[],preview:null,quality:null,summary:'',progress:{startedAt:Date.now(),metadataSinceWrite:0,writes:0}};
   const entry={run,root,io,write:Promise.resolve(),abort:new AbortController(),waiters:new Map(),scheduling:null};entries.set(root.id,entry);
   entry.owner=ctx;owned.add(root.id);
   const human=ctx.sessionProjections?.stateOf(root.session,'gvsHumanGoal')?.messages;
   syncGoal(run,human?.length?human:[{id:'initial-request',text:args.task}]);
+  if(config.projectInspection!==false){run.qaTarget=await inspectProject(root,exec.signal,run.engine);if(run.viewportsAuto&&run.qaTarget.sourceConfirmed&&!requiresWebVerification(run))run.viewports=['desktop'];}
   await refreshRevision(entry,ctx.fs,exec.signal);
   await createRole(entry,{name:'user',title:'Пользователь',purpose:'Цели, UX и независимая пользовательская приёмка',instructions:USER,capability:'user'},exec.signal);
   const brief=await createTask(entry,{assignee:'user',title:'Определить цель и критерии приёмки',kind:'brief',instructions:`Inspect the actual task/project. Define audience/player, primary journey, meaningful acceptance criteria and visual ambition. Keep it concise. Do not prescribe a composition before exploration. For a game identify actual engine and key mechanics to verify. Do not run a full regression yet.\n${args.task}`,dependsOn:[]},exec.signal);
   return {status:'running',briefTaskId:brief.id,next:'Wait for the User brief, create suitable named specialists and dependency tasks. Coordinate until gvs_finish accepts all gates.'};
+ });
+ register('gvs_project','Inspect actual project manifests and execution targets before choosing QA tools. Detects web, native games (Unity/Godot/Unreal), native UI, CLI/bot/service and mixed targets. Returns adapter/evidence contracts, not claims that engines or drivers are installed. Create needed specialist/driver tasks yourself; never force a browser matrix on non-web products.',{},[],async(_args,exec)=>{
+  const {root,entry}=await current(exec,false),target=await inspectProject(root,exec.signal,entry?.run.engine??'');if(entry){entry.run.qaTarget=target;await commit(entry);}return {target,next:'Discover actual runtime/entrypoints and feature-specific risks. Use the listed appropriate existing tools; if a driver is missing, assign a concrete adapter task to an existing or newly inferred specialist. Do not invent test results or substitute localhost for native/CLI execution.'};
  });
  register('gvs_agent','Create, list, wake, message, retire or request a persistent named role. Only Lead creates roles; teammates may message peers or request help. Wake rechecks EXISTING tasks and respects dependencies; use gvs_task create for NEW work. Message only clarifies existing work.',{action:{type:'string',enum:['create','list','wake','message','retire','request']},name:text(40),title:text(80),purpose:text(1200),instructions:text(5000),capability:{type:'string',enum:['read','edit','verify']},message:text(5000)},['action'],async(args,exec)=>{
   const {member,entry}=await current(exec);
@@ -682,6 +699,7 @@ export function apply(ctx,config={}){
   const revision=entry.run.revision;
   const report=await (game?captureGame:captureBrowser)(args,{config,signal,saveImage:image=>ctx.attachments.saveImage(image),viewports:entry.run.viewports});
   await refreshRevision(entry,ctx.fs,exec.signal);
+  if(report.ok&&(game||report.views.some(v=>v.controls>0))&&entry.run.qaTarget){entry.run.qaTarget.surfaces=[...new Set([...entry.run.qaTarget.surfaces.filter(s=>s!=='code-or-unknown'),'web'])];entry.run.qaTarget.evidence.push({surface:'web',engine:game?'web-game':'browser',path:report.url,observed:true});}
   if(!game&&revision===entry.run.revision)for(const view of report.views)mergeResponsiveHints(entry.run,view.responsiveHints);
   const record={...report,id:`browser-${randomUUID()}`,at:Date.now(),revision,capturedBy:name,taskId:own?.id??null,...(scenario?{scenarioId:scenario.id,scenarioKey:scenarioKey(scenario)}:{})};entry.run.visualChecks.push(record);if(game)entry.run.gameChecks.push(record);await commit(entry);
   return {...report,id:record.id,revision,scenarioId:record.scenarioId,sourceChanged:revision!==entry.run.revision,...(own?{visualStateCount:visualStates(entry.run,own).length,next:'Inspect existing required frames via gvs_visual action:states; copy literal imageIds. Do not recapture journeys to fix completion citations.'}:{})};
@@ -692,6 +710,7 @@ export function apply(ctx,config={}){
  register('gvs_responsive','Systematic UI simulation: status pages device/settings and discovered CSS-boundary cases; check executes up to TWO cases with real actions and images; states retrieves stored pixels; review saves your explicit per-batch visual judgement and forwards defects. Complete the matrix independently as QA/User before pass. Missing engines are reported, never treated as tested physical devices.',
  {action:{type:'string',enum:['status','check','states','review']},taskId:text(40),caseIds:{type:'array',items:text(100),minItems:1,maxItems:2},checkId:text(100),scenarioId:text(40),scenario:text(1000),url:text(2000),actions:browserActions,actionsByViewport:object({desktop:browserActions,mobile:browserActions}),actionsByCase:{type:'object',additionalProperties:browserActions,maxProperties:2},offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:6},verdict:{type:'string',enum:['pass','revise']},findings:strings,images:{...strings,maxItems:20},visualReview:responsiveReview},['action'],async(args,exec)=>{
   const {entry,name,member}=await current(exec),task=entry.run.tasks.find(t=>t.id===args.taskId)??entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');
+  if(args.action!=='states'&&!requiresWebVerification(entry.run))return {status:'not-web-target',accepted:false,required:false,target:entry.run.qaTarget??null,next:'This browser matrix does not apply to the actual native/CLI/service target. Inspect gvs_project, use real engine/process/native-window evidence, and assign a needed driver task; do not start a localhost substitute.'};
   if(!task||!['review','user-review','design-review'].includes(task.kind))throw new Error('Use the exact existing UI review taskId. Briefs/consultations and editing tasks are not responsive acceptance.');
   const offset=args.offset??0,limit=args.limit??3;
   entry.run.responsiveEngines=await browserCapabilities(config);

@@ -30,8 +30,27 @@
                 assigned teammate role and COMMON policy; do not coordinate or call gvs_run. The following
                 coordinator policy applies only to the ordinary top-level Lead.
 
-                For assigned UI QA/design/User REVIEW tasks only (never briefs/consultations, editing or
-                source-only tasks), use gvs_responsive status, check and review. Work through the current
+                QA IS TARGET-DRIVEN, NOT BROWSER-DRIVEN. Inspect gvs_project before choosing verification
+                tools. Infer the actual product surfaces and risks from real files and the human goal.
+                Web/browser UI uses gvs_responsive and real browser journeys. Unity/Godot/Unreal use actual
+                engine scenes, native builds, input/physics/camera/state and rendered frames through
+                gvs_native_game_check/gvs_analysis plus native window control. Desktop/native UI uses actual
+                windows/controls and pixels, never a localhost substitute. CLI/service/bot work uses actual
+                production handlers/processes/transports, commands/events/state/retry/restart/permissions, not
+                screenshots or fabricated chat messages. Mixed products need every applicable surface. These
+                are adapter contracts, not proof that an engine is installed. Discover the real
+                runner/runtime; if a driver is missing, infer the needed expertise, reuse/create a suitable
+                specialist and assign a concrete source-grounded adapter task. Never make the human choose the
+                role or fabricate a successful adapter. Independently inspect the driver source and actual
+                evidence. Use local owned fixtures/transports for bot tests; simulated User cannot authorize
+                external messages/accounts or hardware permissions. User actively interacts with the actual
+                native window/owned driver when available and reviews actual QA evidence, without arbitrary
+                shell/product editing capability. A missing engine/adapter/real-device condition is a concrete
+                uncovered limitation, not a pass.
+
+                For assigned WEB/browser UI QA/design/User REVIEW tasks only; native engines/apps and CLI/bots
+                use their actual project adapters (never briefs/consultations, editing or source-only tasks),
+                use gvs_responsive status, check and review. Work through the current
                 device/parameter/CSS-boundary matrix in batches of at most two cases. Observe first, then
                 replay real journeys with actionsByCase when controls differ. Personally inspect every
                 returned initial/intermediate/error/final frame and classify its warning candidates using

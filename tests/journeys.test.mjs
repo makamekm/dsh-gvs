@@ -27,7 +27,7 @@ test('inapplicable categories need specific current observed evidence and never 
 test('live User probes are generated for runnable UI increments, coalesce by observed work IDs, and preserve pauses and initial brief',()=>{
  const {run}=setup();run.userTestingInitial=true;const initial=userProbeInput(run);assert.equal(initial.assignee,'user');assert.equal(initial.autoUserProbe,true);assert.equal(initial.scope,'increment');assert.deepEqual(initial.resources,[]);
  run.userTestingInitial=false;assert.equal(userProbeInput(run),null);run.tasks=[{id:'patch',kind:'work',state:'done',result:{verdict:'pass'},codePlan:{changes:[{path:'store-ui/Badges.tsx'}]}}];const next=userProbeInput(run);assert.deepEqual(next.userProbeFor,['patch']);assert.ok(next.readScopes.includes('store-ui'));
- run.userTestingSeen=['patch'];assert.equal(userProbeInput(run),null);run.userTestingSeen=[];run.status='paused';assert.equal(userProbeInput(run),null);run.status='running';run.tasks.push({kind:'brief',state:'running'});assert.equal(userProbeInput(run),null);run.tasks.pop();run.tasks[0].codePlan.changes[0].path='crates/native/src/lib.rs';assert.equal(userProbeInput(run),null);
+ run.userTestingSeen=['patch'];assert.equal(userProbeInput(run),null);run.userTestingSeen=[];run.status='paused';assert.equal(userProbeInput(run),null);run.status='running';run.tasks.push({kind:'brief',state:'running'});assert.equal(userProbeInput(run),null);run.tasks.pop();run.tasks[0].codePlan.changes[0].path='crates/native/src/lib.rs';assert.deepEqual(userProbeInput(run).userProbeFor,['patch'],'A backend/native change can affect an interactive product too.');
 });
 
 test('dismiss evidence proves visible to hidden to reopened, rather than asserting a nonexistent window is hidden',()=>{

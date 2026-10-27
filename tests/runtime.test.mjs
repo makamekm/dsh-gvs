@@ -13,7 +13,7 @@ function fixture(config={}){
  const ctx={agentTeams:team,on:(name,fn)=>{hooks[name]=fn;},effect:fn=>effects.push(fn),jobs:{attachController:()=>()=>{}},tools:{register:definition=>definitions.set(definition.name,definition),guard:fn=>{guard=fn;}},
   workingDirectory:{ensure:async()=>path.resolve('work/in-memory-fixture')},sandboxPolicy:{resolve:()=>({mode:'workspace-write'})},
   fs:{resolve:async file=>({file}),contains:()=>true,listDir:async()=>[{name:'app.js',type:'file'}],lstat:async()=>({type:'file'}),readBytes:async()=>Buffer.from(source),readText:async target=>{if(!files.has(target.file))throw Object.assign(new Error('missing'),{code:'ENOENT'});return files.get(target.file);},writeText:async(target,value)=>{files.set(target.file,value);}}};
- apply(ctx,{requireCoordinatorPlan:false,responsiveTesting:false,...config});
+ apply(ctx,{requireCoordinatorPlan:false,responsiveTesting:false,projectInspection:false,...config});
  const actor=name=>{const member=[...members.values()].find(member=>member.name===name);return {id:member.id,session:{header:{parentSession:root.id}},ctx:{}};};
  async function call(name,args={},agent=root){const exec={agent,name,arguments:args,signal:new AbortController().signal};await hooks['tools/pre-execute'](exec,async()=>({kind:'allow'}));const denied=guard(exec);if(denied)throw new Error(denied);return definitions.get(name).execute(args,exec);}
  const complete=async(id,agent,extra={})=>{const saved=JSON.parse([...files.values()][0]);if(saved.tasks.find(task=>task.id===id)?.kind==='brief'){
@@ -23,6 +23,15 @@ function fixture(config={}){
  async function consult(agent){let cached;const pending=call('gvs_ask_user',{question:'Confirm the exact goal'},agent).then(value=>(cached=value,value));await new Promise(resolve=>setImmediate(resolve));if(cached)return cached;let list=await call('gvs_task',{action:'list'});const question=list.tasks.find(task=>task.kind==='consultation'&&task.state==='running');assert.ok(question);await complete(question.id,actor('user'));return pending;}
  return {root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,effects,failNextSpawn:()=>{nextSpawnError=new Error('Temporary spawn failure');},changeSource:value=>{source=value;},get spawns(){return spawns;}};
 }
+test('target inspection uses sandbox metadata before a run and native UI never launches a browser matrix',async()=>{
+ const f=fixture({projectInspection:true,responsiveTesting:true}),cwd=await f.ctx.workingDirectory.ensure();
+ f.ctx.fs.listDir=async target=>path.relative(cwd,target.file)===''?[{name:'project.godot',type:'file'},{name:'scenes',type:'directory'}]:[{name:'main.tscn',type:'file'}];
+ f.ctx.fs.readBytes=async target=>{if(path.relative(cwd,target.file)==='project.godot')return Buffer.from('[application]\nconfig/name="Native game"');if(path.relative(cwd,target.file)===path.join('scenes','main.tscn'))return Buffer.from('[gd_scene format=3]');throw Object.assign(new Error('missing'),{code:'ENOENT'});};
+ const discovery=await f.call('gvs_project');assert.deepEqual(discovery.target.surfaces,['native-game']);assert.deepEqual(discovery.target.sourceRoots,['scenes']);assert.equal(discovery.target.sourceConfirmed,true);
+ const started=await f.call('gvs_run',{task:'Verify actual native game windows',kind:'game2d',engine:'Godot'});assert.deepEqual(JSON.parse([...f.files.values()][0]).viewports,['desktop']);
+ const response=await f.call('gvs_responsive',{action:'status'});assert.equal(response.status,'not-web-target');assert.equal(response.accepted,false);assert.equal(response.required,false);assert.ok(started.briefTaskId);
+});
+
 test('missing update reasons derive a factual audit; identical updates do not notify or reassign and real running lease changes remain denied',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Keep the complete human goal',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
  await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});
@@ -73,7 +82,7 @@ test('coordinator can inspect teammate responsive failure images without acquiri
  const f=fixture(),start=await f.call('gvs_run',{task:'Inspect responsive feedback',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
  const work=await f.call('gvs_task',{action:'create',title:'Actual User review',instructions:'Observe actual pixels',kind:'user-review',scope:'increment',analysisIds:[],assignee:'user',resources:[]});
  const saved=JSON.parse([...f.files.values()][0]);saved.responsiveChecks=[{id:'responsive-peer',taskId:work.task.id,caseId:'chromium-phone-wide',capturedBy:'user',revision:saved.revision,ok:false,views:[{viewport:'mobile',errors:['Visible brand is covered']}],images:[{viewport:'mobile',attachment:{attachmentId:'actual-peer-frame'}}]}];
- for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));const fresh=await import(`../v3/runtime.js?responsive-read=${randomUUID()}`);fresh.apply(f.ctx,{requireCoordinatorPlan:false,responsiveTesting:true});
+ for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));const fresh=await import(`../v3/runtime.js?responsive-read=${randomUUID()}`);fresh.apply(f.ctx,{requireCoordinatorPlan:false,responsiveTesting:true,projectInspection:false});
  const read=await f.call('gvs_responsive',{action:'states',taskId:work.task.id,checkId:'responsive-peer'});assert.equal(read.readOnly,true);assert.equal(read.images[0].attachment.attachmentId,'actual-peer-frame');assert.equal(read.capturedBy,'user');
  await assert.rejects(f.call('gvs_responsive',{action:'review',taskId:work.task.id,checkId:'responsive-peer',verdict:'pass',findings:[]}),/OWN matrix/);assert.equal(f.tasks.get(work.task.id).status,'in_progress');
 });
@@ -237,7 +246,7 @@ test('UI reviews wait for actual preview readiness while isolated source work co
   for(const [name,capability] of [['visual','verify'],['source','verify'],['backend','edit']])await f.call('gvs_agent',{action:'create',name,title:name,purpose:'Independent work',capability});
   const state=JSON.parse([...f.files.values()][0]);state.preview={url:`http://127.0.0.1:${server.address().port}/`,jobId:'preview-fixture'};for(const key of f.files.keys())f.files.set(key,JSON.stringify(state));
   f.ctx.jobs.get=()=>({status:'running'});f.ctx.jobs.read=()=>({chunks:[{channel:'stderr',text:'Preview still starting'}]});
-  const fresh=await import(`../v3/runtime.js?preview=${randomUUID()}`);fresh.apply(f.ctx,{requireCoordinatorPlan:false});
+  const fresh=await import(`../v3/runtime.js?preview=${randomUUID()}`);fresh.apply(f.ctx,{requireCoordinatorPlan:false,projectInspection:false,responsiveTesting:false});
   const visual=await f.call('gvs_task',{action:'create',title:'Visual QA',instructions:'Actual screenshots',kind:'review',assignee:'visual',scope:'increment',analysisIds:[],readScopes:['src'],writeScopes:['artifacts/visual'],resources:[]});
   assert.equal(visual.task.state,'waiting');assert.equal((await f.call('gvs_parallel',{action:'status'})).parallel.waiting[0].reason.kind,'preview-not-ready');assert.equal(f.sent.filter(m=>m.target==='visual').length,0);
   const source=await f.call('gvs_task',{action:'create',title:'Native source',instructions:'Static ABI',kind:'review',assignee:'source',scope:'increment',analysisIds:[],reviewFocus:'source',readScopes:['native'],resources:[]});assert.equal(source.task.state,'running');
@@ -324,7 +333,7 @@ test('all required existing states can be paged and reopened by exact ID even wi
  const work=await f.call('gvs_task',{action:'create',title:'Visual review',instructions:'Inspect all states',kind:'design-review',assignee:'qa',scope:'increment',analysisIds:[],readScopes:[],writeScopes:[],resources:[]});
  const saved=JSON.parse([...f.files.values()][0]),images=Array.from({length:48},(_,i)=>({viewport:i%2?'mobile':'desktop',stage:i===0?'initial':'step-'+i,attachment:{attachmentId:'actual-'+i}}));
  saved.visualChecks=[{ok:true,revision:saved.revision,taskId:work.task.id,capturedBy:'qa',images,views:['desktop','mobile'].map(viewport=>({viewport,layout:{captures:images.filter(i=>i.viewport===viewport).map(i=>({imageId:i.attachment.attachmentId,stage:i.stage,warningIds:[]})),warnings:[],truncated:false}}))}];
- for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));const isolated=await import(`../v3/runtime.js?all-states=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false});await f.call('gvs_recover');
+ for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));const isolated=await import(`../v3/runtime.js?all-states=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false,projectInspection:false,responsiveTesting:false});await f.call('gvs_recover');
  const actor=f.actor('qa'),seen=[];let offset=0;do{const page=await f.call('gvs_visual',{action:'states',taskId:work.task.id,offset,limit:6},actor);assert.equal(page.total,48);assert.equal(page.images.length,page.states.length);seen.push(...page.states.map(s=>s.imageId));offset=page.nextOffset;}while(offset!==null);
  assert.equal(new Set(seen).size,48);assert.ok(seen.includes('actual-0'));assert.deepEqual((await f.call('gvs_visual',{action:'states',imageId:'actual-0'},actor)).images,[images[0]]);
  await assert.rejects(f.call('gvs_visual',{action:'states',imageId:'guessed-hash'},actor),/copy its literal ID/);assert.equal(f.tasks.size,2);
@@ -334,7 +343,7 @@ test('a review stopped by the former complete-plan prerequisite resumes once and
  const f=fixture(),start=await f.call('gvs_run',{task:'Explore UI incrementally',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
  const work=await f.call('gvs_task',{action:'create',title:'Explore existing windows',instructions:'Test actual controls',kind:'user-review',assignee:'user',scope:'full',readScopes:[],writeScopes:[],resources:[]});const saved=JSON.parse([...f.files.values()][0]),task=saved.tasks.find(t=>t.id===work.task.id);
  task.state='blocked';task.result={verdict:'blocked',summary:'Agent turn ended (completed) without completing its assigned task.',findings:[]};saved.diagnostics=[{id:'legacy',agent:'user',taskId:task.id,tool:'gvs_user_testing',message:'Plan opening/closing/back/Escape/reopen for observed windows',status:'open',count:3,firstAt:1,lastAt:1}];
- for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));const isolated=await import(`../v3/runtime.js?partial-plan-recovery=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false});const recovered=await f.call('gvs_recover');assert.deepEqual(recovered.recovered,[task.id]);assert.equal(f.tasks.get(task.id).status,'in_progress');assert.equal(f.spawns,1);
+ for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));const isolated=await import(`../v3/runtime.js?partial-plan-recovery=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false,projectInspection:false,responsiveTesting:false});const recovered=await f.call('gvs_recover');assert.deepEqual(recovered.recovered,[task.id]);assert.equal(f.tasks.get(task.id).status,'in_progress');assert.equal(f.spawns,1);
  const partial=await f.call('gvs_user_testing',{action:'plan',scenarios:[{id:'open',category:'primary',target:'Observed Settings button in the ordinary UI',expected:'Actual settings window opens and its controls are usable.'}]},f.actor('user'));assert.equal(partial.planned,true);assert.equal(partial.scenarios[0].id,'open');assert.deepEqual(partial.missingCategories,['dismiss','negative-or-recovery']);assert.equal(partial.scenarios[0].passed,false);
  assert.deepEqual((await f.call('gvs_recover')).recovered,[]);const state=JSON.parse([...f.files.values()][0]).tasks.find(t=>t.id===task.id);assert.equal(state.reviewPlanRecovery.version,2);assert.equal(state.lastFailure.verdict,'blocked');assert.equal(state.state,'running');
 });
@@ -342,11 +351,11 @@ test('a review stopped by the former complete-plan prerequisite resumes once and
 test('a runnable UI automatically queues the same User for exploration and coalesces later completed UI increments',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Continuously test current windows',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
  let saved=JSON.parse([...f.files.values()][0]);saved.preview={url:'http://localhost:5173/',jobId:'not-running',ready:false};for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));
- let isolated=await import(`../v3/runtime.js?user-probe=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false});await f.call('gvs_recover');
+ let isolated=await import(`../v3/runtime.js?user-probe=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false,projectInspection:false,responsiveTesting:false});await f.call('gvs_recover');
  saved=JSON.parse([...f.files.values()][0]);const probe=saved.tasks.find(t=>t.autoUserProbe);assert.ok(probe);assert.equal(probe.assignee,'user');assert.equal(probe.state,'waiting');assert.equal(probe.kind,'user-review');assert.equal(f.spawns,1);assert.deepEqual(probe.resources,[]);
  await f.call('gvs_recover');assert.equal(f.tasks.size,2);
  saved.tasks.push({id:'new-ui-slice',kind:'work',assignee:'developer',state:'done',dependsOn:[],result:{verdict:'pass',summary:'Actual UI slice',findings:[]},codePlan:{version:2,sources:[],changes:[{path:'store-ui/Badge.tsx'}]}});for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));
- isolated=await import(`../v3/runtime.js?coalesce-probe=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false});await f.call('gvs_recover');
+ isolated=await import(`../v3/runtime.js?coalesce-probe=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false,projectInspection:false,responsiveTesting:false});await f.call('gvs_recover');
  saved=JSON.parse([...f.files.values()][0]);assert.equal(saved.tasks.filter(t=>t.autoUserProbe).length,1);assert.equal(saved.tasks.find(t=>t.autoUserProbe).id,probe.id);assert.deepEqual(saved.tasks.find(t=>t.autoUserProbe).userProbeFor,['new-ui-slice']);assert.equal(f.tasks.size,2);
  await f.call('gvs_pause');await f.call('gvs_recover');assert.equal(JSON.parse([...f.files.values()][0]).status,'paused');
 });
@@ -393,7 +402,7 @@ test('a passed increment still saves out-of-scope visual defects as mandatory go
  const warning={id:'layout-overlap',kind:'overlap',targets:[{label:'An unrelated dialog brand'}],images:['mobile']};
  saved.visualChecks=[{ok:true,revision:saved.revision,capturedBy:'other',images:['desktop','mobile'].map(viewport=>({viewport,stage:'initial',attachment:{attachmentId:viewport}})),views:['desktop','mobile'].map(viewport=>({viewport,layout:{schema:'gvs.layout/1',captures:[{stage:'initial',imageId:viewport,warningIds:viewport==='mobile'?[warning.id]:[]}],warnings:viewport==='mobile'?[warning]:[]}}))}];
  for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));
- const fresh=await import(`../v3/runtime.js?visual=${randomUUID()}`);fresh.apply(f.ctx,{requireCoordinatorPlan:false,responsiveTesting:false});
+ const fresh=await import(`../v3/runtime.js?visual=${randomUUID()}`);fresh.apply(f.ctx,{requireCoordinatorPlan:false,responsiveTesting:false,projectInspection:false});
  const work=await f.call('gvs_task',{action:'create',title:'Focused visual review',instructions:'Review the current increment',assignee:'qa',kind:'review',scope:'increment',analysisIds:[]});
  await f.call('gvs_ask_user',{reuseTaskId:start.briefTaskId},f.actor('qa'));
  f.hooks['tools/result']({agent:f.actor('qa'),name:'pwsh',arguments:{command:'node actual-review.mjs'}},{isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'Observed'}},content:[]});
@@ -412,13 +421,13 @@ test('a claimed agent turn ending without completion becomes a visible blocker',
 });
 test('restart preserves the active goal and resume reuses its original actor',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Recover',kind:'code'});const id=f.actor('user').id;
- const isolated=await import(`../v3/runtime.js?recovery=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false});
+ const isolated=await import(`../v3/runtime.js?recovery=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false,projectInspection:false,responsiveTesting:false});
  const status=await f.call('gvs_status');assert.equal(status.status,'running');assert.equal(status.gvsTeam.tasks.find(task=>task.id===start.briefTaskId).state,'blocked');
  await f.call('gvs_resume');assert.equal(f.actor('user').id,id);assert.equal(f.spawns,1);assert.equal(f.tasks.get(start.briefTaskId).status,'in_progress');
 });
 test('automatic recovery reuses interrupted assignments but never resumes a human pause or retries genuine blockers',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Automatic recovery',kind:'code'}),id=f.actor('user').id;
- const isolated=await import(`../v3/runtime.js?boot=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false});
+ const isolated=await import(`../v3/runtime.js?boot=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false,projectInspection:false,responsiveTesting:false});
  const recovered=await f.call('gvs_recover');assert.equal(recovered.continued,true);assert.deepEqual(recovered.recovered,[start.briefTaskId]);assert.equal(f.actor('user').id,id);assert.equal(f.spawns,1);assert.equal(f.tasks.get(start.briefTaskId).status,'in_progress');
  assert.deepEqual((await f.call('gvs_recover')).recovered,[],'No duplicate wake of an already running task');
  await f.call('gvs_pause');const messages=f.sent.length;
@@ -470,12 +479,12 @@ test('a verbose assignment fits the native team limit and old oversize delivery 
  await f.call('gvs_agent',{action:'create',name:'reviewer',title:'Reviewer',purpose:'Independent work',capability:'verify'});
  const saved=JSON.parse([...f.files.values()][0]);saved.goal.messages.push({id:'large-human-source',text:'Полный реальный контракт '.repeat(20000)});
  for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));
- const isolated=await import(`../v3/runtime.js?budget=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false});
+ const isolated=await import(`../v3/runtime.js?budget=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false,projectInspection:false,responsiveTesting:false});
  const work=await f.call('gvs_task',{action:'create',title:'Inspect',instructions:'Inspect current source',kind:'work',assignee:'reviewer'});
  const sent=f.sent.filter(message=>message.target==='reviewer').at(-1);assert.ok(Buffer.byteLength(JSON.stringify(sent.content),'utf8')<120001);assert.match(sent.content[0].text,/COMPACT ASSIGNMENT/);assert.match(sent.content[0].text,new RegExp(work.task.id));
  const state=JSON.parse([...f.files.values()][0]),task=state.tasks.find(task=>task.id===work.task.id);task.state='blocked';task.result={verdict:'blocked',summary:'team message exceeds 131072 bytes',findings:[]};
  for(const key of f.files.keys())f.files.set(key,JSON.stringify(state));
- const reboot=await import(`../v3/runtime.js?retry=${randomUUID()}`);reboot.apply(f.ctx,{requireCoordinatorPlan:false});
+ const reboot=await import(`../v3/runtime.js?retry=${randomUUID()}`);reboot.apply(f.ctx,{requireCoordinatorPlan:false,projectInspection:false,responsiveTesting:false});
  const recovered=await f.call('gvs_recover');assert.deepEqual(recovered.recovered,[work.task.id]);assert.equal(f.spawns,2);assert.equal(f.tasks.get(work.task.id).status,'in_progress');
 });
 

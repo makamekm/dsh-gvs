@@ -1,5 +1,6 @@
 import {createHash} from 'node:crypto';
 import {validateUserJourneys} from './journeys.js';
+import {requiresWebVerification} from './project-qa.js';
 
 export const VISUAL_CHECKS=['overlap','clipping','spacing','alignment','readability','responsive','interaction'];
 
@@ -90,6 +91,7 @@ export function visualStates(run,task){
   const state=states.get(capture.imageId)??{imageId:capture.imageId,image,contexts:[]};
   state.contexts.push({taskId:check.taskId,capturedBy:check.capturedBy,scenario:check.scenario,checkOk:check.ok===true,errors:view.errors??[],viewport:view.viewport,stage:capture.stage,scope:capture.scope,warningIds:capture.warningIds??[],truncated:view.layout.truncated===true});states.set(capture.imageId,state);
  }
+ for(const check of checks)for(const image of check.images??[]){const id=image.attachment.attachmentId;if(states.has(id))continue;states.set(id,{imageId:id,image,contexts:[{taskId:check.taskId,capturedBy:check.capturedBy,engine:check.engine,scenario:check.scenario,checkOk:check.ok===true,viewport:image.viewport,stage:image.stage??'rendered-frame',scope:'rendered-frame',warningIds:[],layoutAvailable:false}]});}
  const required=new Set([...(task.receivedImages??[]),...checks.filter(c=>c.taskId===task.id).flatMap(c=>c.images).map(i=>i.attachment.attachmentId)]);
  return [...states.values()].filter(state=>required.has(state.imageId));
 }
@@ -106,7 +108,7 @@ export function validateVisualReview(run,task,result){
  const audits=checks.flatMap(c=>c.views??[]).map(v=>v.layout).filter(Boolean);
  const audited=new Set(audits.flatMap(a=>a.captures.map(c=>c.imageId)));
  if(audits.some(a=>a.truncated&&a.captures.some(c=>selected.has(c.imageId)))&&(review.manualCoverage?.trim().length??0)<40)throw new Error('The automatic scan was bounded. Describe actual manualCoverage of the remaining pixels/states with screenshot evidence; do not equate a truncated scan with no defects.');
- if(run.kind==='ui'&&!run.viewports.every(viewport=>images.some(i=>i.viewport===viewport&&audited.has(i.attachment.attachmentId))))throw new Error('Capture fresh screenshots with the rendered layout audit; old image IDs alone cannot attest the new visual checks.');
+ if(requiresWebVerification(run)&&!run.viewports.every(viewport=>images.some(i=>i.viewport===viewport&&audited.has(i.attachment.attachmentId))))throw new Error('Capture fresh screenshots with the rendered layout audit; old image IDs alone cannot attest the new visual checks.');
  const required=visualStates(run,task),missing=required.filter(state=>!selected.has(state.imageId));
  if(missing.length)throw new Error(`Inspect all supplied/captured audited states, including initial dialogs and intermediate states; do not select only the clean final screenshot. Missing ${missing.length} of ${required.length} required images. Exact missing IDs (first 6): ${JSON.stringify(missing.slice(0,6).map(state=>({imageId:state.imageId,viewport:state.image.viewport,stages:[...new Set(state.contexts.map(c=>c.stage))]})))}. Read existing pixels with gvs_visual action:states taskId:${task.id}, imageId:<exact ID>, or offset/limit pages. Copy its literal imageIds into complete.images after inspection; do not guess hashes or recapture journeys to fix a citation error.`);
  const warnings=new Map();for(const audit of audits)for(const warning of audit.warnings)if(warning.images.some(id=>selected.has(id))){const previous=warnings.get(warning.id);warnings.set(warning.id,{...warning,images:[...new Set([...(previous?.images??[]),...warning.images])]});}
