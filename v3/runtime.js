@@ -15,7 +15,7 @@ import {recordToolFailure,recordToolSuccess,toolIdentity,diagnosticStatus,toolFa
 import {providerRecoveryCandidates,providerFailureFor,readFailedSelection,inheritSelection} from './models.js';
 import {parallelFields,parallelBlocker,parallelStatus,taskAccess,runningAccessChange,writeAllowed,validateWriteScopes,evidencePath} from './parallel.js';
 import {assignmentDelivery} from './delivery.js';
-import {prepareCodePlan,stalePlanFiles,planSources,needsCodePlan,missingPlanOutputs,migrateCodePlan,CodePlanSourceError} from './planning.js';
+import {prepareCodePlan,stalePlanFiles,planSources,needsCodePlan,missingPlanOutputs,migrateCodePlan,CodePlanSourceError,successfulPlanChecks} from './planning.js';
 import {taskArtifacts} from './artifacts.js';
 import {classifyProjectQA,isInteractiveProject,requiresWebVerification} from './project-qa.js';
 
@@ -47,6 +47,7 @@ function reviewPlan(run,input){
 export function apply(ctx,config={}){
  const owned=new Set();
  const checkedPlanSources=new WeakMap();
+ const planCheckCommands=new WeakMap();
  const maxParallel=config.maxParallel??4,maxTasks=!config.goalProtocol&&[64,160].includes(config.maxTasks)?10000:config.maxTasks??10000;
  ctx.effect(()=>ctx.jobs.attachController('gvs-team-preview'));
  async function storage(root,signal){
@@ -132,7 +133,7 @@ export function apply(ctx,config={}){
    await io.write(stateFile(entry.root),saved);await io.write(path.join('.gvs',entry.run.runId,'state.json'),saved);await io.write(path.join('.gvs','latest.json'),saved);
   });await entry.write;
  }
- function operation(entry,exec){const member=ctx.agentTeams.tryMembership(exec.agent);return {agent:member.name,taskId:exec.arguments?.taskId??entry.run.tasks.find(t=>t.assignee===member.name&&t.state==='running')?.id??entry.run.tasks.find(t=>t.assignee===member.name&&t.state==='waiting')?.id??null,tool:exec.name,identity:toolIdentity(exec)};}
+ function operation(entry,exec){const member=ctx.agentTeams.tryMembership(exec.agent),command=planCheckCommands.get(exec);return {agent:member.name,taskId:exec.arguments?.taskId??entry.run.tasks.find(t=>t.assignee===member.name&&t.state==='running')?.id??entry.run.tasks.find(t=>t.assignee===member.name&&t.state==='waiting')?.id??null,tool:exec.name,identity:toolIdentity(command?{...exec,arguments:{...exec.arguments,command}}:exec)};}
  async function noteFailure(entry,exec,message){
   const {item,notify}=recordToolFailure(entry.run,{...operation(entry,exec),message});await commit(entry);
   if(notify&&item.agent!=='lead')try{await ctx.agentTeams.sendMessage(exec.agent,{target:'lead',content:[{type:'text',text:`GVS TOOL ERROR ${JSON.stringify(item)}. Diagnose this without waiting for the human to forward it. Correct the protocol/configuration or assign an owned repair for a real failed check. A missing check, permission denial or product failure is not permission to waive acceptance. Read gvs_diagnostics for current errors.`}],signal:exec.signal});}catch{}
@@ -297,7 +298,7 @@ export function apply(ctx,config={}){
   }
   if(!['pwsh','bash'].includes(exec.name))return;
   const value=result.value;
-  entry.run.checks.push({taskId:task?.id??null,at:Date.now(),agent:member.name,command:clip(exec.arguments?.command,5000),exitCode:value?.exitCode??null,
+  entry.run.checks.push({callId:exec.callId??null,taskId:task?.id??null,at:Date.now(),agent:member.name,command:clip(exec.arguments?.command,5000),exitCode:value?.exitCode??null,
    finished:value?.kind==='foreground'&&value?.signal==null&&!value?.timedOut&&!value?.aborted,error:result.isError,
    output:clip([value?.stdout?.text,value?.stderr?.text].filter(Boolean).join('\n')||result.content?.filter(part=>part.type==='text').map(part=>part.text).join('\n'),12000),...(checkedPlanSources.has(exec)?{codePlanSources:checkedPlanSources.get(exec)}:{})});
   entry.run.checks=entry.run.checks.slice(-120);
@@ -429,9 +430,9 @@ export function apply(ctx,config={}){
    if(args.verdict==='pass'&&args.findings.length)return {status:'needs-verdict-correction',accepted:false,completed:false,taskId:task.id,state:task.state,findings:args.findings,next:'No pass was accepted and no finding was discarded. Required fixes/blockers require verdict:revise or blocked; positive observations belong in summary. Resubmit the same task with the correct verdict and retain all required evidence.'};
    if(args.verdict==='pass'&&needsCodePlan(entry.run,task)&&task.codePlan){
     const currentSources=await planSources(task.codePlan,entry.io.bytes);
-    const successful=entry.run.checks.filter(check=>check.taskId===task.id&&check.at>=task.startedAt&&check.finished&&!check.error&&check.exitCode===0&&JSON.stringify(check.codePlanSources?.filter(item=>currentSources.some(source=>source.path===item.path)))===JSON.stringify(currentSources)).map(check=>check.command);
+    const successful=successfulPlanChecks(entry.run,task,currentSources);
     const missing=task.codePlan.checks.filter(command=>!successful.includes(command)||!args.checks?.includes(command));
-    if(missing.length)throw new Error(`Coordinator plan checks must actually pass in this assignment and be listed verbatim in checks: ${JSON.stringify(missing)}. Ask Lead to correct an unsuitable plan; do not fabricate results.`);
+    if(missing.length)throw new Error(`Coordinator plan checks must actually pass in this assignment and be listed verbatim in checks: ${JSON.stringify(missing)}. Use gvs_plan_check taskId to execute each missing planned command separately and record exact fresh evidence; a compound shell string is not separate-command proof. Ask Lead to correct an unsuitable plan; do not fabricate results.`);
     const missingOutputs=await missingPlanOutputs(task.codePlan,entry.io.bytes);if(missingOutputs.length)throw new Error(`Planned outputs are missing or empty: ${JSON.stringify(missingOutputs)}. Create the actual promised files before pass; do not claim a handoff that does not exist.`);
     if(task.codePlan.sources.length&&!(await stalePlanFiles(task.codePlan,entry.io.bytes)).length)throw new Error('No planned file changed from the coordinator source snapshot. Implement the plan or report the actual blocker; a prose acknowledgement is not code delivery.');
    }
@@ -475,6 +476,21 @@ export function apply(ctx,config={}){
    catch(error){task.notificationError=clip(error.message,500);await commit(entry);}
    await schedule(entry,exec.signal);return {task};
   });
+ register('gvs_plan_check','Run ONE exact coordinator-planned command through the Native foreground executor. Default: first check lacking current evidence. Actual failures, stale source hashes and pause/owner restrictions remain binding. Never completes a task.',{taskId:text(40),index:{type:'integer',minimum:0,maximum:11},timeoutMs:{type:'integer',minimum:1000,maximum:1800000}},[],async(args,exec)=>{
+  const {entry,member,name}=await current(exec),task=args.taskId?entry.run.tasks.find(t=>t.id===args.taskId):entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');
+  if(member.role==='lead'||entry.run.status!=='running'||!task||task.assignee!==name||task.state!=='running'||task.kind!=='work'||!task.codePlan?.checks?.length||!['edit','verify'].includes(roleOf(entry,name)?.capability))throw new Error('Only the assigned running implementation teammate with command capability and a coordinator codePlan may run its exact planned checks. No command or completion was performed.');
+  const plan=task.codePlan,commands=[...plan.checks],before=await planSources(plan,entry.io.bytes),proven=successfulPlanChecks(entry.run,task,before),index=args.index??commands.findIndex(command=>!proven.includes(command));
+  if(args.index===undefined&&index===-1)return {status:'already-verified',taskId:task.id,taskCompleted:false,allChecksCurrent:true,checks:commands,next:'No command was rerun and no task pass was granted. Report actual implementation/behavior and complete the task only when all other requirements and evidence are satisfied, listing these exact checks.'};
+  if(!Number.isInteger(index)||index<0||index>=commands.length)throw new Error('Use an actual planned check index: '+JSON.stringify(commands.map((command,index)=>({index,command:clip(command,500)}))));
+  if(args.timeoutMs!==undefined&&(!Number.isInteger(args.timeoutMs)||args.timeoutMs<1000||args.timeoutMs>1800000))throw new Error('timeoutMs must be 1000..1800000 milliseconds; no command was executed.');
+  const signal=AbortSignal.any([exec.signal,entry.abort.signal]),command=commands[index];planCheckCommands.set(exec,command);signal.throwIfAborted();
+  const callId=randomUUID(),result=await exec.agent.ctx.tools.execute({callId,agent:exec.agent,signal,name:process.platform==='win32'?'pwsh':'bash',arguments:{description:'Run exact coordinator-planned check '+(index+1)+'/'+commands.length,command,workdir:entry.io.cwd,timeoutMs:args.timeoutMs??120000}});
+  if(entry.run.status!=='running'||task.state!=='running'||task.assignee!==name||task.codePlan!==plan)return {status:'assignment-changed',accepted:false,taskCompleted:false,taskId:task.id,next:'The run, task or plan changed during execution. Preserve the actual Native result; no current plan proof or completion is claimed. Inspect the current assignment before continuing.'};
+  const currentSources=await planSources(plan,entry.io.bytes),verified=successfulPlanChecks(entry.run,task,currentSources),remaining=commands.flatMap((command,index)=>verified.includes(command)?[]:[{index,command}]),failure=toolFailureMessage(result),value=result.value,exactCurrent=value?.kind==='foreground'&&!failure&&entry.run.checks.some(c=>c.callId===callId&&c.command===command)&&verified.includes(command);
+  if(!exactCurrent&&!remaining.some(item=>item.index===index))remaining.push({index,command});
+  await commit(entry);
+  return {status:failure?'failed':exactCurrent?'passed':'needs-evidence-record',...(failure?{ok:false,errors:[failure]}:exactCurrent?{ok:true}:{accepted:false}),taskId:task.id,index,command,taskCompleted:false,execution:{callId,kind:value?.kind??null,exitCode:value?.exitCode??null,timedOut:value?.timedOut===true,aborted:value?.aborted===true,signal:value?.signal??null,stdout:clip(value?.stdout?.text,6000),stderr:clip(value?.stderr?.text,3000)},allChecksCurrent:exactCurrent&&remaining.length===0,remaining,checks:commands,next:failure?'Inspect the actual failed assertion/runtime or source cause; do not hide it behind an earlier pass. Repair within the plan or ask Lead for a corrected plan.':!exactCurrent?'This Native invocation has no completed current successful proof record. Preserve its real result and inspect execution/recording; do not infer success from an earlier pass, a background job or a compound command.':remaining.length?'Use gvs_plan_check for the next missing exact command. Native foreground execution and current source snapshots must be recorded; do not infer evidence from a compound command.':'All exact planned commands have current recorded successful results. This does not complete the task or prove independent acceptance; report actual outcomes and satisfy every other requirement before completion.'};
+ },1860000);
  register('gvs_ask_user','action:status lists current reusable User decisions. An explicit reuseTaskId requests reuse even with action:status; this binds that actual current decision to your task without creating another consultation. Otherwise ask one consequential unanswered question. Do not ask for repeated readiness/ownership approval or permission.',{action:{type:'string',enum:['status','ask']},offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:20},question:text(2000),context:text(6000),reuseTaskId:text(40)},[],async(args,exec)=>{
   const {entry,name}=await current(exec);
   if(args.action==='status'&&!args.reuseTaskId){const decisions=availableDecisions(entry.run),offset=args.offset??0,limit=args.limit??6;return {decisions:decisions.slice(offset,offset+limit),total:decisions.length,nextOffset:offset+limit<decisions.length?offset+limit:null,next:'Reuse only a relevant decision with the exact call {action:"ask",reuseTaskId:<current taskId>}. Listing status alone does not consult. If none applies, ask one focused unanswered question; do not repeat general readiness audits.'};}

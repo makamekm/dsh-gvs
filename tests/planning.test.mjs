@@ -1,7 +1,13 @@
 import test from 'node:test';import assert from 'node:assert/strict';import path from 'node:path';
-import {prepareCodePlan,stalePlanFiles,missingPlanOutputs,migrateCodePlan} from '../v3/planning.js';
+import {prepareCodePlan,stalePlanFiles,missingPlanOutputs,migrateCodePlan,successfulPlanChecks} from '../v3/planning.js';
 import {parallelBlocker} from '../v3/parallel.js';
 const cwd=path.resolve('fixture'),input=()=>({summary:'Center the report action in the connected remote pane',changes:[{path:'src/report.ts',anchor:'function report()',edit:'Replace the unconditional bottom bar with a centered compact action gated by the actual connected peer.'}],checks:['node report-contract.test.mjs'],acceptance:['Idle has no Report action; connected decoded video has one centered Report action.']});
+
+test('latest real attempt governs planned-check evidence: later failure, unfinished jobs, changed source and old assignments cannot hide behind an earlier pass',()=>{
+ const task={id:'work',startedAt:100},sources=[{path:'src/app.js',sha256:'actual-current'}],good={taskId:task.id,at:101,command:'node actual-check.mjs',exitCode:0,error:false,finished:true,codePlanSources:sources},run={checks:[good]};assert.deepEqual(successfulPlanChecks(run,task,sources),[good.command]);
+ for(const change of [{exitCode:1},{error:true},{finished:false},{codePlanSources:undefined}]){run.checks=[good,{...good,at:102,...change}];assert.deepEqual(successfulPlanChecks(run,task,sources),[]);}
+ run.checks=[good];assert.deepEqual(successfulPlanChecks(run,task,[{...sources[0],sha256:'changed'}]),[]);assert.deepEqual(successfulPlanChecks(run,{...task,startedAt:103},sources),[]);run.checks.push({...good,at:104,exitCode:1},{...good,at:105});assert.deepEqual(successfulPlanChecks(run,task,sources),[good.command]);
+});
 function storage(){const files=new Map([['src/report.ts',Buffer.from('export function report() { return "old"; }')]]);return {files,read:async file=>{if(!files.has(file))throw Object.assign(Error('missing'),{code:'ENOENT'});return files.get(file);}};}
 test('report headings are advisory outputs, while actual code anchors stay strict and CRLF/LF is normalized',async()=>{
  const f=storage();f.files.set('src/report.ts',Buffer.from('export function report() {\r\n return "old";\r\n}'));f.files.set('artifacts/task215/notes.md',Buffer.from('# Actual old heading\nKeep this history.'));
