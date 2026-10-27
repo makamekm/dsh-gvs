@@ -9,6 +9,15 @@ const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
 // Local project captures must also work in a Windows service without a GPU session.
 // Chromium's explicit software GL path; personal browser settings are untouched.
 const renderArgs=['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'];
+export const BROWSER_ACTIONS=['click','fill','select','press','check','scroll','assertText','assertState','assertVisible','assertHidden'];
+export const BROWSER_STATES=['checked','pressed','expanded','disabled','invalid','focused','value'];
+export function validateBrowserActions(actions){
+ if(!Array.isArray(actions)||actions.length>12)throw new Error('Use at most 12 actions in one reproducible journey.');
+ for(const [index,action] of actions.entries()){
+  if(!action||!BROWSER_ACTIONS.includes(action.kind))throw new Error(`Unsupported browser action ${JSON.stringify(action?.kind)} at index ${index}. Allowed: ${BROWSER_ACTIONS.join(', ')}. Desktop and phone viewports are already captured automatically; do not add a viewport action.`);
+  if(action.kind==='assertState'&&(!BROWSER_STATES.includes(action.state)||typeof action.value!=='string'||action.state!=='value'&&!['true','false'].includes(action.value)))throw new Error(`assertState at index ${index} needs a supported state and a string expected value ("true"/"false" for boolean states).`);
+ }
+}
 export function phoneContext(version){return {isMobile:true,hasTouch:true,userAgent:`Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Mobile Safari/537.36`};}
 export function sameEntry(actual,expected){try{const a=new URL(actual),b=new URL(expected);return a.port===b.port&&a.protocol===b.protocol&&(a.hostname===b.hostname||LOOPBACK.has(a.hostname)&&LOOPBACK.has(b.hostname))&&a.pathname.replace(/\/$/,'')===b.pathname.replace(/\/$/,'')&&a.search===b.search&&a.hash===b.hash;}catch{return false;}}
 async function observeCanvas(page){
@@ -57,7 +66,7 @@ async function perform(page, action) {
   if (action.kind === 'scroll') return page.mouse.wheel(0, Number(action.value) || 600);
   const target = locator(page, action);
   if (action.kind === 'assertState') {
-    if (!['checked', 'pressed', 'expanded', 'disabled', 'invalid', 'focused', 'value'].includes(action.state)) throw new Error('Choose checked, pressed, expanded, disabled, invalid, focused or value.');
+    if (!BROWSER_STATES.includes(action.state)) throw new Error('Choose checked, pressed, expanded, disabled, invalid, focused or value.');
     if (typeof action.value !== 'string' || (action.state !== 'value' && !['true', 'false'].includes(action.value))) throw new Error('Provide the expected string value, or true/false for a boolean state.');
     const expected = action.state === 'value' ? action.value : action.value === 'true';
     let actual;
@@ -85,7 +94,7 @@ async function perform(page, action) {
 export async function captureBrowser(args, {config = {}, signal, saveImage}) {
   const url = previewURL(args.url);
   const actions = args.actions ?? [];
-  if (!Array.isArray(actions) || actions.length > 12) throw new Error('Use at most 12 actions in one reproducible journey.');
+  validateBrowserActions(actions);
   const chromium = await browserRuntime(config);
   signal.throwIfAborted();
   const executablePath = await browserExecutable(config);

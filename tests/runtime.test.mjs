@@ -122,7 +122,7 @@ test('host API defers tasks, forbids early execution and wakes the same role wit
  const wake=await f.call('gvs_agent',{action:'wake',name:'reviewer',message:'Please continue the existing review'});
  assert.equal(wake.status,'waiting');assert.equal(f.tasks.size,count);assert.equal(f.sent.filter(message=>message.target==='reviewer').length,0);
  await assert.rejects(f.call('gvs_native_game_check',{command:'should not run'},f.actor('reviewer')),/dependency-ready/);
- await assert.rejects(f.call('gvs_task',{action:'complete',taskId:review.task.id,verdict:'pass',summary:'False',findings:[]},f.actor('reviewer')),/assigned running/);
+ const early=await f.call('gvs_task',{action:'complete',taskId:review.task.id,verdict:'pass',summary:'False',findings:[]},f.actor('reviewer'));assert.equal(early.accepted,false);assert.equal(early.completed,false);assert.equal(f.tasks.get(review.task.id).status,'pending');
  const originalId=f.actor('developer').id;await f.consult(f.actor('developer'));await f.complete(work.task.id,f.actor('developer'));
  assert.equal(f.sent.filter(message=>message.target==='reviewer').length,1);
  await assert.rejects(f.call('gvs_task',{action:'complete',taskId:review.task.id,verdict:'pass',summary:'Checks',findings:['positive observation']},f.actor('reviewer')),/findings must be/);
@@ -309,7 +309,14 @@ test('teammates can inspect their wait without coordinator authority and interru
  const feedback={action:'complete',taskId:review.task.id,verdict:'revise',summary:'Window failed before interruption',findings:['Observed dialog stays open after Close is pressed.']};
  const result=await f.call('gvs_task',feedback,actor);assert.equal(result.completed,false);assert.equal(result.status,'feedback-forwarded');assert.equal(result.state,'waiting');assert.equal(f.tasks.get(review.task.id).status,'pending');assert.equal(result.issueIds.length,1);assert.match(f.sent.at(-1).content[0].text,/INTERRUPTED REVIEW FEEDBACK/);
  await f.call('gvs_task',feedback,actor);assert.equal((await f.call('gvs_goal',{action:'status'})).issues.length,1);
- await assert.rejects(f.complete(review.task.id,actor),/assigned running/);await assert.rejects(f.call('gvs_task',feedback,f.actor('developer')),/assigned running/);
+ const queued=await f.complete(review.task.id,actor);assert.equal(queued.status,'not-running');assert.equal(queued.accepted,false);assert.equal(queued.completed,false);await assert.rejects(f.call('gvs_task',feedback,f.actor('developer')),/assigned running/);
+});
+
+test('a stale repeat cannot replace an already recorded revise with pass',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Keep actual results',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});const work=await f.call('gvs_task',{action:'create',title:'Implement',instructions:'Implement',kind:'work',assignee:'developer'}),actor=f.actor('developer');
+ await f.call('gvs_task',{action:'complete',taskId:work.task.id,verdict:'revise',summary:'Actual issue remains',findings:['Required repair']},actor);
+ const repeat=await f.call('gvs_task',{action:'complete',taskId:work.task.id,verdict:'pass',summary:'Stale claimed success',findings:[]},actor);assert.equal(repeat.status,'already-completed');assert.equal(repeat.completed,false);assert.equal(repeat.previousVerdict,'revise');assert.deepEqual(repeat.findings,['Required repair']);
 });
 
 test('a teammate protocol error is automatically saved and sent to Lead without human forwarding',async()=>{
