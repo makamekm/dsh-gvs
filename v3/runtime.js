@@ -9,7 +9,7 @@ import {refreshRevision} from './revision.js';
 import {decisionKey,reusableDecision,availableDecisions,consultationKey,progressStatus,modelResult} from './flow.js';
 import {previewState,needsPreview} from './preview.js';
 import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus,visualStates} from './visual.js';
-import {USER_TESTING,planUserJourneys,userJourneyStatus,scenarioKey,userProbeInput} from './journeys.js';
+import {USER_TESTING,planUserJourneys,userJourneyStatus,scenarioKey,userProbeInput,interruptedByLegacyPlan} from './journeys.js';
 import {recordToolFailure,recordToolSuccess,toolIdentity,diagnosticStatus} from './diagnostics.js';
 import {providerRecoveryCandidates,providerFailureFor,readFailedSelection,inheritSelection} from './models.js';
 import {parallelFields,parallelBlocker,parallelStatus,taskAccess,writeAllowed,validateWriteScopes,evidencePath} from './parallel.js';
@@ -481,11 +481,11 @@ export function apply(ctx,config={}){
   return {ready:status.ready,total:ordered.length,warnings,images,nextOffset:!args.warningId&&offset+limit<ordered.length?offset+limit:null,requiredChecks:VISUAL_CHECKS,coverageLimits:entry.run.visualChecks.filter(c=>c.ok&&c.revision===entry.run.revision).flatMap(c=>(c.views??[]).filter(v=>v.layout?.truncated||v.uncapturedTransitions>0).map(v=>({viewport:v.viewport,truncated:v.layout?.truncated??false,uncapturedTransitions:v.uncapturedTransitions??0}))),next:'Classify visible candidates with actual image IDs and specific pixel/readability/hit-area evidence. Defects require revise+repair/recheck. An out-of-scope defect in an increment is saved as a mandatory global issue, never waived. No findings does not replace manual visual inspection of all states. Split long journeys to capture omitted transitions; bounded scans require explicit manualCoverage.'};
  });
  const userScenario={...object({id:text(40),category:{type:'string',enum:['primary','dismiss','negative','recovery']},target:text(1200),expected:text(1200)}),required:['id','category','target','expected']};
- register('gvs_user_testing','Plan and inspect your OWN exploratory UI tests. User reviews must actually operate current windows/controls and assert outcomes on each viewport. Primary, dismiss/reopen and negative/recovery flows are required for full/live exploration; evidence-based inapplicability cannot waive real functionality.',{action:{type:'string',enum:['plan','status']},scenarios:{type:'array',minItems:1,maxItems:16,items:userScenario},notApplicable:{type:'array',maxItems:2,items:{...object({category:{type:'string',enum:['dismiss','adverse']},reason:text(1200),images:{...strings,maxItems:6}}),required:['category','reason','images']}}},['action'],async(args,exec)=>{
+ register('gvs_user_testing','Add/update your OWN UI scenarios by ID as you explore. Partial plans are saved and runnable immediately; other saved scenarios are preserved. Final acceptance still requires primary, dismiss/reopen and adverse coverage plus real actions/assertions on every viewport.',{action:{type:'string',enum:['plan','status']},scenarios:{type:'array',minItems:1,maxItems:16,items:userScenario},notApplicable:{type:'array',maxItems:2,items:{...object({category:{type:'string',enum:['dismiss','adverse']},reason:text(1200),images:{...strings,maxItems:6}}),required:['category','reason','images']}}},['action'],async(args,exec)=>{
   const {entry,name}=await current(exec),task=entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');
   if(!task||!['review','design-review','user-review'].includes(task.kind))throw new Error('Use your assigned running UI review task; the initial brief is planning, not a completed product test.');
   if(args.action==='plan'){planUserJourneys(entry.run,task,args);await commit(entry);}
-  return {...userJourneyStatus(entry.run,task),instructions:USER_TESTING,next:'Execute each scenario using gvs_browser_check scenarioId with real semantic actions and observable assertions. Status reads actual current tool traces; a plan does not mark a scenario passed.'};
+  return {...userJourneyStatus(entry.run,task),instructions:USER_TESTING,next:'Execute saved scenarios now using their exact scenarioId; add/update more by ID as you discover states. missingCategories blocks only final pass, not registration/execution. Other saved scenarios and actual proof remain. No scenario is passed just by planning.'};
  });
  const requirement={...object({id:text(40),reason:text(600),criterion:text(1000),method:{type:'string',enum:['runtime','rendered-sequence']}}),required:['id','reason','criterion','method']};
  register('gvs_analysis','Plan conditional task-specific evidence (User only), execute a real analysis runner (assigned verify agent only), or inspect status. Smoothness requires actual rendered pixels AND frame timing with a timestamped frame sequence. Static screenshots and transform-only reports cannot pass.',{action:{type:'string',enum:['plan','check','status']},rationale:text(1200),notRequiredReason:text(1000),requirements:{type:'array',maxItems:6,items:requirement},command:text(5000)},['action'],async(args,exec)=>{
@@ -584,9 +584,10 @@ export function apply(ctx,config={}){
  register('gvs_pause','Pause this team’s work and its managed preview, preserving named agents, tasks and memory.',{},[],async(_args,exec)=>{const {member,entry}=await current(exec);lead(member);await pause(entry);return {status:'paused'};});
  async function restoreTasks(entry,signal,automatic=false){
   const recovered=[];
-  for(const task of entry.run.tasks.filter(task=>task.state==='blocked'&&(automatic?/^Interrupted by service restart;|^team message exceeds 131072 bytes$/.test(task.result?.summary??''):task.result?.interrupted===true||/^(?:Interrupted by service restart;|Paused;)/.test(task.result?.summary??'')))){
+  for(const task of entry.run.tasks.filter(task=>task.state==='blocked'&&(interruptedByLegacyPlan(entry.run,task)||(automatic?/^Interrupted by service restart;|^team message exceeds 131072 bytes$/.test(task.result?.summary??''):task.result?.interrupted===true||/^(?:Interrupted by service restart;|Paused;)/.test(task.result?.summary??''))))){
    signal.throwIfAborted();if(entry.run.status!=='running')break;
    const native=ctx.agentTeams.getTask(entry.root,task.id);if(['in_progress','completed'].includes(native.status))await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:native.status==='completed'?'reopen':'release'});
+   if(interruptedByLegacyPlan(entry.run,task)){task.lastFailure=task.result;task.reviewPlanRecovery={version:2,at:new Date().toISOString()};}
    if(task.result?.interrupted&&!task.planContinuation)await checkpointPlan(entry.io,task);
    task.state='waiting';delete task.result;recovered.push(task.id);
   }await commit(entry);await schedule(entry,signal);return recovered;

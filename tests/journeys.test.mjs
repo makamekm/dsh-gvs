@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {planUserJourneys,userJourneyStatus,validateUserJourneys,scenarioKey,userProbeInput} from '../v3/journeys.js';
+import {planUserJourneys,userJourneyStatus,validateUserJourneys,scenarioKey,userProbeInput,interruptedByLegacyPlan} from '../v3/journeys.js';
 const scenario=(id,category)=>({id,category,target:'Observed login window and visible controls',expected:'The actual intended window state is reached and usable.'});
 const setup=()=>({run:{kind:'ui',status:'running',userTestingPolicy:1,revision:3,viewports:['desktop','mobile'],visualChecks:[],tasks:[],analysis:{state:'ready'},roles:[{name:'user',sessionId:'same-user'}],preview:{url:'http://localhost:5173/'},userTestingSeen:[]},task:{id:'user-task',assignee:'user',kind:'user-review',scope:'increment',receivedImages:[]}});
 function proof(run,task,scenario){return {id:'check-'+scenario.id,ok:true,revision:run.revision,capturedBy:task.assignee,taskId:task.id,scenarioId:scenario.id,scenarioKey:scenarioKey(scenario),images:[],views:run.viewports.map(viewport=>({viewport,steps:scenario.category==='dismiss'?[{kind:'click',passed:true},{kind:'assertVisible',target:'dialog',passed:true},{kind:'click',passed:true},{kind:'assertHidden',target:'dialog',passed:true},{kind:'click',passed:true},{kind:'assertVisible',target:'dialog',passed:true}]:[{kind:'click',passed:true},{kind:'assertVisible',passed:true}]}))};}
@@ -11,8 +11,8 @@ test('User acceptance requires independently executed actions and assertions, no
 });
 test('full/live exploration plans test dismiss/reopen and adverse behavior; changing expected results invalidates old proof',()=>{
  const {run,task}=setup();task.autoUserProbe=true;
- assert.throws(()=>planUserJourneys(run,task,{scenarios:[scenario('open','primary')]}),/closing/);
- assert.throws(()=>planUserJourneys(run,task,{scenarios:[scenario('open','primary'),scenario('close','dismiss')]}),/negative/);
+ planUserJourneys(run,task,{scenarios:[scenario('open','primary')]});assert.deepEqual(userJourneyStatus(run,task).missingCategories,['dismiss','negative-or-recovery']);assert.throws(()=>validateUserJourneys(run,task),/coverage is incomplete/);
+ planUserJourneys(run,task,{scenarios:[scenario('close','dismiss')]});assert.deepEqual(userJourneyStatus(run,task).missingCategories,['negative-or-recovery']);assert.equal(task.userJourneys.scenarios.length,2);
  const scenarios=[scenario('open','primary'),scenario('close','dismiss'),scenario('recover','recovery')];planUserJourneys(run,task,{scenarios});run.visualChecks=scenarios.map(s=>proof(run,task,s));assert.doesNotThrow(()=>validateUserJourneys(run,task));
  planUserJourneys(run,task,{scenarios:scenarios.map(s=>s.id==='open'?{...s,expected:'Different expected behavior must be actually checked again.'}:s)});assert.throws(()=>validateUserJourneys(run,task),/open/);
 });
@@ -22,7 +22,7 @@ test('inapplicable categories need specific current observed evidence and never 
  task.receivedImages=['actual'];run.visualChecks=[{ok:true,revision:3,images:[{attachment:{attachmentId:'actual'}}]}];
  assert.throws(()=>planUserJourneys(run,task,{scenarios:[scenario('scroll','primary')],notApplicable:[{...no,reason:undefined}]}),/specific explanation/);
  planUserJourneys(run,task,{scenarios:[scenario('scroll','primary'),scenario('reload','recovery')],notApplicable:[no]});
- assert.throws(()=>planUserJourneys(run,task,{scenarios:[scenario('close','dismiss')],notApplicable:[no]}),/primary/);
+ const fresh={...task,userJourneys:undefined};planUserJourneys(run,fresh,{scenarios:[scenario('close','dismiss')],notApplicable:[no]});assert.throws(()=>validateUserJourneys(run,fresh),/primary/);
 });
 test('live User probes are generated for runnable UI increments, coalesce by observed work IDs, and preserve pauses and initial brief',()=>{
  const {run}=setup();run.userTestingInitial=true;const initial=userProbeInput(run);assert.equal(initial.assignee,'user');assert.equal(initial.autoUserProbe,true);assert.equal(initial.scope,'increment');assert.deepEqual(initial.resources,[]);
@@ -43,4 +43,18 @@ test('full UI QA also needs its own scenario evidence and cannot borrow the User
  const {run,task}=setup();task.kind='review';task.scope='full';task.assignee='qa';assert.throws(()=>validateUserJourneys(run,task),/own executed/);
  const scenarios=[scenario('main','primary'),scenario('close','dismiss'),scenario('empty','negative')];planUserJourneys(run,task,{scenarios});run.visualChecks=scenarios.map(s=>({...proof(run,task,s),capturedBy:'user'}));assert.throws(()=>validateUserJourneys(run,task),/lack current/);
  run.visualChecks=scenarios.map(s=>proof(run,task,s));assert.doesNotThrow(()=>validateUserJourneys(run,task));
+});
+
+test('incremental exploration preserves already executed scenarios, while partial or merely planned coverage cannot pass',()=>{
+ const {run,task}=setup();task.autoUserProbe=true;const first=scenario('open','primary'),close=scenario('close','dismiss'),recovery=scenario('recover','recovery');
+ planUserJourneys(run,task,{scenarios:[first]});run.visualChecks.push(proof(run,task,first));assert.equal(userJourneyStatus(run,task).scenarios[0].passed,true);assert.throws(()=>validateUserJourneys(run,task),/coverage is incomplete/);
+ planUserJourneys(run,task,{scenarios:[close]});run.visualChecks.push(proof(run,task,close));assert.throws(()=>validateUserJourneys(run,task),/negative-or-recovery/);
+ planUserJourneys(run,task,{scenarios:[recovery]});assert.deepEqual(userJourneyStatus(run,task).missingCategories,[]);assert.throws(()=>validateUserJourneys(run,task),/lack current/);run.visualChecks.push(proof(run,task,recovery));assert.doesNotThrow(()=>validateUserJourneys(run,task));
+ planUserJourneys(run,task,{scenarios:[{...first,expected:'A corrected actual expectation requires a new real execution.'}]});assert.equal(task.userJourneys.scenarios.length,3);assert.equal(userJourneyStatus(run,task).scenarios.filter(s=>s.passed).length,2);assert.throws(()=>validateUserJourneys(run,task),/open/);
+ const previous=structuredClone(task.userJourneys);assert.throws(()=>planUserJourneys(run,task,{scenarios:[{id:'bad',category:'unknown'}]}),/scenario needs/);assert.deepEqual(task.userJourneys,previous);
+});
+
+test('migration only recognizes reviews stopped by the old all-at-once plan contract and never a real product blocker',()=>{
+ const {run,task}=setup();Object.assign(task,{state:'blocked',result:{verdict:'blocked',summary:'Agent turn ended (completed) without completing its assigned task.',findings:[]}});run.diagnostics=[{taskId:task.id,tool:'gvs_user_testing',message:'Plan opening/closing/back/Escape/reopen for observed windows'}];assert.equal(interruptedByLegacyPlan(run,task),true);
+ assert.equal(interruptedByLegacyPlan(run,{...task,reviewPlanRecovery:{version:2}}),false);assert.equal(interruptedByLegacyPlan(run,{...task,result:{...task.result,summary:'Actual dialog does not close',findings:['Repair required']}}),false);assert.equal(interruptedByLegacyPlan({...run,diagnostics:[]},task),false);
 });

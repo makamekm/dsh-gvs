@@ -288,6 +288,15 @@ test('all required existing states can be paged and reopened by exact ID even wi
  await assert.rejects(f.call('gvs_visual',{action:'states',imageId:'guessed-hash'},actor),/copy its literal ID/);assert.equal(f.tasks.size,2);
 });
 
+test('a review stopped by the former complete-plan prerequisite resumes once and can save its first runnable scenario',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Explore UI incrementally',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
+ const work=await f.call('gvs_task',{action:'create',title:'Explore existing windows',instructions:'Test actual controls',kind:'user-review',assignee:'user',scope:'full',readScopes:[],writeScopes:[],resources:[]});const saved=JSON.parse([...f.files.values()][0]),task=saved.tasks.find(t=>t.id===work.task.id);
+ task.state='blocked';task.result={verdict:'blocked',summary:'Agent turn ended (completed) without completing its assigned task.',findings:[]};saved.diagnostics=[{id:'legacy',agent:'user',taskId:task.id,tool:'gvs_user_testing',message:'Plan opening/closing/back/Escape/reopen for observed windows',status:'open',count:3,firstAt:1,lastAt:1}];
+ for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));const isolated=await import(`../v3/runtime.js?partial-plan-recovery=${randomUUID()}`);isolated.apply(f.ctx,{requireCoordinatorPlan:false});const recovered=await f.call('gvs_recover');assert.deepEqual(recovered.recovered,[task.id]);assert.equal(f.tasks.get(task.id).status,'in_progress');assert.equal(f.spawns,1);
+ const partial=await f.call('gvs_user_testing',{action:'plan',scenarios:[{id:'open',category:'primary',target:'Observed Settings button in the ordinary UI',expected:'Actual settings window opens and its controls are usable.'}]},f.actor('user'));assert.equal(partial.planned,true);assert.equal(partial.scenarios[0].id,'open');assert.deepEqual(partial.missingCategories,['dismiss','negative-or-recovery']);assert.equal(partial.scenarios[0].passed,false);
+ assert.deepEqual((await f.call('gvs_recover')).recovered,[]);const state=JSON.parse([...f.files.values()][0]).tasks.find(t=>t.id===task.id);assert.equal(state.reviewPlanRecovery.version,2);assert.equal(state.lastFailure.verdict,'blocked');assert.equal(state.state,'running');
+});
+
 test('a runnable UI automatically queues the same User for exploration and coalesces later completed UI increments',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Continuously test current windows',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
  let saved=JSON.parse([...f.files.values()][0]);saved.preview={url:'http://localhost:5173/',jobId:'not-running',ready:false};for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));

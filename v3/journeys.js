@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto';
 
-export const USER_TESTING='USER IS AN ACTIVE PRODUCT TESTER. For a web UI, as soon as a runnable interface exists, exercise it repeatedly after implementation increments. Observe real controls first, invent concrete scenarios, open each affected window, operate its controls, close/back/Escape and reopen it, try invalid/empty inputs or unavailable/loading/recovery paths where applicable, and compare expected vs actual behavior on desktop and phone. Register scenarios with gvs_user_testing action:plan, then execute gvs_browser_check with the exact scenarioId and semantic actions plus observable assertions. Screenshots, another agent’s tests and a written scenario are not functional evidence. Send concrete failures to Lead immediately; diagnose automation/selector failures separately from product defects. Every confirmed defect needs findings, an owned repair and independent recheck. Do not wait for the entire product or another approval cycle to test the current UI. An exploratory increment is never full acceptance. Other product types keep their appropriate real native/game testing tools. For citation failures read existing gvs_visual action:states pages and copy exact imageIds; do not keep recapturing or invent hashes.';
+export const USER_TESTING='USER IS AN ACTIVE PRODUCT TESTER. For a web UI, as soon as a runnable interface exists, exercise it repeatedly after implementation increments. Observe real controls first, invent concrete scenarios, open each affected window, operate its controls, close/back/Escape and reopen it, try invalid/empty inputs or unavailable/loading/recovery paths where applicable, and compare expected vs actual behavior on desktop and phone. Register scenarios incrementally with gvs_user_testing action:plan (upsert by ID). Saved partial plans are runnable immediately; discover and add further scenarios while testing, and satisfy every required category before final acceptance. Then execute gvs_browser_check with the exact scenarioId and semantic actions plus observable assertions. Screenshots, another agent’s tests and a written scenario are not functional evidence. Send concrete failures to Lead immediately; diagnose automation/selector failures separately from product defects. Every confirmed defect needs findings, an owned repair and independent recheck. Do not wait for the entire product or another approval cycle to test the current UI. An exploratory increment is never full acceptance. Other product types keep their appropriate real native/game testing tools. For citation failures read existing gvs_visual action:states pages and copy exact imageIds; do not keep recapturing or invent hashes.';
 export const scenarioKey=scenario=>createHash('sha256').update(JSON.stringify(scenario)).digest('hex');
 const categories=['primary','dismiss','negative','recovery'];
 function exercised(view,category){
@@ -16,29 +16,36 @@ function exercised(view,category){
 }
 export function planUserJourneys(run,task,input){
  if(!Array.isArray(input.scenarios)||!input.scenarios.length||input.scenarios.length>16)throw new Error('Plan 1–16 concrete observed UI scenarios, then actually execute them.');
- const ids=new Set(),scenarios=input.scenarios.map(item=>{
+ const ids=new Set(),additions=input.scenarios.map(item=>{
   if(!/^[a-z][a-z0-9-]{0,39}$/.test(item.id)||ids.has(item.id))throw new Error('Scenario IDs must be unique lowercase literal IDs.');ids.add(item.id);
   if(!categories.includes(item.category)||['target','expected'].some(key=>typeof item[key]!=='string'||item[key].trim().length<10||item[key].length>1200))throw new Error('Each scenario needs category, the actual observed target/flow and a concrete expected outcome.');
   return {id:item.id,category:item.category,target:item.target.trim(),expected:item.expected.trim()};
  });
+ const merged=new Map((task.userJourneys?.scenarios??[]).map(s=>[s.id,s]));for(const item of additions)merged.set(item.id,item);const scenarios=[...merged.values()];
+ if(scenarios.length>16)throw new Error('This review already has 16 scenarios. Preserve them and ask Lead to split remaining exploration into an owned review task.');
  const observed=run.visualChecks.filter(c=>c.ok&&c.revision===run.revision&&(c.taskId===task.id||c.images.some(i=>task.receivedImages?.includes(i.attachment.attachmentId))));
  const available=new Set(observed.flatMap(c=>c.images).map(i=>i.attachment.attachmentId));
- const notApplicable=(input.notApplicable??[]).map(item=>{
+ const exemptions=(input.notApplicable??[]).map(item=>{
   if(!['dismiss','adverse'].includes(item.category)||typeof item.reason!=='string'||item.reason.trim().length<60||!item.images?.length||item.images.some(id=>!available.has(id)))throw new Error('An inapplicable dismiss/adverse category needs a specific explanation (60+ characters) and actual current observed image IDs; it cannot waive an existing window, input or required behavior.');
   if(item.category==='dismiss'&&observed.some(c=>c.views?.some(v=>v.layout?.captures?.some(s=>s.scope==='active-surface'))))throw new Error('A real dialog/menu was observed. Test its dismiss/back/Escape/reopen behavior instead of declaring it inapplicable.');
   if(item.category==='adverse'&&observed.some(c=>c.views?.some(v=>/(?:^|\n)\s*-\s*(?:textbox|combobox|spinbutton|searchbox)\b/.test((v.initialOutline??'')+'\n'+(v.finalOutline??''))||v.steps?.some(s=>['fill','select','check'].includes(s.kind)))))throw new Error('Actual input controls were observed. Invent and execute a relevant invalid/empty/recovery scenario instead of waiving adverse behavior.');
   return {category:item.category,reason:item.reason.trim(),images:[...new Set(item.images)],revision:run.revision};
  });
- if(!scenarios.some(s=>s.category==='primary'))throw new Error('Test the primary user journey; a screenshot-only or dismiss-only plan is insufficient.');
- if(task.autoUserProbe||task.scope!=='increment'){
-  if(!scenarios.some(s=>s.category==='dismiss')&&!notApplicable.some(s=>s.category==='dismiss'))throw new Error('Plan opening/closing/back/Escape/reopen for observed windows, or evidence why no dismissible surface exists.');
-  if(!scenarios.some(s=>['negative','recovery'].includes(s.category))&&!notApplicable.some(s=>s.category==='adverse'))throw new Error('Invent an applicable negative/recovery scenario, or document with current evidence why none exists in this slice.');
- }
+ const waiverMap=new Map((task.userJourneys?.notApplicable??[]).map(s=>[s.category,s]));for(const item of exemptions)waiverMap.set(item.category,item);
+ const notApplicable=[...waiverMap.values()].filter(item=>item.category==='dismiss'?!scenarios.some(s=>s.category==='dismiss'):!scenarios.some(s=>['negative','recovery'].includes(s.category)));
  task.userJourneys={scenarios,notApplicable};return task.userJourneys;
+}
+function missingCategories(run,task){
+ const scenarios=task.userJourneys?.scenarios??[],waivers=(task.userJourneys?.notApplicable??[]).filter(w=>w.revision===run.revision),missing=[];
+ if(!scenarios.some(s=>s.category==='primary'))missing.push('primary');
+ if(task.autoUserProbe||task.scope!=='increment'){
+  if(!scenarios.some(s=>s.category==='dismiss')&&!waivers.some(w=>w.category==='dismiss'))missing.push('dismiss');
+  if(!scenarios.some(s=>['negative','recovery'].includes(s.category))&&!waivers.some(w=>w.category==='adverse'))missing.push('negative-or-recovery');
+ }return missing;
 }
 export function userJourneyStatus(run,task){
  const plan=task.userJourneys;
- return {taskId:task.id,planned:!!plan,scenarios:(plan?.scenarios??[]).map(scenario=>{
+ return {taskId:task.id,planned:!!plan,missingCategories:missingCategories(run,task),scenarios:(plan?.scenarios??[]).map(scenario=>{
   const checks=run.visualChecks.filter(c=>c.ok&&c.revision===run.revision&&c.taskId===task.id&&c.capturedBy===task.assignee&&c.scenarioId===scenario.id&&c.scenarioKey===scenarioKey(scenario)&&run.viewports.every(viewport=>c.views?.some(v=>v.viewport===viewport&&exercised(v,scenario.category))));
   return {...scenario,passed:checks.length>0,checkIds:checks.map(c=>c.id),requiredTrace:scenario.category==='dismiss'?'Assert the same surface visible/expanded, act to close, assert hidden/collapsed, act to reopen, assert visible/expanded again.':'Actually act, then assert the expected observable outcome on every planned viewport.'};
  }),notApplicable:plan?.notApplicable??[]};
@@ -47,9 +54,14 @@ export function validateUserJourneys(run,task){
  if(!run.userTestingPolicy||run.kind!=='ui'||!(task.kind==='user-review'||task.kind==='review'&&task.scope!=='increment'&&task.reviewFocus!=='source'))return;
  const status=userJourneyStatus(run,task);
  if(!status.planned)throw new Error('User acceptance needs your own executed UI scenarios. First use gvs_user_testing action:plan, then gvs_browser_check scenarioId with real actions and assertions. A colleague’s screenshots or a written plan cannot prove working windows.');
+ if(status.missingCategories.length)throw new Error(`User scenario coverage is incomplete: ${JSON.stringify(status.missingCategories)}. Existing scenarios are saved and runnable; add missing categories incrementally with gvs_user_testing action:plan. Reassess stale inapplicability with current evidence. Do not restart the plan or claim pass from a partial exploration.`);
  const missing=status.scenarios.filter(s=>!s.passed).map(s=>s.id);
  if(missing.length)throw new Error(`User scenarios lack current successful interaction AND assertion evidence on every planned viewport: ${JSON.stringify(missing)}. Read gvs_user_testing action:status and execute the actual UI; do not claim pass from screenshots.`);
  if(status.notApplicable.some(s=>s.revision!==run.revision))throw new Error('Reassess inapplicable UI categories against the current source and fresh screenshots.');
+}
+export function interruptedByLegacyPlan(run,task){
+ return run.kind==='ui'&&task.state==='blocked'&&!task.reviewPlanRecovery&&['user-review','review','design-review'].includes(task.kind)&&/^Agent turn ended \(completed\)/.test(task.result?.summary??'')&&!(task.result?.findings?.length)&&
+  (run.diagnostics??[]).some(d=>d.taskId===task.id&&d.tool==='gvs_user_testing'&&/Plan opening\/closing|Invent an applicable negative\/recovery|Test the primary user journey/.test(d.message));
 }
 
 const uiFile=file=>/\.(?:[jt]sx?|css|scss|sass|less|html|vue|svelte|svg|png|jpe?g|webp)$/i.test(file)&&!/^(?:artifacts|test-results|playwright-report|node_modules|dist|build)\//i.test(file.replaceAll('\\','/'));
