@@ -1,5 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import path from 'node:path';import {randomUUID} from 'node:crypto';
 import {apply} from '../v3/runtime.js';
+import {fileURLToPath} from 'node:url';
 function fixture(config={}){
  const files=new Map(),members=new Map(),tasks=new Map(),sent=[];let serial=0,spawns=0,source='initial source',nextSpawnError=null;
  const root={id:`mock-${randomUUID()}`,session:{header:{}},ctx:{}};const hooks={},definitions=new Map(),effects=[];let guard;
@@ -23,6 +24,12 @@ function fixture(config={}){
  async function consult(agent){let cached;const pending=call('gvs_ask_user',{question:'Confirm the exact goal'},agent).then(value=>(cached=value,value));await new Promise(resolve=>setImmediate(resolve));if(cached)return cached;let list=await call('gvs_task',{action:'list'});const question=list.tasks.find(task=>task.kind==='consultation'&&task.state==='running');assert.ok(question);await complete(question.id,actor('user'));return pending;}
  return {root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,effects,failNextSpawn:()=>{nextSpawnError=new Error('Temporary spawn failure');},changeSource:value=>{source=value;},get spawns(){return spawns;}};
 }
+test('read-only browser runtime discovery works before a run and for assigned discovery roles without inventing acceptance or requiring a review',async()=>{
+ const browserModule=fileURLToPath(new URL('./fixtures/no-browser.mjs',import.meta.url)),f=fixture({browserModule}),before=await f.call('gvs_browser_capabilities');assert.equal(before.status,'browser-capabilities');assert.equal(before.acceptanceEvidence,false);assert.equal(f.files.size,0);assert.equal(f.spawns,0);assert.ok(before.engines.every(e=>e.available===false&&e.runtime.modulePath===browserModule));
+ const start=await f.call('gvs_run',{task:'Inspect CLI and its actual runtime',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));await f.call('gvs_agent',{action:'create',name:'reader',title:'Runtime investigator',purpose:'Discover actual runtime',capability:'read'});await f.call('gvs_task',{action:'create',title:'Runtime discovery',instructions:'Read actual capabilities without launching product work',kind:'discovery',assignee:'reader',resources:[]});
+ const saved=JSON.parse([...f.files.values()][0]),result=await f.call('gvs_browser_capabilities',{},f.actor('reader')),after=JSON.parse([...f.files.values()][0]);assert.equal(result.acceptanceEvidence,false);assert.deepEqual(after.goal,saved.goal);assert.deepEqual(after.tasks,saved.tasks);assert.deepEqual(after.visualChecks,saved.visualChecks);assert.equal(after.kind,'code');
+});
+
 test('target inspection uses sandbox metadata before a run and native UI never launches a browser matrix',async()=>{
  const f=fixture({projectInspection:true,responsiveTesting:true}),cwd=await f.ctx.workingDirectory.ensure();
  f.ctx.fs.listDir=async target=>path.relative(cwd,target.file)===''?[{name:'project.godot',type:'file'},{name:'scenes',type:'directory'}]:[{name:'main.tscn',type:'file'}];

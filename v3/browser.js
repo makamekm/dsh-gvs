@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {homedir,networkInterfaces} from 'node:os';
-import {pathToFileURL} from 'node:url';
+import {pathToFileURL,fileURLToPath} from 'node:url';
 import {clip} from './protocol.js';
 import {collectLayout,addLayoutCapture} from './visual.js';
 import {collectResponsiveHints} from './responsive.js';
@@ -67,20 +67,23 @@ export function previewURL(value) {
   return url;
 }
 
-async function browserRuntime(config) {
+export async function resolveBrowserRuntime(config={}) {
   const engine=config.browserEngine??'chromium';
   if(!['chromium','firefox','webkit'].includes(engine))throw new Error('Choose an actual Playwright engine: chromium, firefox or webkit.');
-  for (const filename of [config.browserModule].filter(Boolean)) {
-    try {const module = await import(pathToFileURL(filename).href); if (module[engine]) return module[engine];} catch {}
-  }
-  try {return (await import('playwright-core'))[engine];} catch {}
-  try {const module=await import(pathToFileURL(path.join(homedir(),'.cache','codex-runtimes','codex-primary-runtime','dependencies','node','node_modules','playwright-core','index.mjs')).href);if(module[engine])return module[engine];}catch{}
+  const candidates=[];if(config.browserModule)candidates.push({url:config.browserModule.startsWith('file:')?config.browserModule:pathToFileURL(config.browserModule).href,source:'configured'});
+  try{candidates.push({url:import.meta.resolve('playwright-core'),source:'package'});}catch{}
+  candidates.push({url:pathToFileURL(path.join(homedir(),'.cache','codex-runtimes','codex-primary-runtime','dependencies','node','node_modules','playwright-core','index.mjs')).href,source:'host-cache-fallback'});
+  for(const candidate of candidates)try{const module=await import(candidate.url);if(module[engine])return {type:module[engine],modulePath:fileURLToPath(candidate.url),source:candidate.source};}catch{}
   throw new Error('Visual verification needs playwright-core. Set browserModule to its installed index.mjs.');
 }
+async function browserRuntime(config){return (await resolveBrowserRuntime(config)).type;}
 const capabilityProbes=new Map();
 export async function browserCapabilities(config={}){
- const rows=[];for(const engine of ['chromium','firefox','webkit'])try{
-  const type=await browserRuntime({...config,browserEngine:engine}),file=engine==='chromium'?(await browserExecutable(config)??type.executablePath()):type.executablePath(),stat=await fs.stat(file),key=JSON.stringify([engine,file,stat.size,stat.mtimeMs]);
+ const rows=[];for(const engine of ['chromium','firefox','webkit']){let runtime;try{
+  const resolved=await resolveBrowserRuntime({...config,browserEngine:engine}),type=resolved.type,file=engine==='chromium'?(await browserExecutable(config)??type.executablePath()):type.executablePath();
+  let packageName=null,packageVersion=null;try{const pkg=JSON.parse(await fs.readFile(path.join(path.dirname(resolved.modulePath),'package.json'),'utf8'));packageName=pkg.name??null;packageVersion=pkg.version??null;}catch{}
+  runtime={modulePath:resolved.modulePath,source:resolved.source,packageName,packageVersion,executablePath:file};
+  const stat=await fs.stat(file),key=JSON.stringify([resolved.modulePath,packageVersion,engine,file,stat.size,stat.mtimeMs]);
   let cached=capabilityProbes.get(key);
   if(!cached||Date.now()-cached.at>60000){cached={at:Date.now(),promise:(async()=>{let browser;try{
    browser=await type.launch({headless:true,executablePath:file,...(engine==='chromium'?{args:renderArgs}:{}),timeout:10000});
@@ -91,8 +94,8 @@ export async function browserCapabilities(config={}){
    try{const settings=await browser.newPage({viewport:{width:320,height:240},deviceScaleFactor:2,hasTouch:true,isMobile:engine!=='firefox',colorScheme:'dark',reducedMotion:'reduce',contrast:'more'});await settings.goto(probe);await settings.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));await settings.evaluate(()=>{window.__gvsProbeTouch=false;document.addEventListener('pointerdown',e=>{window.__gvsProbeTouch=e.pointerType==='touch'&&e.isTrusted;},{once:true});});await settings.getByRole('button',{name:'GVS probe A'}).tap();Object.assign(features,await settings.evaluate(()=>({dpr:devicePixelRatio===2,touch:window.__gvsProbeTouch===true,dark:matchMedia('(prefers-color-scheme: dark)').matches,reducedMotion:matchMedia('(prefers-reduced-motion: reduce)').matches,contrast:matchMedia('(prefers-contrast: more)').matches})));try{await settings.emulateMedia({forcedColors:'active'});features.forcedColors=await settings.evaluate(()=>matchMedia('(forced-colors: active)').matches);}catch{features.forcedColors=false;}}catch(error){featureError=clip(error.message,300);}
    return {engine,available:true,features,...(featureError?{featureError}:{}),evidence:'Actual isolated launch, screenshot and parameter/keyboard probes. Physical-device equivalence is not claimed.'};
   }catch(error){return {engine,available:false,reason:clip(error.message,500)};}finally{await browser?.close().catch(()=>{});}})()};capabilityProbes.set(key,cached);}
-  rows.push(await cached.promise);
- }catch(error){rows.push({engine,available:false,reason:clip(error.code??error.message,500)});}return rows;
+  rows.push({...await cached.promise,runtime});
+ }catch(error){rows.push({engine,available:false,reason:clip(error.code??error.message,500),...(runtime?{runtime}:{})});}}return rows;
 }
 async function browserExecutable(config) {
   const candidates = [config.browserExecutable, process.env.GVS_BROWSER_EXECUTABLE,

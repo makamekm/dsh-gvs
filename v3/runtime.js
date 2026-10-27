@@ -244,7 +244,7 @@ export function apply(ctx,config={}){
    return next();
   }
   const entry=await load(membership.root,exec.signal),role=entry&&roleOf(entry,membership.name);
-  const alwaysRead=['read','read_image','glob','grep','working_directory','gvs_status','gvs_artifacts','gvs_diagnostics','gvs_wait'];
+  const alwaysRead=['read','read_image','glob','grep','working_directory','gvs_status','gvs_artifacts','gvs_diagnostics','gvs_browser_capabilities','gvs_wait'];
   if(!role)return alwaysRead.includes(exec.name)?next():{kind:'deny',reason:'This teammate has no GVS role assignment.'};
   if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause'].includes(exec.name))return {kind:'deny',reason:'This is a coordinator-only operation.'};
   const writing=writeDenial(entry,membership.name,role,exec);if(writing)return {kind:'deny',reason:writing};
@@ -256,7 +256,7 @@ export function apply(ctx,config={}){
   if(!exec.agent)return;
   const member=ctx.agentTeams.tryMembership(exec.agent);if(!member||member.role==='lead')return;
   const entry=entries.get(member.root.id),role=entry&&roleOf(entry,member.name);
-  const basic=['read','read_image','glob','grep','working_directory','gvs_status','gvs_artifacts','gvs_diagnostics','gvs_wait'];
+  const basic=['read','read_image','glob','grep','working_directory','gvs_status','gvs_artifacts','gvs_diagnostics','gvs_browser_capabilities','gvs_wait'];
   if(!role)return basic.includes(exec.name)?undefined:'No GVS role is assigned to this teammate.';
   if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause'].includes(exec.name))return 'Only the coordinator may control the run.';
   const writing=writeDenial(entry,member.name,role,exec);if(writing)return writing;
@@ -317,6 +317,9 @@ export function apply(ctx,config={}){
   await createRole(entry,{name:'user',title:'Пользователь',purpose:'Цели, UX и независимая пользовательская приёмка',instructions:USER,capability:'user'},exec.signal);
   const brief=await createTask(entry,{assignee:'user',title:'Определить цель и критерии приёмки',kind:'brief',instructions:`Inspect the actual task/project. Define audience/player, primary journey, meaningful acceptance criteria and visual ambition. Keep it concise. Do not prescribe a composition before exploration. For a game identify actual engine and key mechanics to verify. Do not run a full regression yet.\n${args.task}`,dependsOn:[]},exec.signal);
   return {status:'running',briefTaskId:brief.id,next:'Wait for the User brief, create suitable named specialists and dependency tasks. Coordinate until gvs_finish accepts all gates.'};
+ });
+ register('gvs_browser_capabilities','Read the ACTUAL GVS browser runtime/module/version/executable and isolated engine launch/input/media capabilities. Available to discovery/read roles before any review task or run; no product URL, shell or installation needed. Do not guess product node_modules/default caches or equate an executable file with a successful launch. This is diagnostics, not product/device acceptance.',{},[],async(_args,exec)=>{
+  const {entry}=await current(exec,false);return {status:'browser-capabilities',acceptanceEvidence:false,target:entry?.run.qaTarget?.surfaces??null,engines:await browserCapabilities(config),next:'Use these actual runtime/executable paths when diagnosing the GVS adapter. Unavailable engines and unsupported settings remain limitations. Do not install another runtime from guessed paths, waive review, or claim a physical device was tested. Non-web products still require their own actual engine/process/native-window drivers.'};
  });
  register('gvs_project','Inspect actual project manifests and execution targets before choosing QA tools. Detects web, native games (Unity/Godot/Unreal), native UI, CLI/bot/service and mixed targets. Returns adapter/evidence contracts, not claims that engines or drivers are installed. Create needed specialist/driver tasks yourself; never force a browser matrix on non-web products.',{},[],async(_args,exec)=>{
   const {root,entry}=await current(exec,false),target=await inspectProject(root,exec.signal,entry?.run.engine??'');if(entry){entry.run.qaTarget=target;await commit(entry);}return {target,next:'Discover actual runtime/entrypoints and feature-specific risks. Use the listed appropriate existing tools; if a driver is missing, assign a concrete adapter task to an existing or newly inferred specialist. Do not invent test results or substitute localhost for native/CLI execution.'};
