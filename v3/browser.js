@@ -11,12 +11,28 @@ const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
 const renderArgs=['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'];
 export const BROWSER_ACTIONS=['click','fill','select','press','check','scroll','assertText','assertState','assertVisible','assertHidden'];
 export const BROWSER_STATES=['checked','pressed','expanded','disabled','invalid','focused','value'];
+function pressKey(action){
+ const key=action.key??action.value;
+ if(typeof key!=='string'||!key.trim()||action.key!=null&&action.value!=null&&action.key!==action.value)throw new Error('press needs a nonempty key string (e.g. key:"Escape"); value is a supported alias and must agree if both are supplied.');
+ return key;
+}
+function expectedState(action){
+ if(!BROWSER_STATES.includes(action.state)||action.state==='value'&&typeof action.value!=='string'||action.state!=='value'&&typeof action.value!=='boolean'&&!['true','false'].includes(action.value))throw new Error('assertState needs a supported state; text values are strings, boolean states accept true/false booleans or strings.');
+ return action.state==='value'?action.value:typeof action.value==='boolean'?action.value:action.value==='true';
+}
 export function validateBrowserActions(actions){
  if(!Array.isArray(actions)||actions.length>12)throw new Error('Use at most 12 actions in one reproducible journey.');
  for(const [index,action] of actions.entries()){
   if(!action||!BROWSER_ACTIONS.includes(action.kind))throw new Error(`Unsupported browser action ${JSON.stringify(action?.kind)} at index ${index}. Allowed: ${BROWSER_ACTIONS.join(', ')}. Desktop and phone viewports are already captured automatically; do not add a viewport action.`);
-  if(action.kind==='assertState'&&(!BROWSER_STATES.includes(action.state)||typeof action.value!=='string'||action.state!=='value'&&!['true','false'].includes(action.value)))throw new Error(`assertState at index ${index} needs a supported state and a string expected value ("true"/"false" for boolean states).`);
+  if(action.kind==='press')pressKey(action);
+  if(action.kind==='assertState')expectedState(action);
+  if(action.kind==='check'&&action.value!==undefined&&typeof action.value!=='boolean'&&!['true','false'].includes(action.value))throw new Error('check accepts boolean true/false or their string aliases. Omit value to check the box.');
  }
+}
+export function browserPlans(args){
+ const shared=args.actions??[];validateBrowserActions(shared);const by=args.actionsByViewport??{};
+ if(typeof by!=='object'||Array.isArray(by)||Object.keys(by).some(key=>!['desktop','mobile'].includes(key)))throw new Error('actionsByViewport accepts only desktop/mobile action arrays. Both viewports remain required.');
+ const plans={desktop:by.desktop??shared,mobile:by.mobile??shared};for(const actions of Object.values(plans))validateBrowserActions(actions);return plans;
 }
 export function phoneContext(version){return {isMobile:true,hasTouch:true,userAgent:`Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Mobile Safari/537.36`};}
 export function sameEntry(actual,expected){try{const a=new URL(actual),b=new URL(expected);return a.port===b.port&&a.protocol===b.protocol&&(a.hostname===b.hostname||LOOPBACK.has(a.hostname)&&LOOPBACK.has(b.hostname))&&a.pathname.replace(/\/$/,'')===b.pathname.replace(/\/$/,'')&&a.search===b.search&&a.hash===b.hash;}catch{return false;}}
@@ -62,13 +78,11 @@ function locator(page, action) {
 }
 async function perform(page, action) {
   if (action.kind === 'assertText') return page.getByText(action.value, {exact: false}).first().waitFor({state: 'visible'});
-  if (action.kind === 'press' && !action.role && !action.label && !action.testId) return page.keyboard.press(action.value);
+  if (action.kind === 'press' && !action.role && !action.label && !action.testId) return page.keyboard.press(pressKey(action));
   if (action.kind === 'scroll') return page.mouse.wheel(0, Number(action.value) || 600);
   const target = locator(page, action);
   if (action.kind === 'assertState') {
-    if (!BROWSER_STATES.includes(action.state)) throw new Error('Choose checked, pressed, expanded, disabled, invalid, focused or value.');
-    if (typeof action.value !== 'string' || (action.state !== 'value' && !['true', 'false'].includes(action.value))) throw new Error('Provide the expected string value, or true/false for a boolean state.');
-    const expected = action.state === 'value' ? action.value : action.value === 'true';
+    const expected = expectedState(action);
     let actual;
     for (let attempt = 0; attempt < 35; attempt++) {
       actual = await target.evaluate((element, state) => ({
@@ -84,8 +98,8 @@ async function perform(page, action) {
   if (action.kind === 'click') return target.click();
   if (action.kind === 'fill') return target.fill(action.value);
   if (action.kind === 'select') return target.selectOption(action.value);
-  if (action.kind === 'press') return target.press(action.value);
-  if (action.kind === 'check') return target.setChecked(action.value !== 'false');
+  if (action.kind === 'press') return target.press(pressKey(action));
+  if (action.kind === 'check') return target.setChecked(action.value !== false && action.value !== 'false');
   if (action.kind === 'assertVisible') return target.waitFor({state: 'visible'});
   if (action.kind === 'assertHidden') return target.waitFor({state: 'hidden'});
   throw new Error(`Unsupported browser action: ${action.kind}`);
@@ -93,8 +107,7 @@ async function perform(page, action) {
 
 export async function captureBrowser(args, {config = {}, signal, saveImage}) {
   const url = previewURL(args.url);
-  const actions = args.actions ?? [];
-  validateBrowserActions(actions);
+  const plans=browserPlans(args);
   const chromium = await browserRuntime(config);
   signal.throwIfAborted();
   const executablePath = await browserExecutable(config);
@@ -105,6 +118,7 @@ export async function captureBrowser(args, {config = {}, signal, saveImage}) {
     interactions: 0, assertions: 0, images: [], views: []};
   try {
     for (const viewport of [{name: 'desktop', width: 1440, height: 960}, {name: 'mobile', width: 390, height: 844}]) {
+      const actions=plans[viewport.name];
       signal.throwIfAborted();
       const context = await browser.newContext({viewport: {width: viewport.width, height: viewport.height},
         ...(viewport.name==='mobile'?phoneContext(browser.version()):{isMobile:false,hasTouch:false}), reducedMotion: 'reduce', serviceWorkers: 'block'});
@@ -147,10 +161,10 @@ export async function captureBrowser(args, {config = {}, signal, saveImage}) {
         let states=0;view.uncapturedTransitions=0;
         for (const [index,action] of actions.entries()) {
           signal.throwIfAborted();
-          try{await perform(page, action);}catch(error){view.steps.push({kind:action.kind,target:action.name??action.label??action.testId??'',value:clip(action.value,300),...(action.state?{state:action.state}:{}),passed:false,error:clip(error.message,1000)});await screenshot(`failed-step-${index+1}`).catch(()=>{});throw error;}
+          try{await perform(page, action);}catch(error){view.steps.push({kind:action.kind,target:action.name??action.label??action.testId??'',value:clip(action.value??action.key,300),...(action.state?{state:action.state}:{}),passed:false,error:clip(error.message,1000)});await screenshot(`failed-step-${index+1}`).catch(()=>{});throw error;}
           const assertion = action.kind.startsWith('assert');
           if (assertion) report.assertions++; else report.interactions++;
-          view.steps.push({kind: action.kind, target: action.name ?? action.label ?? action.testId ?? '', value: clip(action.value, 300), ...(action.state?{state:action.state}:{}), passed: true});
+          view.steps.push({kind: action.kind, target: action.name ?? action.label ?? action.testId ?? '', value: clip(action.value??action.key, 300), ...(action.state?{state:action.state}:{}), passed: true});
           if(!assertion){if(states++<3)await screenshot(`step-${index+1}`);else view.uncapturedTransitions++;}
         }
         if (actions.length) await screenshot('journey');

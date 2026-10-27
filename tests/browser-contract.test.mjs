@@ -1,9 +1,19 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {captureBrowser,validateBrowserActions} from '../v3/browser.js';
+import {captureBrowser,validateBrowserActions,browserPlans} from '../v3/browser.js';
 test('unsupported viewport action is rejected before any browser or screenshot capture with a specific correction',async()=>{
  let captured=false;await assert.rejects(captureBrowser({url:'http://127.0.0.1:5173/',actions:[{kind:'viewport',value:'1440x960'}]},{signal:new AbortController().signal,saveImage:async()=>{captured=true;}}),error=>/Unsupported browser action "viewport"/.test(error.message)&&/automatically/.test(error.message));assert.equal(captured,false);
 });
-test('boolean state assertions require literal expected strings and supported states; genuine close/reopen actions remain valid',()=>{
- assert.throws(()=>validateBrowserActions([{kind:'assertState',state:'expanded',value:true}]),/string expected value/);assert.throws(()=>validateBrowserActions([{kind:'assertState',state:'imagined-state',value:'true'}]),/supported state/);
+test('boolean state assertions accept actual booleans and strings, reject other values, and retain valid close/reopen actions',()=>{
+ assert.doesNotThrow(()=>validateBrowserActions([{kind:'assertState',state:'expanded',value:true},{kind:'assertState',state:'disabled',value:false},{kind:'check',label:'Consent',value:false}]));assert.throws(()=>validateBrowserActions([{kind:'check',label:'Consent',value:0}]),/check accepts/);assert.throws(()=>validateBrowserActions([{kind:'assertState',state:'expanded',value:1}]),/boolean states/);assert.throws(()=>validateBrowserActions([{kind:'assertState',state:'imagined-state',value:'true'}]),/supported state/);
  assert.doesNotThrow(()=>validateBrowserActions([{kind:'click',role:'button',name:'Settings'},{kind:'assertVisible',role:'dialog',name:'Settings'},{kind:'press',value:'Escape'},{kind:'assertHidden',role:'dialog',name:'Settings'},{kind:'click',role:'button',name:'Settings'},{kind:'assertVisible',role:'dialog',name:'Settings'}]));
+});
+
+test('press accepts key and legacy value without letting contradictory or missing keys reach the browser',async()=>{
+ assert.doesNotThrow(()=>validateBrowserActions([{kind:'press',key:'Escape'},{kind:'press',value:'Escape'},{kind:'press',key:'Escape',value:'Escape'}]));
+ for(const action of [{kind:'press'},{kind:'press',key:'Escape',value:'Enter'}])await assert.rejects(captureBrowser({url:'http://127.0.0.1:5173/',actions:[action]},{signal:new AbortController().signal,saveImage:()=>assert.fail('Invalid keys must fail before capture')}),/press needs/);
+});
+
+test('responsive action branches override only their viewport while preserving shared fallback and validation for both',()=>{
+ const desktop=[{kind:'click',role:'button',name:'Desktop options'}],mobile=[{kind:'click',role:'button',name:'Phone options'}];assert.deepEqual(browserPlans({actions:desktop,actionsByViewport:{mobile}}),{desktop,mobile});
+ assert.throws(()=>browserPlans({actionsByViewport:{mobile:[{kind:'viewport'}]}}),/Unsupported browser action/);assert.throws(()=>browserPlans({actionsByViewport:{tablet:mobile}}),/desktop\/mobile/);
 });
