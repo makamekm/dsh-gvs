@@ -179,7 +179,7 @@ export function apply(ctx,config={}){
  async function ensureUserProbe(entry,signal){
   const input=userProbeInput(entry.run);if(!input)return;
   const queued=entry.run.tasks.find(t=>t.autoUserProbe&&t.state==='waiting');
-  if(queued){queued.userProbeFor=[...new Set([...queued.userProbeFor,...input.userProbeFor])];queued.readScopes=[...new Set([...queued.readScopes,...input.readScopes])];}
+  if(queued){const combined=userProbeInput(entry.run,queued.userProbeFor??[])??input;queued.userProbeFor=[...new Set([...(queued.userProbeFor??[]),...combined.userProbeFor])];queued.instructions=clip(combined.instructions,15000);queued.readScopes=[...new Set([...queued.readScopes,...combined.readScopes])];}
   else await createTask(entry,input,signal,false);
   entry.run.userTestingSeen=[...new Set([...entry.run.userTestingSeen,...input.userProbeFor])];entry.run.userTestingInitial=false;await commit(entry);
  }
