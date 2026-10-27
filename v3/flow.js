@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {diagnosticStatus} from './diagnostics.js';
 
 export function decisionKey(run){
  return createHash('sha256').update(JSON.stringify({messages:run.goal?.messages??[],requirements:run.goal?.requirements?.map(({id,criterion})=>({id,criterion})),analysis:run.analysis?.requirements??[]})).digest('hex');
@@ -14,13 +15,14 @@ export function consultationKey(question,context=''){
  return createHash('sha256').update(question.trim()+'\0'+context.trim()).digest('hex');
 }
 export function progressStatus(run,now=Date.now(),maxSliceMs=1200000){
+ const toolErrors=diagnosticStatus(run,now);
  const p=run.progress??{};
  const active=run.tasks.filter(task=>task.state==='running');
  const long=active.filter(task=>task.kind==='work'&&Number.isFinite(task.startedAt)&&now-task.startedAt>maxSliceMs).map(task=>({id:task.id,assignee:task.assignee,title:task.title,elapsedMs:now-task.startedAt}));
  const idleMs=now-(p.lastWriteAt??p.startedAt??now);
  const metadataLoop=(p.metadataSinceWrite??0)>=24&&idleMs>=600000;
- return {lastWriteAt:p.lastWriteAt??null,lastWriteFile:p.lastWriteFile??null,writes:p.writes??0,metadataSinceWrite:p.metadataSinceWrite??0,idleMs,overlongWork:long,needsIntervention:metadataLoop||long.length>0,
-  next:metadataLoop?'Stop repeating readiness/ownership consultations. Inspect the actual blocker, reuse recorded User decisions, and assign the next concrete implementation or independent test.':long.length?'Ask the assigned editor for a bounded runnable increment and a real build/render check now. Move unrelated remaining work into subsequent owned tasks; preserve every goal and review gate.':'Continue assigned work; activity alone is not a completed deliverable.'};
+ return {lastWriteAt:p.lastWriteAt??null,lastWriteFile:p.lastWriteFile??null,writes:p.writes??0,metadataSinceWrite:p.metadataSinceWrite??0,idleMs,overlongWork:long,toolErrors,needsIntervention:metadataLoop||long.length>0||toolErrors.repeated>0,
+  next:toolErrors.repeated?'Inspect gvs_diagnostics and resolve the concrete repeated tool/configuration or evidence failure now. Do not wait for the human to relay agent errors or waive real tests.':metadataLoop?'Stop repeating readiness/ownership consultations. Inspect the actual blocker, reuse recorded User decisions, and assign the next concrete implementation or independent test.':long.length?'Ask the assigned editor for a bounded runnable increment and a real build/render check now. Move unrelated remaining work into subsequent owned tasks; preserve every goal and review gate.':'Continue assigned work; activity alone is not a completed deliverable.'};
 }
 
 // The full panel snapshot is replayable presentation metadata, not a repeated

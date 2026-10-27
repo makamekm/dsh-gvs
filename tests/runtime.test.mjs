@@ -300,6 +300,33 @@ test('a runnable UI automatically queues the same User for exploration and coale
  await f.call('gvs_pause');await f.call('gvs_recover');assert.equal(JSON.parse([...f.files.values()][0]).status,'paused');
 });
 
+test('teammates can inspect their wait without coordinator authority and interrupted negative feedback is preserved without completing a queued task',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Preserve agent feedback',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});
+ const build=await f.call('gvs_task',{action:'create',title:'Build',instructions:'Implement',kind:'work',assignee:'developer'}),review=await f.call('gvs_task',{action:'create',title:'User test',instructions:'Test current UI',kind:'user-review',assignee:'user',dependsOn:[build.task.id]}),actor=f.actor('user'),count=f.tasks.size,revision=f.tasks.get(review.task.id).revision;
+ f.ctx.agentTeams.waitForChange=()=>assert.fail('A queued teammate ends its turn instead of polling or scheduling the team');
+ const wait=await f.call('gvs_wait',{seconds:10},actor);assert.equal(wait.ownTasks[0].state,'waiting');assert.equal(wait.ownTasks[0].blocker.kind,'dependencies');assert.equal(f.tasks.size,count);assert.equal(f.tasks.get(review.task.id).revision,revision);
+ const feedback={action:'complete',taskId:review.task.id,verdict:'revise',summary:'Window failed before interruption',findings:['Observed dialog stays open after Close is pressed.']};
+ const result=await f.call('gvs_task',feedback,actor);assert.equal(result.completed,false);assert.equal(result.status,'feedback-forwarded');assert.equal(result.state,'waiting');assert.equal(f.tasks.get(review.task.id).status,'pending');assert.equal(result.issueIds.length,1);assert.match(f.sent.at(-1).content[0].text,/INTERRUPTED REVIEW FEEDBACK/);
+ await f.call('gvs_task',feedback,actor);assert.equal((await f.call('gvs_goal',{action:'status'})).issues.length,1);
+ await assert.rejects(f.complete(review.task.id,actor),/assigned running/);await assert.rejects(f.call('gvs_task',feedback,f.actor('developer')),/assigned running/);
+});
+
+test('a teammate protocol error is automatically saved and sent to Lead without human forwarding',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Automatic diagnostics',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ const actor=f.actor('user');await assert.rejects(f.call('gvs_agent',{action:'create',name:'not-owned',title:'No',purpose:'Invalid role change',capability:'edit'},actor),/coordinator/);
+ const report=await f.call('gvs_diagnostics');assert.equal(report.total,1);assert.equal(report.errors[0].agent,'user');assert.equal(report.errors[0].tool,'gvs_agent');assert.match(f.sent.at(-1).content[0].text,/GVS TOOL ERROR/);assert.equal(f.sent.at(-1).target,'lead');
+});
+
+test('actual failed native checks are reported automatically and an unrelated successful command cannot erase them',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Watch real check errors',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});const task=await f.call('gvs_task',{action:'create',title:'Check',instructions:'Implement and check',kind:'work',assignee:'developer'}),actor=f.actor('developer');
+ const exec={agent:actor,name:'pwsh',arguments:{command:'node real-check.mjs'},signal:new AbortController().signal},failed={isError:false,value:{kind:'foreground',exitCode:1,stderr:{text:'Actual failed assertion'}},content:[]},passed={isError:false,value:{kind:'foreground',exitCode:0},content:[]};
+ f.hooks['tools/result'](exec,failed);await new Promise(resolve=>setImmediate(resolve));let d=await f.call('gvs_diagnostics');assert.equal(d.open,1);assert.match(d.errors[0].message,/Actual failed assertion/);assert.equal(d.errors[0].taskId,task.task.id);
+ f.hooks['tools/result']({...exec,arguments:{command:'node unrelated-check.mjs'}},passed);await new Promise(resolve=>setImmediate(resolve));assert.equal((await f.call('gvs_diagnostics')).open,1);
+ f.hooks['tools/result'](exec,passed);await new Promise(resolve=>setImmediate(resolve));assert.equal((await f.call('gvs_diagnostics')).open,0);assert.equal(f.tasks.get(task.task.id).status,'in_progress','A successful command does not complete or accept the product task');
+});
+
 test('a passed increment still saves out-of-scope visual defects as mandatory goal issues',async()=>{
  const {VISUAL_CHECKS}=await import('../v3/visual.js');
  const f=fixture(),start=await f.call('gvs_run',{task:'Real UI review',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));

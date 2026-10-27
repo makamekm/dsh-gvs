@@ -10,6 +10,7 @@ import {decisionKey,reusableDecision,availableDecisions,consultationKey,progress
 import {previewState,needsPreview} from './preview.js';
 import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus,visualStates} from './visual.js';
 import {USER_TESTING,planUserJourneys,userJourneyStatus,scenarioKey,userProbeInput} from './journeys.js';
+import {recordToolFailure,recordToolSuccess,toolIdentity,diagnosticStatus} from './diagnostics.js';
 import {parallelFields,parallelBlocker,parallelStatus,taskAccess,writeAllowed,validateWriteScopes,evidencePath} from './parallel.js';
 import {assignmentDelivery} from './delivery.js';
 import {prepareCodePlan,stalePlanFiles,planSources,needsCodePlan,missingPlanOutputs,migrateCodePlan} from './planning.js';
@@ -92,7 +93,7 @@ export function apply(ctx,config={}){
   }
   return {member,entry,root:member.root,name:member.name};
  }
- function lead(member){if(member.role!=='lead')throw new Error('Only the coordinator can change team composition or the task plan.');}
+ function lead(member){if(member.role!=='lead')throw new Error('Only the coordinator can change team composition or the task plan. Send the precise request with gvs_agent action:message name:lead; for missing expertise use gvs_agent action:request. Continue your own assignment or preserve negative feedback without changing team authority.');}
  async function checkpointPlan(io,task){
   const plan=migrateCodePlan(task.codePlan);if(!plan)return;
   task.planContinuation={plannedAt:plan.plannedAt,sources:await planSources(plan,io.bytes)};
@@ -113,6 +114,11 @@ export function apply(ctx,config={}){
    const io=await storage(entry.root,AbortSignal.timeout(15000));
    await io.write(stateFile(entry.root),saved);await io.write(path.join('.gvs',entry.run.runId,'state.json'),saved);await io.write(path.join('.gvs','latest.json'),saved);
   });await entry.write;
+ }
+ function operation(entry,exec){const member=ctx.agentTeams.tryMembership(exec.agent);return {agent:member.name,taskId:exec.arguments?.taskId??entry.run.tasks.find(t=>t.assignee===member.name&&t.state==='running')?.id??entry.run.tasks.find(t=>t.assignee===member.name&&t.state==='waiting')?.id??null,tool:exec.name,identity:toolIdentity(exec)};}
+ async function noteFailure(entry,exec,message){
+  const {item,notify}=recordToolFailure(entry.run,{...operation(entry,exec),message});await commit(entry);
+  if(notify&&item.agent!=='lead')try{await ctx.agentTeams.sendMessage(exec.agent,{target:'lead',content:[{type:'text',text:`GVS TOOL ERROR ${JSON.stringify(item)}. Diagnose this without waiting for the human to forward it. Correct the protocol/configuration or assign an owned repair for a real failed check. A missing check, permission denial or product failure is not permission to waive acceptance. Read gvs_diagnostics for current errors.`}],signal:exec.signal});}catch{}
  }
  async function createRole(entry,input,signal){
   const spec=roleSpec(input),existing=roleOf(entry,spec.name);
@@ -187,7 +193,7 @@ export function apply(ctx,config={}){
     const flow=`PARALLEL ACCESS CONTRACT: ${JSON.stringify(taskAccess(entry.run,task))}. Edit only leased write paths. Shell commands must obey the same contract; leases coordinate agents and are not OS isolation. Do not mutate shared servers/databases, run dependency installs/shared builds or overwrite another task's artifacts without the named exclusive resource (project-runtime for the common preview/build/test environment). Use task-specific artifacts and isolated checks for parallel work. Ask Lead to update a queued task's scopes/resources before an undeclared operation. Full final reviews read the whole frozen source; scoped increment results never replace integration acceptance.\nDELIVER AN INCREMENT, NOT A PLANNING LOOP. Review scope: ${task.scope??'full'}, analysisIds: ${JSON.stringify(task.analysisIds??'ALL')}. An increment pass attests only this slice/selected criteria and NEVER full-goal acceptance. [] allows only a static slice, not a motion acceptance claim. Established User decisions for this role: ${JSON.stringify(task.consultations)}. Reuse a current decision with gvs_ask_user reuseTaskId; consult only for an actual consequential unknown, never to approve the same scope again. Read a dependency's exact assignment/result with gvs_task list taskId when needed; summaries above are not a claim that you read the whole evidence. For implementation, produce a coherent runnable slice with a real build/render check, normally within 20 minutes. If this assignment is too broad, message Lead with the completed slice and remaining work so it can be split without dropping requirements. Do not expand an in-progress mobile fix into every backend/product feature or postpone all product work until universal readiness. Independent final acceptance remains mandatory.`;
     const fallback=`${COMMON}\n${role.capability==='user'?USER:role.instructions}\n${entry.run.kind.startsWith('game')?GAME:''}\nASSIGNED TASK ID: ${task.id}\nTASK NONCE: ${task.nonce}\nROLE: ${role.title}\nKIND: ${task.kind}\nWORK: ${task.instructions}\n${flow}\nThe complete human goal is unchanged. First read gvs_goal status, then gvs_task list taskId=${task.id}; inspect dependency IDs ${JSON.stringify(task.dependsOn)} and relevant evidence via their paged tools. Finish only with gvs_task complete for this exact ID/nonce. PREVIEW: ${JSON.stringify(entry.run.preview)}`;
     const focusPrompt=task.reviewFocus==='source'?'COORDINATOR-ASSIGNED SOURCE-ONLY INCREMENT: inspect actual source/native ABI/security policy and run exact appropriate successful checks. No visualReview/screenshots are required for THIS source task; do not fabricate them. This pass does not attest UI, runtime-only behavior, design/User acceptance or the full human goal. Any such unresolved obligations remain open.':'';
-    const reportPrompt=role.capability==='verify'?'VERIFY OUTPUTS: direct write/edit is allowed only for reports/evidence in your explicitly leased artifacts/, test-results/ or playwright-report/ paths. Keep production sources and analyzer scripts read-only. Generated build/cache leases are for actual checks, never fabricated product output. If no report path is leased, return structured findings via gvs_task complete or ask Lead for a precise report task; do not bypass scope restrictions with shell writes. Analysis failures report the real exit/stderr cause; never weaken tests or invent a success report.':'';
+    const reportPrompt=role.capability==='verify'?(entry.run.kind==='ui'&&task.kind==='review'&&task.scope!=='increment'?`INDEPENDENT FULL UI QA: plan and execute your own scenarios with gvs_user_testing and gvs_browser_check; the User's checks do not substitute for yours. ${USER_TESTING}\n`:'')+'VERIFY OUTPUTS: direct write/edit is allowed only for reports/evidence in your explicitly leased artifacts/, test-results/ or playwright-report/ paths. Keep production sources and analyzer scripts read-only. Generated build/cache leases are for actual checks, never fabricated product output. If no report path is leased, return structured findings via gvs_task complete or ask Lead for a precise report task; do not bypass scope restrictions with shell writes. Analysis failures report the real exit/stderr cause; never weaken tests or invent a success report.':'';
     const resumePrompt=continuation?'CONTINUING AN INTERRUPTED ASSIGNMENT: partial edits already exist. Inspect the current planned files before editing, preserve completed work, finish the same plan and rerun every planned check. The original implementation baseline and independent acceptance remain binding.':'';
     const delivery=assignmentDelivery(flow+'\n'+contract+'\n'+prompt+'\n'+focusPrompt+'\n'+reportPrompt+'\n'+resumePrompt,images,focusPrompt+'\n'+reportPrompt+'\n'+resumePrompt+'\n'+fallback);task.receivedImages=delivery.images.map(image=>image.attachment.attachmentId);task.compactAssignment=delivery.compact;
     try{await ctx.agentTeams.sendMessage(entry.root,{target:role.name,content:delivery.content,signal});}
@@ -199,7 +205,7 @@ export function apply(ctx,config={}){
  function register(name,description,properties,required,execute,timeoutMs=120000){
   ctx.tools.register({name,description,parameters:{...object(properties),required},timeoutMs,
    output:{schema:{},presentationMeta:(_args,value)=>({gvsTeam:value.gvsTeam??null}),render:(_args,value)=>[{type:'text',text:JSON.stringify(modelResult(value))},...imageParts(value.images??[])]},
-   async execute(args,exec){const value=await execute(args,exec);const info=await current(exec,false);return JSON.parse(JSON.stringify({...value,...(info.entry?{gvsTeam:view(info.entry.run)}:{})}));}});
+   async execute(args,exec){try{const value=await execute(args,exec);const info=await current(exec,false);if(info.entry){if(value.ok===false)await noteFailure(info.entry,exec,`Check ${value.id??exec.name} ${value.scenarioId??''} failed: ${JSON.stringify(value.views?.map(v=>({viewport:v.viewport,errors:v.errors}))??value.errors??'Check returned ok:false')}`);else if(recordToolSuccess(info.entry.run,operation(info.entry,exec)))await commit(info.entry);}return JSON.parse(JSON.stringify({...value,...(info.entry?{gvsTeam:view(info.entry.run)}:{})}));}catch(error){const member=exec.agent&&ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);if(entry)try{await noteFailure(entry,exec,error.message);}catch{}throw error;}}});
  }
  function writeDenial(entry,name,role,exec){
   if(!['write','edit'].includes(exec.name))return;
@@ -221,7 +227,7 @@ export function apply(ctx,config={}){
    return next();
   }
   const entry=await load(membership.root,exec.signal),role=entry&&roleOf(entry,membership.name);
-  const alwaysRead=['read','read_image','glob','grep','working_directory','gvs_status','gvs_artifacts'];
+  const alwaysRead=['read','read_image','glob','grep','working_directory','gvs_status','gvs_artifacts','gvs_diagnostics','gvs_wait'];
   if(!role)return alwaysRead.includes(exec.name)?next():{kind:'deny',reason:'This teammate has no GVS role assignment.'};
   if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause'].includes(exec.name))return {kind:'deny',reason:'This is a coordinator-only operation.'};
   if(role.capability==='user'&&exec.name==='gvs_ask_user')return {kind:'deny',reason:'The User advocate cannot consult itself.'};
@@ -234,7 +240,7 @@ export function apply(ctx,config={}){
   if(!exec.agent)return;
   const member=ctx.agentTeams.tryMembership(exec.agent);if(!member||member.role==='lead')return;
   const entry=entries.get(member.root.id),role=entry&&roleOf(entry,member.name);
-  const basic=['read','read_image','glob','grep','working_directory','gvs_status','gvs_artifacts'];
+  const basic=['read','read_image','glob','grep','working_directory','gvs_status','gvs_artifacts','gvs_diagnostics','gvs_wait'];
   if(!role)return basic.includes(exec.name)?undefined:'No GVS role is assigned to this teammate.';
   if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause'].includes(exec.name))return 'Only the coordinator may control the run.';
   if(role.capability==='user'&&exec.name==='gvs_ask_user')return 'The User advocate cannot consult itself.';
@@ -254,6 +260,8 @@ export function apply(ctx,config={}){
  ctx.on('tools/result',(exec,result)=>{
   if(!exec.agent)return;const member=ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);if(!entry||entry.run.status!=='running')return;
   const role=roleOf(entry,member.name),task=entry.run.tasks.find(task=>task.assignee===member.name&&task.state==='running');
+  if(!exec.name.startsWith('gvs_')){if(result.isError||result.value?.kind==='foreground'&&result.value.exitCode!==0){const message=result.isError?result.content?.filter(p=>p.type==='text').map(p=>p.text).join('\n'):`Command failed (exit ${result.value.exitCode}): ${result.value.stderr?.text??result.value.stdout?.text??''}`;void noteFailure(entry,exec,message||'Tool execution failed').catch(()=>{});}
+  else if(recordToolSuccess(entry.run,operation(entry,exec)))void commit(entry).catch(()=>{});}
   if(['write','edit'].includes(exec.name)&&!result.isError){
    const file=exec.arguments?.file_path??exec.arguments?.path??'';
    if(task&&file){const relative=path.relative(entry.io.cwd,path.resolve(entry.io.cwd,file)).replaceAll('\\','/');if(relative&&relative!=='..'&&!relative.startsWith('../')&&!path.isAbsolute(relative)){const written=[...new Set([...(task.writtenFiles??[]),relative])];task.writtenFilesTruncated||=written.length>160;task.writtenFiles=written.slice(-160);}}
@@ -362,7 +370,13 @@ export function apply(ctx,config={}){
     if(args.action==='retry'){const native=ctx.agentTeams.getTask(entry.root,task.id);if(['in_progress','completed'].includes(native.status))await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:native.status==='completed'?'reopen':'release'});task.state='waiting';delete task.result;}
     await commit(entry);await schedule(entry,exec.signal);return {task};
    }
-   const task=entry.run.tasks.find(task=>task.id===args.taskId);if(!task||task.assignee!==name||task.state!=='running')throw new Error('Only the assigned running teammate may complete this task.');
+   const task=entry.run.tasks.find(task=>task.id===args.taskId);
+   if(task?.assignee===name&&['waiting','blocked'].includes(task.state)&&['revise','blocked'].includes(args.verdict)&&args.summary&&Array.isArray(args.findings)){
+    const issues=recordFindings(entry.run,{...task,result:{verdict:args.verdict,summary:args.summary,findings:args.findings}});await commit(entry);
+    if(issues.length)await ctx.agentTeams.sendMessage(exec.agent,{target:'lead',content:[{type:'text',text:`GVS INTERRUPTED REVIEW FEEDBACK ${JSON.stringify({taskId:task.id,state:task.state,summary:clip(args.summary,1500),findings:args.findings,issueIds:issues.map(i=>i.id)})}. Feedback is preserved without completing a queued assignment or claiming current acceptance. Assign repairs and rechecks; the scheduler retains the same task.`}],signal:exec.signal});
+    return {status:'feedback-forwarded',completed:false,taskId:task.id,state:task.state,issueIds:issues.map(i=>i.id),next:'Your findings are preserved and sent to Lead. End this turn; do not poll or repeat completion. The scheduler will wake this same task when its dependencies/leases are ready.'};
+   }
+   if(!task||task.assignee!==name||task.state!=='running')throw new Error('Only the assigned running teammate may complete this task. For your own queued/interrupted task, revise/blocked feedback can be forwarded without claiming completion; otherwise inspect its current task state and wait for the scheduler.');
    if(args.reviewFocus!==undefined&&args.reviewFocus!==(task.reviewFocus??'visual'))throw new Error('Review focus belongs to the coordinator assignment. Ask Lead to update an actual source-only increment; do not waive an assigned visual review yourself.');
    if(!args.verdict||!args.summary||!Array.isArray(args.findings))throw new Error(`Provide verdict, summary and findings as TOP-LEVEL gvs_task fields for ${task.id}. Required shape: {action:"complete",taskId:"${task.id}",verdict:"pass|revise|blocked",summary:"actual result",findings:["required fixes/blockers"]}. Use findings:[] only when there are no required fixes. Keep all assigned evidence and review fields; this error did not complete the task.`);
    if(args.verdict==='pass'&&args.findings.length)throw new Error('For pass, findings must be []. Put positive observations in summary; findings is only for required fixes or blockers.');
@@ -428,8 +442,11 @@ export function apply(ctx,config={}){
   return {status:entry.run.status,parallel:parallelStatus(entry.run,entry.run.parallelLimit??maxParallel)};
  });
  register('gvs_wait','Wait up to 30 seconds for actual team activity, then inspect results. Dependencies wake agents automatically; do not poll inactive teammates.',{seconds:{type:'integer',minimum:10,maximum:30}},[],async(args,exec)=>{
-  const {member,entry}=await current(exec);lead(member);await schedule(entry,exec.signal);const progress=progressStatus(entry.run,Date.now(),config.maxSliceMs??1200000);if(progress.needsIntervention)return {status:'needs-coordination',progress};if(!entry.run.tasks.some(task=>task.state==='running'))return {status:'needs-coordination',progress};await ctx.agentTeams.waitForChange(exec.agent,(args.seconds??20)*1000,exec.signal);return {status:entry.run.status,progress};
+  const {member,entry,name}=await current(exec);
+  if(member.role!=='lead')return {status:entry.run.status,ownTasks:entry.run.tasks.filter(t=>t.assignee===name&&t.state!=='done').map(t=>({id:t.id,state:t.state,blocker:t.state==='waiting'?parallelBlocker(entry.run,t):null})),next:'This is a read-only assignment snapshot, not a plan change. If your task is running, continue or report actual blockers. If queued, end this turn; the scheduler wakes your existing conversation automatically. Do not poll or create duplicate tasks.'};
+  await schedule(entry,exec.signal);const progress=progressStatus(entry.run,Date.now(),config.maxSliceMs??1200000);if(progress.needsIntervention)return {status:'needs-coordination',progress};if(!entry.run.tasks.some(task=>task.state==='running'))return {status:'needs-coordination',progress};await ctx.agentTeams.waitForChange(exec.agent,(args.seconds??20)*1000,exec.signal);return {status:entry.run.status,progress};
  },35000);
+ register('gvs_diagnostics','Read automatically captured tool errors across coordinator and teammates. Lead must diagnose repeated errors proactively; legitimate failed checks retain their evidence gates.',{offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:20}},[],async(args,exec)=>{const {entry}=await current(exec),rows=[...(entry.run.diagnostics??[])].sort((a,b)=>b.lastAt-a.lastAt),offset=args.offset??0,limit=args.limit??8;return {...diagnosticStatus(entry.run),errors:rows.slice(offset,offset+limit).map(({identity,...row})=>row),total:rows.length,nextOffset:offset+limit<rows.length?offset+limit:null};});
  register('gvs_status','Read saved GVS team state, decisions and evidence in this session.',{},[],async(_args,exec)=>{
   const {entry,root}=await current(exec,false);if(entry)return {status:entry.run.status,quality:entry.run.quality,parallel:parallelStatus(entry.run,entry.run.parallelLimit??maxParallel),userDecisions:availableDecisions(entry.run).slice(-6),
    checks:entry.run.checks.slice(-8).map(({agent,taskId,command,exitCode,finished,error,output})=>({agent,taskId,command,exitCode,finished,error,output:clip(output,800)})),
@@ -623,7 +640,6 @@ export function apply(ctx,config={}){
   const report=await (game?captureGame:captureBrowser)(args,{config,signal,saveImage:image=>ctx.attachments.saveImage(image),viewports:entry.run.viewports});
   await refreshRevision(entry,ctx.fs,exec.signal);
   const record={...report,id:`browser-${randomUUID()}`,at:Date.now(),revision,capturedBy:name,taskId:own?.id??null,...(scenario?{scenarioId:scenario.id,scenarioKey:scenarioKey(scenario)}:{})};entry.run.visualChecks.push(record);if(game)entry.run.gameChecks.push(record);await commit(entry);
-  if(!report.ok&&own&&name!=='lead')try{await ctx.agentTeams.sendMessage(exec.agent,{target:'lead',content:[{type:'text',text:`GVS LIVE UI TEST FAILURE ${JSON.stringify({taskId:own.id,checkId:record.id,scenario:args.scenario,scenarioId:args.scenarioId,failures:report.views.flatMap(v=>v.errors.map(error=>({viewport:v.viewport,error})))})}. Investigate now: distinguish an automation/selector failure from a reproducible product defect. The User should continue exploring other visible windows and send confirmed expected/actual findings; confirmed defects need owned repairs and independent rechecks.`}],signal:exec.signal});}catch(error){own.notificationError=clip(error.message,500);await commit(entry);}
   return {...report,id:record.id,revision,scenarioId:record.scenarioId,sourceChanged:revision!==entry.run.revision,...(own?{visualStateCount:visualStates(entry.run,own).length,next:'Inspect existing required frames via gvs_visual action:states; copy literal imageIds. Do not recapture journeys to fix completion citations.'}:{})};
  }
  register('gvs_browser_check','Exercise the actual local UI at desktop/phone sizes with semantic actions and assertions (including assertHidden/assertState for closing and controls). User scenarios require an exact registered scenarioId. Returns real screenshots, errors and layout evidence. Game collision checks need gvs_game_check.',{url:text(2000),scenario:text(500),scenarioId:text(40),actions:{type:'array',items:action,maxItems:12}},['url'],(args,exec)=>browserCheck(args,exec,false));
@@ -645,6 +661,9 @@ export function apply(ctx,config={}){
  },180000);
  ctx.on('session/event',(session,event)=>{
   const own=entries.get(session.id);
+  if(own?.run.status==='running'&&event.type==='turn/end'&&event.data.reason.kind==='error'){
+   recordToolFailure(own.run,{agent:'lead',taskId:null,tool:'agent-turn',identity:'lead-turn',message:event.data.reason.error?.message??'Coordinator turn failed'});void commit(own).catch(()=>{});
+  }
   if(own?.run.status==='running'&&event.type==='turn/end'&&['aborted','blocked','forked'].includes(event.data.reason.kind)){
    if(own.suspending||event.data.reason.kind==='aborted'&&event.data.reason.reason?.kind==='disposed')suspend(own).catch(()=>{});
    else pause(own).catch(()=>{});
@@ -656,7 +675,10 @@ export function apply(ctx,config={}){
    if(event.type==='turn/start')role.executionTurn=event.data.turn;
    const task=entry.run.tasks.find(task=>task.assignee===role.name&&task.state==='running');if(!task)continue;
    if(event.type==='user/message'&&Number.isInteger(role.executionTurn)&&event.data.content.some(part=>part.type==='text'&&part.text.includes(task.nonce)))task.executionTurn=role.executionTurn;
-   if(event.type==='turn/end'&&task.executionTurn===event.data.turn){task.state='blocked';task.result={verdict:'blocked',summary:`Agent turn ended (${event.data.reason.kind}) without completing its assigned task. Inspect its chat and retry this task.`,findings:[],revision:entry.run.revision};commit(entry).catch(()=>{});}
+   if(event.type==='turn/end'&&task.executionTurn===event.data.turn){task.state='blocked';task.result={verdict:'blocked',summary:`Agent turn ended (${event.data.reason.kind}) without completing its assigned task. Inspect its chat and retry this task.`,findings:[],revision:entry.run.revision};
+    const {item,notify}=recordToolFailure(entry.run,{agent:role.name,taskId:task.id,tool:'agent-turn',identity:'teammate-turn',message:event.data.reason.error?.message??task.result.summary});
+    if(notify)try{entry.root.steer?.({id:randomUUID(),role:'user',source:{kind:'gvs-tool-diagnostics',form:'notice',summary:'A teammate stopped before delivering its task'},content:[{type:'text',text:`GVS AGENT ERROR ${JSON.stringify(item)}. Inspect this agent and preserve the same task. Repair a concrete configuration/protocol issue or retry a transient failure; do not wait for the human to forward errors and do not claim delivery.`}]});}catch{}
+    commit(entry).catch(()=>{});}
   }
  });
  ctx.effect(()=>async()=>{for(const id of owned){const entry=entries.get(id);if(entry?.owner===ctx&&entry.run.status==='running')await suspend(entry).catch(()=>{});}});

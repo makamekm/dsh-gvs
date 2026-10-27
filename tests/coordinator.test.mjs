@@ -20,6 +20,12 @@ test('code planning instructions apply to GVS and its children, preserving ordin
  assert.equal(section.text({scope:{id:'ordinary',session:{header:{agentPreset:'standard'}}}}),'');assert.equal(section.text({}),'');
 });
 
+test('active User testing instructions do not turn editing teammates into the User role',()=>{
+ const f=fixture(),sections=new Map();f.ctx.systemPrompt={section:value=>sections.set(value.name,value)};f.ctx.agentTeams.tryMembership=agent=>agent?.id==='user'?{name:'user',root:f.agent}:agent?.id==='developer'?{name:'developer',root:f.agent}:undefined;apply(f.ctx);
+ const text=sections.get('gvs-user-active-testing').text;
+ assert.match(text({scope:f.agent}),/coordinate|automatic User/);assert.match(text({scope:{id:'user',session:{header:{origin:'subagent'}}}}),/USER IS AN ACTIVE/);assert.equal(text({scope:{id:'developer',session:{header:{origin:'subagent'}}}}),'');assert.equal(text({scope:{id:'ordinary',session:{header:{agentPreset:'standard'}}}}),'');
+});
+
 test('status intent recognizes direct human questions, without hijacking task changes or teammate messages',()=>{
  for(const text of ['какой статус?','Какой сейчас статус?','что сейчас делают агенты?','Статус','ну что там?','How is it going?'])assert.equal(isStatusQuestion(human(text)),true,text);
  for(const text of ['Проверь статус заказа','какой статус? и затем измени код','Сделай кнопку «статус»','После анализа напиши статус','Потом скомпилируй Windows версию'])assert.equal(isStatusQuestion(human(text)),false,text);
