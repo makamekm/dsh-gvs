@@ -163,6 +163,18 @@ test('specialists discover current reusable User IDs and Lead messages without w
  await assert.rejects(f.call('gvs_ask_user',{reuseTaskId:'not-a-decision'},agent),new RegExp('Current reusable IDs: '+start.briefTaskId));
 });
 
+test('explicit decision reuse is honored with status and never creates an approval-of-approval task',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Preserve actual goal and implement',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));await f.call('gvs_agent',{action:'create',name:'editor',title:'Editor',purpose:'Implement',capability:'edit'});const work=await f.call('gvs_task',{action:'create',title:'Bounded source work',instructions:'Implement exact existing requirements',kind:'work',assignee:'editor'}),agent=f.actor('editor'),count=f.tasks.size;
+ const listed=await f.call('gvs_ask_user',{action:'status'},agent);assert.equal(listed.total,1);assert.deepEqual(JSON.parse([...f.files.values()][0]).tasks.find(t=>t.id===work.task.id).consultations,[]);
+ const reused=await f.call('gvs_ask_user',{action:'status',reuseTaskId:start.briefTaskId},agent);assert.equal(reused.reused,true);assert.equal(reused.userTaskId,start.briefTaskId);assert.equal(f.tasks.size,count);assert.deepEqual(JSON.parse([...f.files.values()][0]).tasks.find(t=>t.id===work.task.id).consultations,[start.briefTaskId]);
+ await f.complete(work.task.id,agent);assert.equal(f.tasks.get(work.task.id).status,'completed');await assert.rejects(f.call('gvs_ask_user',{action:'status',reuseTaskId:'invented'},agent),/No assigned running task/);
+});
+
+test('User can read decisions and self-consultation returns direction without permissions, extra tasks or fabricated consultation',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Inspect the real goal',kind:'code'}),user=f.actor('user'),count=f.tasks.size,before=JSON.parse([...f.files.values()][0]);
+ const status=await f.call('gvs_ask_user',{action:'status'},user);assert.equal(status.total,0);const result=await f.call('gvs_ask_user',{action:'ask',question:'May I approve my own goal?'},user);assert.equal(result.status,'self-advocate');assert.equal(result.accepted,false);assert.equal(result.consulted,false);assert.equal(f.tasks.size,count);const after=JSON.parse([...f.files.values()][0]);assert.deepEqual(after.goal,before.goal);assert.equal(after.tasks.find(t=>t.id===start.briefTaskId).state,'running');
+});
+
 test('host API defers tasks, forbids early execution and wakes the same role without duplicating work',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Fix arithmetic',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
  await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Small changes',capability:'edit'});

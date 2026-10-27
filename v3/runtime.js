@@ -247,7 +247,6 @@ export function apply(ctx,config={}){
   const alwaysRead=['read','read_image','glob','grep','working_directory','gvs_status','gvs_artifacts','gvs_diagnostics','gvs_wait'];
   if(!role)return alwaysRead.includes(exec.name)?next():{kind:'deny',reason:'This teammate has no GVS role assignment.'};
   if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause'].includes(exec.name))return {kind:'deny',reason:'This is a coordinator-only operation.'};
-  if(role.capability==='user'&&exec.name==='gvs_ask_user')return {kind:'deny',reason:'The User advocate cannot consult itself.'};
   const writing=writeDenial(entry,membership.name,role,exec);if(writing)return {kind:'deny',reason:writing};
   if(['pwsh','bash','gvs_native_game_check'].includes(exec.name)&&!['edit','verify'].includes(role.capability))return {kind:'deny',reason:'This role has no command execution capability.'};
   if(entry.run.status!=='running'&&!alwaysRead.includes(exec.name))return {kind:'deny',reason:'The run is paused or finished. Ask the coordinator to resume or assign new work.'};
@@ -260,7 +259,6 @@ export function apply(ctx,config={}){
   const basic=['read','read_image','glob','grep','working_directory','gvs_status','gvs_artifacts','gvs_diagnostics','gvs_wait'];
   if(!role)return basic.includes(exec.name)?undefined:'No GVS role is assigned to this teammate.';
   if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause'].includes(exec.name))return 'Only the coordinator may control the run.';
-  if(role.capability==='user'&&exec.name==='gvs_ask_user')return 'The User advocate cannot consult itself.';
   const writing=writeDenial(entry,member.name,role,exec);if(writing)return writing;
   if(['pwsh','bash','gvs_native_game_check'].includes(exec.name)&&!['edit','verify'].includes(role.capability))return 'This role has no command execution capability.';
   if(!entry.run.tasks.some(task=>task.assignee===member.name&&task.state==='running')&&['write','edit','pwsh','bash','gvs_native_game_check','gvs_browser_check','gvs_game_check'].includes(exec.name))return 'No dependency-ready task is assigned. Wait for the scheduler; do not start this work early.';
@@ -458,9 +456,11 @@ export function apply(ctx,config={}){
    catch(error){task.notificationError=clip(error.message,500);await commit(entry);}
    await schedule(entry,exec.signal);return {task};
   });
- register('gvs_ask_user','action:status lists current reusable User decisions and exact task IDs. Reuse a relevant one with reuseTaskId; otherwise ask one consequential unanswered question. Do not ask for repeated readiness/ownership approval or permission.',{action:{type:'string',enum:['status','ask']},offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:20},question:text(2000),context:text(6000),reuseTaskId:text(40)},[],async(args,exec)=>{
-  const {entry,name}=await current(exec);if(name==='lead'||name==='user')throw new Error('This tool is for specialists; the coordinator schedules User tasks.');
-  if(args.action==='status'){const decisions=availableDecisions(entry.run),offset=args.offset??0,limit=args.limit??6;return {decisions:decisions.slice(offset,offset+limit),total:decisions.length,nextOffset:offset+limit<decisions.length?offset+limit:null,next:'Reuse only a decision relevant to your actual question. If none applies, ask one focused unanswered question; do not repeat general readiness audits.'};}
+ register('gvs_ask_user','action:status lists current reusable User decisions. An explicit reuseTaskId requests reuse even with action:status; this binds that actual current decision to your task without creating another consultation. Otherwise ask one consequential unanswered question. Do not ask for repeated readiness/ownership approval or permission.',{action:{type:'string',enum:['status','ask']},offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:20},question:text(2000),context:text(6000),reuseTaskId:text(40)},[],async(args,exec)=>{
+  const {entry,name}=await current(exec);
+  if(args.action==='status'&&!args.reuseTaskId){const decisions=availableDecisions(entry.run),offset=args.offset??0,limit=args.limit??6;return {decisions:decisions.slice(offset,offset+limit),total:decisions.length,nextOffset:offset+limit<decisions.length?offset+limit:null,next:'Reuse only a relevant decision with the exact call {action:"ask",reuseTaskId:<current taskId>}. Listing status alone does not consult. If none applies, ask one focused unanswered question; do not repeat general readiness audits.'};}
+  if(name==='user')return {status:'self-advocate',accepted:false,consulted:false,next:'You ARE the central User. Answer your assigned brief/consultation directly using the human contract and evidence, then complete its actual task ID. Do not consult yourself, create approval tasks, waive requirements or grant human permission.'};
+  if(name==='lead')throw new Error('The coordinator schedules User tasks; it cannot substitute a specialist consultation.');
   const own=entry.run.tasks.find(task=>task.assignee===name&&task.state==='running');if(!own)throw new Error('No assigned running task');
   const key=args.question?consultationKey(args.question,args.context):null;
   const cached=args.reuseTaskId?reusableDecision(entry.run,args.reuseTaskId):entry.run.tasks.find(task=>task.questionKey===key&&reusableDecision(entry.run,task.id));
