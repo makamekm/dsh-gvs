@@ -48,7 +48,7 @@ test('scheduler overlaps independent scoped branches, preserves conflict waits, 
  const f=fixture(),start=await f.call('gvs_run',{task:'Parallel project',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
  for(const [name,capability] of [['ui','edit'],['server','edit'],['qa','verify'],['spare','edit']])await f.call('gvs_agent',{action:'create',name,title:name,purpose:'Independent branch',capability});
  const create=(name,paths,extra={})=>f.call('gvs_task',{action:'create',title:name,instructions:'Bounded isolated work',kind:'work',assignee:name,writeScopes:paths,readScopes:paths,resources:[],...extra});
- const ui=await create('ui',['ui']),server=await create('server',['backend']),qa=await create('qa',['tests/static']);
+ const ui=await create('ui',['ui']),server=await create('server',['backend']),qa=await create('qa',[],{readScopes:['tests/static']});
  assert.equal(ui.task.state,'running');assert.equal(server.task.state,'running');assert.equal(qa.task.state,'running');assert.equal((await f.call('gvs_parallel',{action:'status'})).parallel.active.length,3);
  const overlap=await create('spare',['ui/dialog']);assert.equal(overlap.task.state,'waiting');
  assert.equal((await f.call('gvs_parallel',{action:'status'})).parallel.waiting.find(t=>t.id===overlap.task.id).reason.kind,'resources');
@@ -72,6 +72,47 @@ test('queued ownership/scopes can be corrected without new task IDs; limit and r
  const dependent=await f.call('gvs_task',{action:'create',title:'Join',instructions:'Needs A',kind:'work',assignee:'first',dependsOn:[a.task.id]});assert.equal(dependent.task.state,'waiting');
  await assert.rejects(f.call('gvs_parallel',{action:'configure',maxParallel:8},f.actor('second')),/Only the coordinator/);
  await f.call('gvs_pause');await f.call('gvs_parallel',{action:'configure',maxParallel:4});assert.equal((await f.call('gvs_status')).status,'paused');
+});
+test('verify can write its leased evidence in both native guards, but cannot edit product sources or another report',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Independent QA reports',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'qa',title:'QA',purpose:'Independent verification',capability:'verify'});
+ await assert.rejects(f.call('gvs_task',{action:'create',title:'Illegal QA edit',instructions:'Check',kind:'work',assignee:'qa',writeScopes:['src']}),/Verify writeScopes/);
+ await f.call('gvs_task',{action:'create',title:'Evidence',instructions:'Write exact findings',kind:'work',assignee:'qa',readScopes:['src'],writeScopes:['artifacts/qa-report','dist'],resources:[]});
+ f.definitions.set('write',{execute:async()=>({ok:true})});const actor=f.actor('qa'),cwd=path.resolve('work/in-memory-fixture'),target=path.join(cwd,'artifacts/qa-report/handoff.md');
+ const exec={agent:actor,name:'write',arguments:{file_path:target},signal:new AbortController().signal};
+ assert.equal((await f.hooks['tools/pre-execute'](exec,async()=>({kind:'allow'}))).kind,'allow');assert.equal((await f.call('write',exec.arguments,actor)).ok,true);
+ for(const file of ['src/app.js','scripts/analyzer.mjs','dist/forged.html','artifacts/other/handoff.md','../outside.md']){
+  const denied={...exec,arguments:{file_path:path.resolve(cwd,file)}};
+  assert.equal((await f.hooks['tools/pre-execute'](denied,async()=>({kind:'allow'}))).kind,'deny');await assert.rejects(f.call('write',denied.arguments,actor),/Verification may write/);
+ }
+ f.hooks['tools/result'](exec,{isError:false});assert.equal((await f.call('gvs_status')).progress.writes,0,'Report output is not production delivery');
+ await f.call('gvs_pause');await assert.rejects(f.call('write',exec.arguments,actor),/paused|dependency-ready/);
+});
+test('a stale retry/update reports an advanced task without duplicating work or silently applying changes',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Avoid lifecycle races',kind:'code'}),before=await f.call('gvs_task',{action:'list',taskId:start.briefTaskId}),count=f.tasks.size,sent=f.sent.length;
+ const running=await f.call('gvs_task',{action:'retry',taskId:start.briefTaskId,instructions:'Must not replace live work',dependsOn:['not-real']});assert.equal(running.status,'already-running');assert.equal(running.retried,false);assert.equal(f.sent.length,sent);
+ await f.complete(start.briefTaskId,f.actor('user'));
+ const done=await f.call('gvs_task',{action:'retry',taskId:start.briefTaskId});assert.equal(done.status,'already-completed');
+ const update=await f.call('gvs_task',{action:'update',taskId:start.briefTaskId,title:'Must not overwrite accepted result',reason:'The task completed after the stale status read'});assert.equal(update.updated,false);assert.equal(update.status,'already-completed');assert.equal(update.task.title,before.tasks[0].title);assert.equal(f.tasks.size,count);
+ await assert.rejects(f.call('gvs_task',{action:'dependencies',taskId:start.briefTaskId,dependsOn:[]}),/blocked or waiting/);
+ await assert.rejects(f.call('gvs_task',{action:'retry',taskId:'not-real'}),/Unknown task/);
+ await assert.rejects(f.call('gvs_task',{action:'update',taskId:start.briefTaskId,title:'No reason'}),/concrete reason/);
+});
+test('UI reviews wait for actual preview readiness while isolated source work continues, then wake automatically',async()=>{
+ const {createServer}=await import('node:http');let healthy=false;
+ const server=createServer((_req,res)=>{res.statusCode=healthy?200:503;res.end('preview fixture');});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ try{
+  const f=fixture(),start=await f.call('gvs_run',{task:'Restore a real UI preview',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
+  for(const [name,capability] of [['visual','verify'],['source','verify'],['backend','edit']])await f.call('gvs_agent',{action:'create',name,title:name,purpose:'Independent work',capability});
+  const state=JSON.parse([...f.files.values()][0]);state.preview={url:`http://127.0.0.1:${server.address().port}/`,jobId:'preview-fixture'};for(const key of f.files.keys())f.files.set(key,JSON.stringify(state));
+  f.ctx.jobs.get=()=>({status:'running'});f.ctx.jobs.read=()=>({chunks:[{channel:'stderr',text:'Preview still starting'}]});
+  const fresh=await import(`../v3/runtime.js?preview=${randomUUID()}`);fresh.apply(f.ctx);
+  const visual=await f.call('gvs_task',{action:'create',title:'Visual QA',instructions:'Actual screenshots',kind:'review',assignee:'visual',scope:'increment',analysisIds:[],readScopes:['src'],writeScopes:['artifacts/visual'],resources:[]});
+  assert.equal(visual.task.state,'waiting');assert.equal((await f.call('gvs_parallel',{action:'status'})).parallel.waiting[0].reason.kind,'preview-not-ready');assert.equal(f.sent.filter(m=>m.target==='visual').length,0);
+  const source=await f.call('gvs_task',{action:'create',title:'Native source',instructions:'Static ABI',kind:'review',assignee:'source',scope:'increment',analysisIds:[],reviewFocus:'source',readScopes:['native'],resources:[]});assert.equal(source.task.state,'running');
+  const backend=await f.call('gvs_task',{action:'create',title:'Backend',instructions:'Isolated module',kind:'work',assignee:'backend',readScopes:['backend'],writeScopes:['backend'],resources:[]});assert.equal(backend.task.state,'running');
+  healthy=true;const preview=await f.call('gvs_preview',{action:'status'});assert.equal(preview.ready,true);assert.equal((await f.call('gvs_task',{action:'list',taskId:visual.task.id})).tasks[0].state,'running');assert.equal(f.sent.filter(m=>m.target==='visual').length,1);
+ }finally{await new Promise(resolve=>server.close(resolve));}
 });
 
 test('one recorded User decision is reused across roles and later tasks without a consultation storm',async()=>{
@@ -240,6 +281,14 @@ test('conditional runtime evidence comes from a finished foreground command and 
  const status=await f.call('gvs_analysis',{action:'status'});assert.equal(status.ready,false);assert.equal(status.reports.length,1);
  actor.ctx.tools.execute=async()=>({isError:false,value:{kind:'background',jobId:'pending'}});
  await assert.rejects(f.call('gvs_analysis',{action:'check',command:'node latency.mjs'},actor),/foreground/);
+});
+test('failed analysis preserves the real assertion and cannot manufacture accepted evidence',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Measure latency',kind:'code'});
+ await f.call('gvs_analysis',{action:'plan',rationale:'Actual runtime measurement',requirements:[{id:'latency',criterion:'Within budget',reason:'Runtime target',method:'runtime'}]},f.actor('user'));await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'qa',title:'QA',purpose:'Measure',capability:'verify'});await f.call('gvs_task',{action:'create',title:'Runtime',instructions:'Actual runner',kind:'work',assignee:'qa'});
+ const actor=f.actor('qa');actor.ctx.tools={execute:async()=>({isError:false,value:{kind:'foreground',exitCode:1,stdout:{text:''},stderr:{text:'AssertionError: Settings must return keyboard focus to its trigger'}}})};
+ await assert.rejects(f.call('gvs_analysis',{action:'check',command:'node actual-runner.mjs'},actor),error=>/exit 1/.test(error.message)&&/Settings must return keyboard focus/.test(error.message)&&/No analysis evidence accepted/.test(error.message));
+ assert.equal((await f.call('gvs_analysis',{action:'status'})).reports.length,0);
 });
 
 test('motion checker rejects out-of-workspace captures and repeated copies of one static image',async()=>{

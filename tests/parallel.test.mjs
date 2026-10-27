@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';import path from 'node:path';
-import {normalizeScopes,taskAccess,taskConflict,parallelBlocker,writeAllowed} from '../v3/parallel.js';
+import {normalizeScopes,taskAccess,taskConflict,parallelBlocker,writeAllowed,validateWriteScopes,evidencePath} from '../v3/parallel.js';
 const run=()=>({status:'running',roles:[{name:'ui',capability:'edit'},{name:'server',capability:'edit'},{name:'qa',capability:'verify'},{name:'user',capability:'user'}],tasks:[]});
 const task=(id,assignee,extra={})=>({id,assignee,state:'waiting',kind:'work',dependsOn:[],...extra});
 test('scope leases distinguish path boundaries, case/separators and shared read inputs',()=>{
@@ -23,4 +23,12 @@ test('exclusive environments, same-agent work, capacity and real dependencies ex
  assert.equal(parallelBlocker(r,{...other,resources:[]},1).kind,'parallel-limit');assert.equal(parallelBlocker(r,{...other,assignee:'ui'}).kind,'agent-busy');
  assert.equal(parallelBlocker(r,{...other,dependsOn:['one']}).kind,'dependencies');
  r.status='paused';assert.equal(parallelBlocker(r,other).kind,'run-stopped');
+});
+test('QA evidence and generated outputs participate in leases without granting product write access',()=>{
+ const r=run(),qa=task('a','qa',{writeScopes:['artifacts/runtime-a','dist','node_modules/.cache'],readScopes:['src'],resources:[]});
+ assert.deepEqual(taskAccess(r,qa).writes,['artifacts/runtime-a','dist','node_modules/.cache']);validateWriteScopes({capability:'verify'},qa.writeScopes);
+ for(const scope of ['src','scripts/analyzer.mjs','backend','*','artifacts','node_modules/react'])assert.throws(()=>validateWriteScopes({capability:'verify'},[scope]));
+ const reader=task('b','server',{writeScopes:['backend'],readScopes:['artifacts/runtime-a/handoff.md'],resources:[]});assert.ok(taskConflict(r,qa,reader));
+ const independent={...reader,readScopes:['backend']};assert.equal(taskConflict(r,qa,independent),null);
+ const cwd=path.resolve('fixture');assert.equal(evidencePath(path.join(cwd,'artifacts/runtime-a/handoff.md'),cwd),true);assert.equal(evidencePath('../artifacts/outside',cwd),false);assert.equal(evidencePath('src/app.js',cwd),false);
 });

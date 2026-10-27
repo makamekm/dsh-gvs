@@ -1,3 +1,4 @@
+export function needsPreview(run,task){return !!(run.visualRequired&&run.preview?.url&&task.reviewFocus!=='source'&&['review','design-review','game-review','user-review'].includes(task.kind));}
 export async function previewState(preview,jobs,owner,signal,fetcher=fetch,readOutput=false){
  if(!preview?.url||!preview.jobId)return {status:'not-running',ready:false};
  let job;try{job=jobs.get(preview.jobId,owner);}catch{return {url:preview.url,jobId:preview.jobId,status:'not-running',ready:false};}

@@ -3,13 +3,13 @@ import {randomUUID,createHash} from 'node:crypto';
 import {clip,roleSpec,readyTasks,assertDag,view,quality,kinds,taskKinds,parseGameReport,imageAcceptance} from './domain.js';
 import {captureBrowser,captureGame,previewURL} from './browser.js';
 import {COMMON,USER,GAME} from './prompts.js';
-import {motionHint,analysisPlan,parseAnalysisReport,analysisReady,analysisAcceptance} from './analysis.js';
+import {motionHint,analysisPlan,parseAnalysisReport,analysisReady,analysisAcceptance,decodeAnalysisRunner} from './analysis.js';
 import {syncGoal,planGoal,linkGoal,recordFindings,goalStatus,resolvedBlocker} from './goal.js';
 import {refreshRevision} from './revision.js';
 import {decisionKey,reusableDecision,consultationKey,progressStatus,modelResult} from './flow.js';
-import {previewState} from './preview.js';
+import {previewState,needsPreview} from './preview.js';
 import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus} from './visual.js';
-import {parallelFields,parallelBlocker,parallelStatus,taskAccess,writeAllowed} from './parallel.js';
+import {parallelFields,parallelBlocker,parallelStatus,taskAccess,writeAllowed,validateWriteScopes,evidencePath} from './parallel.js';
 import {assignmentDelivery} from './delivery.js';
 
 export const inject=['tools','agentTeams','subagents','fs','workingDirectory','sandboxPolicy','attachments','llm','jobs','sessionProjections'];
@@ -115,6 +115,7 @@ export function apply(ctx,config={}){
   if(['user-review','brief','consultation'].includes(input.kind)&&input.assignee!=='user')throw new Error('User decisions belong to the central User role.');
   const scope=reviewPlan(entry.run,input);
   const access=parallelFields(input);
+  validateWriteScopes(role,access.writeScopes);
   const native=await ctx.agentTeams.createTask(entry.root,{subject:clip(input.title,180),description:clip(input.instructions,15000),blockedBy:dependsOn,writeScopes:access.writeScopes??[]});
   const inherited=entry.run.tasks.filter(task=>task.assignee===input.assignee).flatMap(task=>task.consultations??[]).filter(id=>reusableDecision(entry.run,id));
   const task={id:native.id,title:clip(input.title,180),instructions:clip(input.instructions,15000),assignee:input.assignee,kind:input.kind,dependsOn,state:'waiting',receivedImages:[],consultations:[...new Set(inherited)],priority:input.priority??0,...scope,...access};
@@ -125,7 +126,9 @@ export function apply(ctx,config={}){
   if(entry.scheduling)return entry.scheduling;
   entry.scheduling=(async()=>{
    if(entry.run.status!=='running')return;
-   for(const task of readyTasks(entry.run).sort((a,b)=>(b.priority??0)-(a.priority??0))){
+   const ready=readyTasks(entry.run).sort((a,b)=>(b.priority??0)-(a.priority??0));
+   if(ready.some(task=>needsPreview(entry.run,task))){const observed=await previewState(entry.run.preview,ctx.jobs,entry.root.id,signal);entry.run.preview.ready=observed.ready;await commit(entry);}
+   for(const task of ready){
     if(entry.abort.signal.aborted||signal.aborted)break;
     const role=roleOf(entry,task.assignee);
     if(role.capability==='edit'&&!goalStatus(entry.run).discoveryReady)continue;
@@ -144,7 +147,8 @@ export function apply(ctx,config={}){
     const flow=`PARALLEL ACCESS CONTRACT: ${JSON.stringify(taskAccess(entry.run,task))}. Edit only leased write paths. Shell commands must obey the same contract; leases coordinate agents and are not OS isolation. Do not mutate shared servers/databases, run dependency installs/shared builds or overwrite another task's artifacts without the named exclusive resource (project-runtime for the common preview/build/test environment). Use task-specific artifacts and isolated checks for parallel work. Ask Lead to update a queued task's scopes/resources before an undeclared operation. Full final reviews read the whole frozen source; scoped increment results never replace integration acceptance.\nDELIVER AN INCREMENT, NOT A PLANNING LOOP. Review scope: ${task.scope??'full'}, analysisIds: ${JSON.stringify(task.analysisIds??'ALL')}. An increment pass attests only this slice/selected criteria and NEVER full-goal acceptance. [] allows only a static slice, not a motion acceptance claim. Established User decisions for this role: ${JSON.stringify(task.consultations)}. Reuse a current decision with gvs_ask_user reuseTaskId; consult only for an actual consequential unknown, never to approve the same scope again. Read a dependency's exact assignment/result with gvs_task list taskId when needed; summaries above are not a claim that you read the whole evidence. For implementation, produce a coherent runnable slice with a real build/render check, normally within 20 minutes. If this assignment is too broad, message Lead with the completed slice and remaining work so it can be split without dropping requirements. Do not expand an in-progress mobile fix into every backend/product feature or postpone all product work until universal readiness. Independent final acceptance remains mandatory.`;
     const fallback=`${COMMON}\n${role.capability==='user'?USER:role.instructions}\n${entry.run.kind.startsWith('game')?GAME:''}\nASSIGNED TASK ID: ${task.id}\nTASK NONCE: ${task.nonce}\nROLE: ${role.title}\nKIND: ${task.kind}\nWORK: ${task.instructions}\n${flow}\nThe complete human goal is unchanged. First read gvs_goal status, then gvs_task list taskId=${task.id}; inspect dependency IDs ${JSON.stringify(task.dependsOn)} and relevant evidence via their paged tools. Finish only with gvs_task complete for this exact ID/nonce. PREVIEW: ${JSON.stringify(entry.run.preview)}`;
     const focusPrompt=task.reviewFocus==='source'?'COORDINATOR-ASSIGNED SOURCE-ONLY INCREMENT: inspect actual source/native ABI/security policy and run exact appropriate successful checks. No visualReview/screenshots are required for THIS source task; do not fabricate them. This pass does not attest UI, runtime-only behavior, design/User acceptance or the full human goal. Any such unresolved obligations remain open.':'';
-    const delivery=assignmentDelivery(flow+'\n'+contract+'\n'+prompt+'\n'+focusPrompt,images,focusPrompt+'\n'+fallback);task.receivedImages=delivery.images.map(image=>image.attachment.attachmentId);task.compactAssignment=delivery.compact;
+    const reportPrompt=role.capability==='verify'?'VERIFY OUTPUTS: direct write/edit is allowed only for reports/evidence in your explicitly leased artifacts/, test-results/ or playwright-report/ paths. Keep production sources and analyzer scripts read-only. Generated build/cache leases are for actual checks, never fabricated product output. If no report path is leased, return structured findings via gvs_task complete or ask Lead for a precise report task; do not bypass scope restrictions with shell writes. Analysis failures report the real exit/stderr cause; never weaken tests or invent a success report.':'';
+    const delivery=assignmentDelivery(flow+'\n'+contract+'\n'+prompt+'\n'+focusPrompt+'\n'+reportPrompt,images,focusPrompt+'\n'+reportPrompt+'\n'+fallback);task.receivedImages=delivery.images.map(image=>image.attachment.attachmentId);task.compactAssignment=delivery.compact;
     try{await ctx.agentTeams.sendMessage(entry.root,{target:role.name,content:delivery.content,signal});}
     catch(error){task.state='blocked';task.result={verdict:'blocked',summary:clip(error.message),findings:[clip(error.message)],deliveryError:true,revision:entry.run.revision};}
     await commit(entry);
@@ -156,6 +160,17 @@ export function apply(ctx,config={}){
    output:{schema:{},presentationMeta:(_args,value)=>({gvsTeam:value.gvsTeam??null}),render:(_args,value)=>[{type:'text',text:JSON.stringify(modelResult(value))},...imageParts(value.images??[])]},
    async execute(args,exec){const value=await execute(args,exec);const info=await current(exec,false);return JSON.parse(JSON.stringify({...value,...(info.entry?{gvsTeam:view(info.entry.run)}:{})}));}});
  }
+ function writeDenial(entry,name,role,exec){
+  if(!['write','edit'].includes(exec.name))return;
+  const task=entry.run.tasks.find(task=>task.assignee===name&&task.state==='running'),target=exec.arguments?.file_path??exec.arguments?.path;
+  if(!task)return 'No dependency-ready task is assigned. Wait for the scheduler.';
+  if(role.capability==='verify'){
+   if(target&&evidencePath(target,entry.io.cwd)&&writeAllowed({...task,writeScopes:task.writeScopes??[]},target,entry.io.cwd))return;
+   return 'Verification may write/edit only reports or evidence inside explicitly assigned artifacts/, test-results/ or playwright-report/ scopes. Product sources remain read-only; ask Lead for a precise report lease.';
+  }
+  if(role.capability!=='edit')return 'This role may not edit project files.';
+  if(!target||!writeAllowed(task,target,entry.io.cwd))return 'The file is outside this task writeScopes. Ask Lead to schedule a separate scoped task; do not modify another parallel branch.';
+ }
  ctx.on('tools/pre-execute',async(exec,next)=>{
   if(!exec.agent)return next();const membership=ctx.agentTeams.tryMembership(exec.agent);if(!membership||membership.role==='lead')return next();
   const entry=await load(membership.root,exec.signal),role=entry&&roleOf(entry,membership.name);
@@ -163,7 +178,7 @@ export function apply(ctx,config={}){
   if(!role)return alwaysRead.includes(exec.name)?next():{kind:'deny',reason:'This teammate has no GVS role assignment.'};
   if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause'].includes(exec.name))return {kind:'deny',reason:'This is a coordinator-only operation.'};
   if(role.capability==='user'&&exec.name==='gvs_ask_user')return {kind:'deny',reason:'The User advocate cannot consult itself.'};
-  if(['write','edit'].includes(exec.name)&&role.capability!=='edit')return {kind:'deny',reason:'This role may not edit project files.'};
+  const writing=writeDenial(entry,membership.name,role,exec);if(writing)return {kind:'deny',reason:writing};
   if(['pwsh','bash','gvs_native_game_check'].includes(exec.name)&&!['edit','verify'].includes(role.capability))return {kind:'deny',reason:'This role has no command execution capability.'};
   if(entry.run.status!=='running'&&!alwaysRead.includes(exec.name))return {kind:'deny',reason:'The run is paused or finished. Ask the coordinator to resume or assign new work.'};
   return next();
@@ -176,11 +191,7 @@ export function apply(ctx,config={}){
   if(!role)return basic.includes(exec.name)?undefined:'No GVS role is assigned to this teammate.';
   if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause'].includes(exec.name))return 'Only the coordinator may control the run.';
   if(role.capability==='user'&&exec.name==='gvs_ask_user')return 'The User advocate cannot consult itself.';
-  if(['write','edit'].includes(exec.name)&&role.capability!=='edit')return 'This role may not edit project files.';
-  if(['write','edit'].includes(exec.name)&&role.capability==='edit'){
-   const task=entry.run.tasks.find(task=>task.assignee===member.name&&task.state==='running'),target=exec.arguments?.file_path??exec.arguments?.path;
-   if(task&&(!target||!writeAllowed(task,target,entry.io.cwd)))return 'The file is outside this task writeScopes. Ask Lead to schedule a separate scoped task; do not modify another parallel branch.';
-  }
+  const writing=writeDenial(entry,member.name,role,exec);if(writing)return writing;
   if(['pwsh','bash','gvs_native_game_check'].includes(exec.name)&&!['edit','verify'].includes(role.capability))return 'This role has no command execution capability.';
   if(!entry.run.tasks.some(task=>task.assignee===member.name&&task.state==='running')&&['write','edit','pwsh','bash','gvs_native_game_check','gvs_browser_check','gvs_game_check'].includes(exec.name))return 'No dependency-ready task is assigned. Wait for the scheduler; do not start this work early.';
   if(entry.run.status!=='running'&&!basic.includes(exec.name))return 'The run is paused or finished.';
@@ -190,7 +201,7 @@ export function apply(ctx,config={}){
   const role=roleOf(entry,member.name),task=entry.run.tasks.find(task=>task.assignee===member.name&&task.state==='running');
   if(['write','edit'].includes(exec.name)&&!result.isError){
    const file=exec.arguments?.file_path??exec.arguments?.path??'';
-   if(file&&!/[\\/](?:\.gvs|artifacts|test-results|node_modules)[\\/]/.test(file)){
+   if(role?.capability==='edit'&&file&&!/(^|[\\/])(?:\.gvs|artifacts|test-results|playwright-report|node_modules)[\\/]/.test(file)){
     entry.run.progress??={startedAt:Date.now()};Object.assign(entry.run.progress,{lastWriteAt:Date.now(),lastWriteFile:file,writes:(entry.run.progress.writes??0)+1,metadataSinceWrite:0});
    }
   }
@@ -198,7 +209,7 @@ export function apply(ctx,config={}){
   const value=result.value;
   entry.run.checks.push({taskId:task?.id??null,agent:member.name,command:clip(exec.arguments?.command,5000),exitCode:value?.exitCode??null,
    finished:value?.kind==='foreground'&&value?.signal==null&&!value?.timedOut&&!value?.aborted,error:result.isError,
-   output:clip(value?.stdout?.text??result.content?.filter(part=>part.type==='text').map(part=>part.text).join('\n'),12000)});
+   output:clip([value?.stdout?.text,value?.stderr?.text].filter(Boolean).join('\n')||result.content?.filter(part=>part.type==='text').map(part=>part.text).join('\n'),12000)});
   entry.run.checks=entry.run.checks.slice(-120);
  });
  register('gvs_run','Start an adaptive GVS team run. Returns immediately; then create only needed specialists and dependency tasks, coordinate results, and call gvs_finish. Named teammates persist and wake for later tasks.',{task:text(16000),kind:{type:'string',enum:kinds},engine:text(100),viewports:{type:'array',items:{type:'string',enum:['desktop','mobile']},minItems:1,maxItems:2}},['task','kind'],async(args,exec)=>{
@@ -257,7 +268,9 @@ export function apply(ctx,config={}){
    if(args.action==='create'){lead(member);return {task:await createTask(entry,args,exec.signal)};}
    if(args.action==='update'){
     lead(member);const task=entry.run.tasks.find(task=>task.id===args.taskId);
-    if(!task||!['waiting','running','blocked'].includes(task.state)||!args.reason?.trim())throw new Error('Update an outstanding task with the concrete reason; preserve remaining requirements in owned follow-up tasks.');
+    if(!task||!args.reason?.trim())throw new Error('Update an outstanding task with the concrete reason; preserve remaining requirements in owned follow-up tasks.');
+    if(task.state==='done')return {status:'already-completed',updated:false,task:taskSummaries([task],true)[0],next:'No changes were applied to the completed task. Preserve its result; create a linked follow-up for actual remaining work.'};
+    if(!['waiting','running','blocked'].includes(task.state))throw new Error('Update only an outstanding task.');
     const access=parallelFields(args),reassign=args.assignee&&args.assignee!==task.assignee;
     if((Object.keys(access).length||reassign)&&task.state==='running')throw new Error('Do not change the owner/access lease of a running task. Finish its slice first; reassign/scope queued or blocked follow-ups.');
     if(reassign){
@@ -265,6 +278,7 @@ export function apply(ctx,config={}){
      if(!role?.sessionId||role.retired||['review','game-review'].includes(task.kind)&&role.capability!=='verify'||task.kind==='discovery'&&!['read','verify'].includes(role.capability)||task.kind==='design-review'&&role.capability==='edit'||['user-review','brief','consultation'].includes(task.kind)&&role.name!=='user')throw new Error('Reassign to a registered, suitable independent role; User decisions stay with user.');
     }
     const scope=args.scope||args.reviewFocus?reviewPlan(entry.run,{...task,...args}):{};
+    validateWriteScopes(roleOf(entry,reassign?args.assignee:task.assignee),access.writeScopes??task.writeScopes);
     if(task.state==='running'&&JSON.stringify(taskAccess(entry.run,task))!==JSON.stringify(taskAccess(entry.run,{...task,...scope})))throw new Error('Changing review scope would change a running access lease. Finish the existing slice and scope a queued follow-up.');
     if(args.writeScopes!==undefined){const native=ctx.agentTeams.getTask(entry.root,task.id);await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'edit',writeScopes:access.writeScopes});}
     Object.assign(task,scope,access);if(reassign){task.assignee=args.assignee;task.consultations=[];}
@@ -274,7 +288,10 @@ export function apply(ctx,config={}){
     await schedule(entry,exec.signal);return {task:taskSummaries([task],true)[0]};
    }
    if(['retry','dependencies'].includes(args.action)){
-    lead(member);const task=entry.run.tasks.find(task=>task.id===args.taskId);if(!task||!['blocked','waiting'].includes(task.state))throw new Error('Retry/change dependencies only for blocked or waiting tasks.');
+    lead(member);const task=entry.run.tasks.find(task=>task.id===args.taskId);
+    if(!task)throw new Error('Unknown task. Retry/change dependencies only for an existing task.');
+    if(args.action==='retry'&&['running','done'].includes(task.state))return {status:task.state==='running'?'already-running':'already-completed',retried:false,task:taskSummaries([task],true)[0],next:'The existing task already advanced; no duplicate assignment or requested instruction/dependency changes were applied. Read its current result; create a follow-up only for new work.'};
+    if(!['blocked','waiting'].includes(task.state))throw new Error('Retry/change dependencies only for blocked or waiting tasks.');
     if(args.instructions)task.instructions=args.instructions;
     if(args.dependsOn){assertDag(entry.run.tasks.map(item=>item.id===task.id?{...item,dependsOn:args.dependsOn}:item));const native=ctx.agentTeams.getTask(entry.root,task.id);await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'set_dependencies',blockedBy:args.dependsOn});task.dependsOn=args.dependsOn;}
     if(args.action==='retry'){const native=ctx.agentTeams.getTask(entry.root,task.id);if(['in_progress','completed'].includes(native.status))await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:native.status==='completed'?'reopen':'release'});task.state='waiting';delete task.result;}
@@ -369,10 +386,9 @@ export function apply(ctx,config={}){
   const revision=entry.run.revision,planVersion=entry.run.analysis.version;
   if(entry.run.analysis.requirements.some(item=>item.method==='rendered-sequence'))await vision(exec);
   const result=await exec.agent.ctx.tools.execute({callId:randomUUID(),agent:exec.agent,signal:exec.signal,name:process.platform==='win32'?'pwsh':'bash',arguments:{description:'Run task-specific real runtime/render analysis',command:args.command,workdir:entry.io.cwd,timeoutMs:120000}});
-  if(result.value?.kind!=='foreground')throw new Error('Analysis must finish in foreground.');
-  const stdout=result.value.stdout?.text??'',marker='GVS_ANALYSIS_RESULT:',offset=stdout.lastIndexOf(marker);if(offset<0)throw new Error('Runner must print final GVS_ANALYSIS_RESULT: followed by gvs.analysis/1 JSON.');
-  const report={...parseAnalysisReport(JSON.parse(stdout.slice(offset+marker.length).trim()),entry.run.analysis,entry.run.viewports),id:`analysis-${randomUUID()}`,revision,planVersion,capturedBy:name,taskId:own.id,command:args.command,images:[],frameSummary:[]};
-  report.ok=report.ok&&!result.isError&&result.value.exitCode===0;
+  const decoded=decodeAnalysisRunner(result);
+  const report={...parseAnalysisReport(decoded.raw,entry.run.analysis,entry.run.viewports),id:`analysis-${randomUUID()}`,revision,planVersion,capturedBy:name,taskId:own.id,command:args.command,images:[],frameSummary:[]};
+  report.ok=report.ok&&decoded.ok;
   let capturedBytes=0;
   for(const analysis of report.results){
    if(entry.run.analysis.requirements.find(item=>item.id===analysis.id).method!=='rendered-sequence')continue;
@@ -465,6 +481,11 @@ export function apply(ctx,config={}){
   const {member,entry}=await current(exec);lead(member);entry.abort=new AbortController();entry.run.status='running';entry.suspending=false;delete entry.run.suspended;
   const recovered=await restoreTasks(entry,exec.signal);return {status:entry.run.status,recovered};
  });
+ async function previewObserved(entry,observed,signal){
+  if(entry.run.preview){entry.run.preview.ready=observed.ready;await commit(entry);}
+  if(observed.ready)await schedule(entry,signal);
+  return observed;
+ }
  register('gvs_preview','Start, inspect or stop this team’s managed local dev server. Use the existing project command and free port; the coordinator owns it across agent tasks.',{action:{type:'string',enum:['start','status','stop']},command:text(4000),port:{type:'integer',minimum:1024,maximum:65535}},['action'],async(args,exec)=>{
   const {entry}=await current(exec),jobs=ctx.jobs;
   const previewMember=ctx.agentTeams.membership(exec.agent);
@@ -472,23 +493,24 @@ export function apply(ctx,config={}){
    const task=entry.run.tasks.find(task=>task.assignee===previewMember.name&&task.state==='running');
    if(!task||!taskAccess(entry.run,task).resources.includes('project-runtime'))throw new Error('Preview startup/stop needs the exclusive project-runtime lease. Ask Lead; do not restart another parallel task’s environment.');
   }
-  if(args.action==='status')return previewState(entry.run.preview,jobs,entry.root.id,exec.signal,fetch,true);
-  if(args.action==='stop'){if(!entry.run.preview?.jobId)return {status:'not-running'};const id=entry.run.preview.jobId;jobs.kill(id,entry.root.id,'Stop GVS preview');const settled=await jobs.wait(id,5000,entry.root.id,exec.signal);return {status:settled.status,jobId:id};}
+  if(args.action==='status')return previewObserved(entry,await previewState(entry.run.preview,jobs,entry.root.id,exec.signal,fetch,true),exec.signal);
+  if(args.action==='stop'){if(!entry.run.preview?.jobId)return {status:'not-running'};const id=entry.run.preview.jobId;jobs.kill(id,entry.root.id,'Stop GVS preview');const settled=await jobs.wait(id,5000,entry.root.id,exec.signal);entry.run.preview.ready=false;await commit(entry);return {status:settled.status,jobId:id};}
   const membership=ctx.agentTeams.membership(exec.agent),role=roleOf(entry,membership.name);
   if(membership.role!=='lead'&&!['edit','verify'].includes(role?.capability))throw new Error('Ask the coordinator to start the preview; this role cannot execute startup commands.');
   const port=args.port??4173,url=previewURL(`http://127.0.0.1:${port}/`).href;
-  try{const old=jobs.get(entry.run.preview?.jobId,entry.root.id);if(['running','stopping'].includes(old.status))return previewState(entry.run.preview,jobs,entry.root.id,exec.signal,fetch,true);}catch{}
+  let old;try{old=jobs.get(entry.run.preview?.jobId,entry.root.id);}catch{}
+  if(old&&['running','stopping'].includes(old.status))return previewObserved(entry,await previewState(entry.run.preview,jobs,entry.root.id,exec.signal,fetch,true),exec.signal);
   if(!args.command)throw new Error('Provide the project preview command.');
   let occupied=false;try{const res=await fetch(url,{signal:AbortSignal.timeout(700)});await res.body?.cancel();occupied=true;}catch{}if(occupied)throw new Error('This port already responds; inspect it explicitly or use a free port.');
   const result=await entry.root.ctx.tools.execute({callId:randomUUID(),agent:entry.root,signal:exec.signal,name:process.platform==='win32'?'pwsh':'bash',arguments:{description:'Start GVS project preview',command:args.command,workdir:entry.io.cwd,run_in_background:true}});
   if(result.isError||!result.value?.jobId)throw new Error('Preview could not start as a managed job.');entry.run.preview={url,jobId:result.value.jobId};await commit(entry);
   for(let i=0;i<40;i++){
    exec.signal.throwIfAborted();const observed=await previewState(entry.run.preview,jobs,entry.root.id,exec.signal);
-   if(observed.ready)return observed;
-   if(observed.status==='failed')return previewState(entry.run.preview,jobs,entry.root.id,exec.signal,fetch,true);
+   if(observed.ready)return previewObserved(entry,observed,exec.signal);
+   if(observed.status==='failed')return previewObserved(entry,await previewState(entry.run.preview,jobs,entry.root.id,exec.signal,fetch,true),exec.signal);
    await new Promise(resolve=>setTimeout(resolve,400));
   }
-  return previewState(entry.run.preview,jobs,entry.root.id,exec.signal,fetch,true);
+  return previewObserved(entry,await previewState(entry.run.preview,jobs,entry.root.id,exec.signal,fetch,true),exec.signal);
  },60000);
  async function vision(exec){const route=exec.agent.session.requestHeader()?.config??exec.agent.options;const info=await ctx.llm.resolveModelInfo(route.provider,route.model,exec.signal);if(!info.inputModalities?.includes('image'))throw new Error('Choose an image-capable model for visual acceptance.');}
  const action={...object({kind:text(30),role:text(50),name:text(180),label:text(180),testId:text(100),state:text(30),value:{type:['string','number','boolean']},key:text(60),frames:{type:'integer',minimum:1,maximum:600},scenario:text(100),x:{type:'number'},y:{type:'number'},click:{type:'boolean'},path:text(200),op:{type:'string',enum:['eq','gt','gte','lt','lte','near']},tolerance:{type:'number',minimum:0},category:{type:'string',enum:['collision','gameplay','controls','camera']}}),required:['kind']};

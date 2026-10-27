@@ -1,3 +1,14 @@
+export function decodeAnalysisRunner(result){
+ const value=result.value,stdout=value?.stdout?.text??'',stderr=value?.stderr?.text??'';
+ const detail=(stderr||stdout||result.content?.filter(part=>part.type==='text').map(part=>part.text).join('\n')||'No process output.').slice(-3000);
+ if(value?.kind!=='foreground')throw new Error(`Analysis must finish in foreground.${result.isError?' Execution failed: '+detail:''}`);
+ const ok=!result.isError&&value.exitCode===0&&!value.timedOut&&!value.aborted&&value.signal==null;
+ const status=`exit ${value.exitCode??'unknown'}${value.timedOut?', timed out':''}${value.aborted?', aborted':''}${value.signal?', signal '+value.signal:''}`;
+ const marker='GVS_ANALYSIS_RESULT:',offset=stdout.lastIndexOf(marker);
+ if(offset<0)throw new Error(`Analysis runner ${ok?'finished without its required report':'failed'} (${status}).\n${detail}\nNo analysis evidence accepted. Runner must print final GVS_ANALYSIS_RESULT: followed by gvs.analysis/1 JSON. Inspect the actual failed assertion/runtime cause; do not fabricate a success report or weaken the test.`);
+ let raw;try{raw=JSON.parse(stdout.slice(offset+marker.length).trim());}catch(error){throw new Error(`Malformed final GVS_ANALYSIS_RESULT JSON (${status}): ${error.message}\n${detail}\nNo analysis evidence accepted.`);}
+ return {raw,ok};
+}
 export function motionHint(task){return /плавн|рывк|ступенчат|параллакс|анимац|д[её]рг|дискретн|фриз|smooth|stutter|jitter|animation|chopp|jerk|frame.?pacing/i.test(task);}
 export function analysisPlan(input,hint=false){
  if(!input.rationale?.trim()||!Array.isArray(input.requirements)||input.requirements.length>6)throw new Error('Explain which task-specific analyses are needed; use [] with a reason for a simple task.');

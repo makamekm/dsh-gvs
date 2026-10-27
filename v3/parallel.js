@@ -1,5 +1,6 @@
 import path from 'node:path';
 import {goalStatus} from './goal.js';
+import {needsPreview} from './preview.js';
 
 // Literal workspace paths (optionally ending in /**), not arbitrary globs.
 // Unknown scopes retain a workspace-wide lease; [] is an explicit declaration.
@@ -15,6 +16,17 @@ export function normalizeScopes(scopes){
 }
 const overlaps=(a,b)=>a==='*'||b==='*'||a===b||a.startsWith(b+'/')||b.startsWith(a+'/');
 const shared=(a,b)=>a.filter(left=>b.some(right=>overlaps(left,right)));
+const reportRoots=['artifacts','test-results','playwright-report'];
+const outputRoots=['dist','build','coverage','node_modules/.tmp','node_modules/.cache','node_modules/.vite','node_modules/.vite-temp'];
+export function validateWriteScopes(role,scopes=[]){
+ if(role.capability==='edit')return;
+ const writes=normalizeScopes(scopes);
+ if(writes.length&&(role.capability!=='verify'||writes.some(scope=>!reportRoots.some(root=>scope.startsWith(root+'/'))&&!outputRoots.some(root=>scope===root||scope.startsWith(root+'/')))))throw new Error('Verify writeScopes may contain only specific report/evidence paths and generated build/cache outputs. Product source, scripts and whole-workspace writes require an edit role.');
+}
+export function evidencePath(target,cwd){
+ const relative=path.relative(cwd,path.resolve(cwd,target)).replaceAll('\\','/').toLowerCase();
+ return reportRoots.some(root=>relative.startsWith(root+'/'));
+}
 export function parallelFields(input){
  const result={};for(const key of ['readScopes','writeScopes'])if(input[key]!==undefined)result[key]=normalizeScopes(input[key]);
  if(input.resources!==undefined){if(!Array.isArray(input.resources)||input.resources.some(name=>typeof name!=='string'||!name.trim()||name.length>128))throw new Error('Resources need nonempty names up to 128 characters.');result.resources=[...new Set(input.resources.map(name=>name.trim().toLowerCase()))];}
@@ -23,7 +35,7 @@ export function parallelFields(input){
 export function taskAccess(run,task){
  const capability=run.roles.find(role=>role.name===task.assignee)?.capability;
  const decision=['brief','consultation'].includes(task.kind);
- const writes=capability==='edit'?normalizeScopes(task.writeScopes??['*']):[];
+ const writes=capability==='edit'?normalizeScopes(task.writeScopes??['*']):capability==='verify'?normalizeScopes(task.writeScopes??[]):[];
  const fullReview=['review','design-review','game-review','user-review'].includes(task.kind)&&task.scope!=='increment';
  const reads=decision?[]:fullReview?['*']:[...new Set([...normalizeScopes(task.readScopes??['*']),...writes])];
  const resources=task.resources??(decision||capability==='read'?[]:['project-runtime']);
@@ -43,6 +55,7 @@ export function parallelBlocker(run,task,limit=run.parallelLimit??4){
  if(missing.length)return {kind:'dependencies',taskIds:missing};
  if(role?.capability==='edit'&&!goalStatus(run).discoveryReady)return {kind:'initial-discovery'};
  if(role?.capability!=='user'&&run.analysis&&(run.analysis.state!=='ready'||run.tasks.some(other=>other.kind==='brief'&&other.state!=='done')))return {kind:'user-brief-analysis'};
+ if(needsPreview(run,task)&&run.preview.ready===false)return {kind:'preview-not-ready',url:run.preview.url};
  const running=run.tasks.filter(other=>other.state==='running'),busy=running.filter(other=>other.assignee===task.assignee);
  if(busy.length)return {kind:'agent-busy',taskIds:busy.map(other=>other.id)};
  const conflicts=running.map(other=>taskConflict(run,task,other)).filter(Boolean);

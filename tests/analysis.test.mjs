@@ -1,7 +1,18 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {motionHint,analysisPlan,parseAnalysisReport,analysisReady,analysisAcceptance} from '../v3/analysis.js';
+import {motionHint,analysisPlan,parseAnalysisReport,analysisReady,analysisAcceptance,decodeAnalysisRunner} from '../v3/analysis.js';
 const plan=()=>({...analysisPlan({rationale:'The human sees stepping in a moving texture.',requirements:[{id:'motion',reason:'Visible stepping was reported',criterion:'No quantized texture steps or uneven frame cadence',method:'rendered-sequence'}]},true),version:1});
 const report=()=>({schema:'gvs.analysis/1',engine:'test renderer',analyzer:'Compare rendered texture displacement and presentation timestamps',results:[{id:'motion',cases:[{name:'Rendered texture step cadence',source:'rendered-pixels',actual:0,expected:0,passed:true},{name:'Frame-time spike count',source:'frame-timing',actual:0,expected:0,passed:true}],samples:Array.from({length:32},(_,i)=>({viewport:'desktop',atMs:i*40,renderedPixelMetric:i*.25,frameTimeMs:16.7})),frames:Array.from({length:12},(_,i)=>({path:`capture-${i}.png`,viewport:'desktop',atMs:i*100}))}]});
+test('runner diagnostics preserve stderr and distinguish failed execution from missing or malformed JSON',()=>{
+ assert.throws(()=>decodeAnalysisRunner({value:{kind:'foreground',exitCode:1,stdout:{text:''},stderr:{text:'AssertionError: focus was BODY'}}}),/failed \(exit 1\)[\s\S]*focus was BODY/);
+ assert.throws(()=>decodeAnalysisRunner({value:{kind:'foreground',exitCode:0,stdout:{text:'No report emitted'}}}),/finished without its required report/);
+ assert.throws(()=>decodeAnalysisRunner({value:{kind:'foreground',exitCode:1,stdout:{text:'GVS_ANALYSIS_RESULT: {broken'},stderr:{text:'Compiler failure'}}}),/Malformed[\s\S]*Compiler failure/);
+});
+test('valid report data cannot conceal process failure, timeout, abort or signal',()=>{
+ const value={kind:'foreground',exitCode:0,stdout:{text:'GVS_ANALYSIS_RESULT: '+JSON.stringify(report())}};
+ assert.equal(decodeAnalysisRunner({value}).ok,true);
+ for(const extra of [{exitCode:1},{timedOut:true},{aborted:true},{signal:'SIGTERM'}])assert.equal(decodeAnalysisRunner({value:{...value,...extra}}).ok,false);
+ assert.equal(decodeAnalysisRunner({isError:true,value}).ok,false);
+});
 test('simple tasks may explicitly omit additional analysis; a smoothness request cannot silently omit it',()=>{
  assert.equal(analysisPlan({rationale:'Rename a static button label; existing UI checks suffice.',requirements:[]}).requirements.length,0);
  assert.ok(motionHint('Люди двигаются словно шагами, сделай плавно'));

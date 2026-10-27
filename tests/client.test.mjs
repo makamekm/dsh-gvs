@@ -34,3 +34,7 @@ test('parallel capacity and actual file/resource waits are visible in the team p
  assert.ok(view.nodes.some(node=>node.children.includes('slots: 2/4')));
  assert.ok(view.nodes.some(node=>node.props.className==='gvs-dependency'&&node.children.includes('waitFor: QA · ui, project-runtime')));
 });
+test('a waiting UI review explains that its preview is not ready',()=>{
+ const view=render({tasks:[task('visual','waiting')],roles:[{name:'builder',title:'QA',sessionId:'child',scheduling:{kind:'preview-not-ready'}}]});
+ assert.ok(view.nodes.some(node=>node.props.className==='gvs-dependency'&&node.children.includes('previewWait')));
+});
