@@ -18,6 +18,10 @@ test('a local pass cannot close the human goal without implementation and curren
  r.revision++;assert.equal(goalStatus(r).ready,false);r.tasks[1].result.revision=2;assert.equal(goalStatus(r).ready,true);
  r.tasks[1].assignee='dev';assert.equal(goalStatus(r).ready,false);
 });
+test('observations do not become repair obligations and cannot erase, resolve or replace a real finding',()=>{
+ const r=run(),task={id:'qa',assignee:'qa',kind:'review',state:'done',result:{verdict:'revise',findings:['Actual dialog overlaps its close button'],observations:['No clipping in a different selected state'],summary:'Concrete repair still needed'}};r.tasks.push(task);assert.equal(recordFindings(r,task).length,1);const original=structuredClone(r.goal.issues);task.result.observations.push('The first locator error was an adapter problem');assert.equal(recordFindings(r,task).length,0);assert.deepEqual(r.goal.issues,original);assert.equal(goalStatus(r).issues[0].resolved,false);
+});
+
 test('every rejection becomes a durable issue that a subsequent pass cannot erase',()=>{
  const r=run();const rejected={id:'old-review',assignee:'qa',kind:'design-review',state:'blocked',result:{verdict:'blocked',findings:['Missing original noise','No mobile parity'],summary:'Needs repair'}};
  r.tasks=[rejected,done('repair','dev'),done('recheck','qa','design-review')];recordFindings(r,rejected);recordFindings(r,rejected);

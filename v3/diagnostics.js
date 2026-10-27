@@ -1,5 +1,19 @@
 import {createHash} from 'node:crypto';
 const redact=value=>String(value??'').replace(/^Error:\s*/,'').replace(/\b(?:npm_[\w]+|github_pat_[\w]+|ghp_[\w]+|sk-[\w-]{12,})\b/g,'[redacted]').replace(/([?&](?:token|key|auth)=)[^\s&]+/gi,'$1[redacted]').slice(0,1400);
+export function failureFamily(message){
+ const raw=String(message??'').replace(/\u001b\[[0-9;]*m/g,''),primary=raw.split(/\r?\n/).find(line=>/^(?:Command failed \([^\n]+\):\s*)?(?:Error|TypeError|ReferenceError|RangeError|SyntaxError):\s*\S/.test(line));let text=redact(raw);
+ // The primary named exception is stable; event dumps, stack positions and
+ // generated report IDs are supporting evidence, retained in the actual log.
+ if(primary)text=redact(primary).replace(/;\s*events=.+$/,'; events=[recorded]');
+ return text.replace(/\b[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\b/gi,'[uuid]').replace(/https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d{5}(?=[/\s"\\]|$)/gi,'http://loopback:[port]').replace(/"(?:port|pid|processId)"\s*:\s*\d+/g,'"runtime-id":[number]').replace(/:(\d+):(\d+)(?=[)\s]|$)/g,':[line]:[column]');
+}
+const familyId=item=>createHash('sha256').update(JSON.stringify([item.agent,item.taskId,item.tool,item.identity,failureFamily(item.message)])).digest('hex').slice(0,16);
+function diagnosticFamilies(run,now){
+ const groups=new Map(),since=now-600000;
+ for(const item of run.diagnostics??[]){if(item.status!=='open'||item.lastAt<since)continue;const key=familyId(item),group=groups.get(key)??{id:key,agent:item.agent,taskId:item.taskId,tool:item.tool,message:failureFamily(item.message),count:0,alertLevel:0};
+  group.count+=item.occurrences?.filter(at=>at>=since).length??(item.firstAt>=since?item.count:1);group.alertLevel=Math.max(group.alertLevel,item.alertLevel??0);groups.set(key,group);
+ }return [...groups.values()];
+}
 export function toolIdentity(exec){return createHash('sha256').update(JSON.stringify([exec.name,exec.arguments?.action??'',exec.arguments?.file_path??exec.arguments?.path??'',exec.arguments?.command??'',exec.arguments?.scenarioId??exec.arguments?.scenario??''])).digest('hex');}
 export function toolFailureMessage(result){
  if(result.isError)return result.content?.filter(p=>p.type==='text').map(p=>p.text).join('\n')||result.error?.message||'Tool execution failed';
@@ -20,17 +34,23 @@ export function recoveryAdvice(message){
  return null;
 }
 export function recordToolFailure(run,{agent,taskId,tool,identity,message},now=Date.now()){
- const safe=redact(message),id='error-'+createHash('sha256').update(JSON.stringify([agent,taskId,tool,identity,safe])).digest('hex').slice(0,16);
- run.diagnostics??=[];let item=run.diagnostics.find(d=>d.id===id);
- if(item&&now-item.lastAt<50)return {item,notify:false};
- if(item){item.count++;item.lastAt=now;item.status='open';delete item.resolution;}
- else{item={id,agent,taskId,tool,identity,message:safe,count:1,firstAt:now,lastAt:now,status:'open'};run.diagnostics.push(item);run.diagnostics=run.diagnostics.slice(-100);}
- return {item,notify:[1,3,10].includes(item.count)};
+ const safe=redact(message),event={agent,taskId,tool,identity,message:safe},key=familyId(event),id='error-'+key;
+ run.diagnostics??=[];let item=run.diagnostics.find(d=>d.id===id||familyId(d)===key);
+ if(item&&item.status==='open'&&now-item.lastAt<50)return {item,notify:false};
+ if(item){if(item.status!=='open'||now-item.lastAt>600000){item.occurrences=[now];item.alertLevel=0;}else item.occurrences=[...(item.occurrences??[item.lastAt]),now].slice(-32);if(item.message!==safe)item.firstMessage??=item.message;item.message=safe;item.count++;item.lastAt=now;item.status='open';delete item.resolution;delete item.resolvedAt;}
+ else{item={id,agent,taskId,tool,identity,message:safe,count:1,firstAt:now,lastAt:now,status:'open',occurrences:[now]};run.diagnostics.push(item);run.diagnostics=run.diagnostics.slice(-100);}
+ const group=diagnosticFamilies(run,now).find(g=>g.id===key),level=group.count>=10?10:group.count>=3?3:1,notify=level>group.alertLevel;item.alertLevel=Math.max(group.alertLevel,level);
+ return {item,notify};
 }
 export function recordToolSuccess(run,{agent,taskId,identity},now=Date.now()){
  let changed=false;for(const item of run.diagnostics??[])if(item.status==='open'&&item.agent===agent&&item.taskId===taskId&&item.identity===identity){item.status='resolved';item.resolvedAt=now;item.resolution='The same task operation subsequently succeeded.';changed=true;}return changed;
 }
 export function diagnosticStatus(run,now=Date.now()){
- const open=(run.diagnostics??[]).filter(d=>d.status==='open'),repeated=open.filter(d=>d.count>=3&&now-d.lastAt<600000);
- return {open:open.length,repeated:repeated.length,recent:[...open].sort((a,b)=>b.lastAt-a.lastAt).slice(0,6).map(({identity,...item})=>item)};
+ const open=(run.diagnostics??[]).filter(d=>d.status==='open'),repeated=diagnosticFamilies(run,now).filter(g=>g.count>=3);
+ return {open:open.length,repeated:repeated.length,repeatedFamilies:repeated.slice(0,6).map(({alertLevel,...group})=>({...group,message:group.message.slice(0,500)})),repeatedFamiliesTruncated:repeated.length>6,recent:[...open].sort((a,b)=>b.lastAt-a.lastAt).slice(0,6).map(({identity,occurrences,firstMessage,alertLevel,...item})=>item)};
+}
+export function checkFailureDetails(value){
+ if(value.views?.some(v=>v.errors?.length))return value.views.map(v=>({viewport:v.viewport,errors:v.errors}));
+ if(value.results){const failed=value.results.flatMap(r=>(r.cases??[]).filter(c=>c.passed!==true).map(c=>({analysis:r.id,case:c.name,actual:JSON.stringify(c.actual)?.slice(0,600),expected:JSON.stringify(c.expected)?.slice(0,600)})));if(failed.length)return {failedCases:failed.slice(0,6),failedCount:failed.length};}
+ return value.errors??(value.views?.length?value.views.map(v=>({viewport:v.viewport,errors:v.errors})):'Check returned ok:false');
 }

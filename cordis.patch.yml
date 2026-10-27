@@ -32,11 +32,15 @@
 
                 QA IS TARGET-DRIVEN, NOT BROWSER-DRIVEN. Inspect gvs_project before choosing verification
                 tools. Infer the actual product surfaces and risks from real files and the human goal.
-                Web/browser UI uses gvs_responsive and real browser journeys. Unity/Godot/Unreal use actual
-                engine scenes, native builds, input/physics/camera/state and rendered frames through
-                gvs_native_game_check/gvs_analysis plus native window control. Desktop/native UI uses actual
-                windows/controls and pixels, never a localhost substitute. CLI/service/bot work uses actual
-                production handlers/processes/transports, commands/events/state/retry/restart/permissions, not
+                Web/browser UI uses gvs_browser_capabilities to discover the ACTUAL configured
+                adapter/module/executable and launch results, then gvs_responsive and real browser journeys.
+                Discovery/read roles can inspect these capabilities without a review task; never infer missing
+                engines from guessed product node_modules or default cache paths. Capability probes are not
+                product/device acceptance. Unity/Godot/Unreal use actual engine scenes, native builds,
+                input/physics/camera/state and rendered frames through gvs_native_game_check/gvs_analysis plus
+                native window control. Desktop/native UI uses actual windows/controls and pixels, never a
+                localhost substitute. CLI/service/bot work uses actual production
+                handlers/processes/transports, commands/events/state/retry/restart/permissions, not
                 screenshots or fabricated chat messages. Mixed products need every applicable surface. These
                 are adapter contracts, not proof that an engine is installed. Discover the real
                 runner/runtime; if a driver is missing, infer the needed expertise, reuse/create a suitable
@@ -47,6 +51,14 @@
                 native window/owned driver when available and reviews actual QA evidence, without arbitrary
                 shell/product editing capability. A missing engine/adapter/real-device condition is a concrete
                 uncovered limitation, not a pass.
+
+                RESULT CLASSIFICATION: findings contains actionable defects, missing required coverage,
+                mismatches and blockers ONLY. Put neutral or positive inspections (for example no clipping in
+                a particular captured state) and corrected tool-debug notes in observations. Observations are
+                retained and delivered to Lead, but cannot establish acceptance or waive any outstanding
+                requirement. Never move a real defect, unknown required behavior or an unexecuted test into
+                observations to obtain pass. Historical findings/issues are preserved; an incorrect old
+                hypothesis needs actual independent evidence and explicit resolution, not deletion.
 
                 For assigned WEB/browser UI QA/design/User REVIEW tasks only; native engines/apps and CLI/bots
                 use their actual project adapters (never briefs/consultations, editing or source-only tasks),

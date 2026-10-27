@@ -25,6 +25,21 @@ function fixture(config={}){
  async function consult(agent){let cached;const pending=call('gvs_ask_user',{question:'Confirm the exact goal'},agent).then(value=>(cached=value,value));await new Promise(resolve=>setImmediate(resolve));if(cached)return cached;let list=await call('gvs_task',{action:'list'});const question=list.tasks.find(task=>task.kind==='consultation'&&task.state==='running');assert.ok(question);await complete(question.id,actor('user'));return pending;}
  return {root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,effects,failNextSpawn:()=>{nextSpawnError=new Error('Temporary spawn failure');},changeSource:value=>{source=value;},get spawns(){return spawns;}};
 }
+test('self-message and coordinator-only consultation mistakes return unapplied direction without Native self-send or fabricated tasks',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Preserve actual human goal',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));const count=f.tasks.size,goal=JSON.parse([...f.files.values()][0]).goal;
+ const consultation=await f.call('gvs_ask_user',{action:'ask',question:'Clarify only this actual question'});assert.equal(consultation.accepted,false);assert.equal(consultation.consulted,false);assert.equal(consultation.status,'coordinator-consultation-required');assert.equal(f.tasks.size,count);
+ const request=await f.call('gvs_agent',{action:'request',message:'Need expertise'});assert.equal(request.requested,false);assert.deepEqual(JSON.parse([...f.files.values()][0]).goal,goal);
+ await f.call('gvs_agent',{action:'create',name:'author',title:'Author',purpose:'Bounded work',capability:'edit'});await f.call('gvs_task',{action:'create',title:'Actual slice',instructions:'Continue actual owned slice',kind:'work',assignee:'author'});const self=await f.call('gvs_agent',{action:'message',name:'author',message:'This is a mistaken self message'},f.actor('author'));assert.equal(self.sent,false);assert.equal(self.accepted,false);assert.ok(!f.sent.some(m=>m.target==='author'&&m.content[0].text==='This is a mistaken self message'));assert.ok(f.sent.some(m=>m.target==='lead'&&m.content[0].text.includes('Self-message')));
+});
+
+test('neutral observations are saved, paged and delivered without creating repair issues or hiding actionable findings',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Preserve full actual requirements',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));await f.call('gvs_agent',{action:'create',name:'editor',title:'Editor',purpose:'Bounded work',capability:'edit'});const work=await f.call('gvs_task',{action:'create',title:'Bounded slice',instructions:'Report actual outcomes',kind:'work',assignee:'editor'}),actor=f.actor('editor');await f.consult(actor);
+ const observations=['The selected state has no observed clipping.','A corrected locator reached the intended control.','This note is not full-goal acceptance.'];const finished=await f.complete(work.task.id,actor,{observations});assert.deepEqual(finished.task.result.observations,observations);assert.equal(JSON.parse([...f.files.values()][0]).goal.issues.length,0);
+ const page=await f.call('gvs_task',{action:'list',taskId:work.task.id,offset:1,limit:1});assert.deepEqual(page.tasks[0].result.observations,[observations[1]]);assert.equal(page.tasks[0].result.totals.observations,3);assert.equal(page.tasks[0].result.nextOffset,2);assert.ok(f.sent.some(m=>m.target==='lead'&&m.content[0].text.includes('"observationCount":3')));
+ const repair=await f.call('gvs_task',{action:'create',title:'Another owned slice',instructions:'Retain actionable defects',kind:'work',assignee:'editor'}),findings=['Actual settings window cannot close or recover.'];const rejected=await f.complete(repair.task.id,actor,{findings,observations});assert.equal(rejected.completed,false);assert.equal(f.tasks.get(repair.task.id).status,'in_progress');
+ await f.complete(repair.task.id,actor,{verdict:'revise',findings,observations});const saved=JSON.parse([...f.files.values()][0]);assert.equal(saved.goal.issues.length,1);assert.equal(saved.goal.issues[0].criterion,findings[0]);assert.equal((await f.call('gvs_finish')).status,'needs-review');
+});
+
 test('a lost managed preview is restored before reassigning interrupted runtime work; stop, pause, owner and task identity stay binding',async t=>{
  const f=fixture(),servers=[],jobs=new Map(),order=[];let lastServer,closing,serial=0;
  const close=async server=>{if(!server?.listening)return;server.closeAllConnections();await new Promise(resolve=>server.close(resolve));};t.after(async()=>{for(const server of servers)await close(server);});
@@ -101,7 +116,7 @@ test('live UI acceptance exposes the paged responsive matrix and cannot pass fro
  const created=await f.call('gvs_task',{action:'create',title:'User live layout review',instructions:'Exercise real windows and inspect pixels',kind:'user-review',scope:'increment',analysisIds:[],assignee:'user',readScopes:['src'],resources:[]});
  const status=await f.call('gvs_responsive',{action:'status',taskId:created.task.id,limit:2});assert.equal(status.cases.length,2);assert.ok(status.caseCount>=22);assert.equal(status.coverage.ready,false);assert.equal(status.nextOffset,2);
  await assert.rejects(f.call('gvs_responsive',{action:'review',taskId:created.task.id,checkId:'invented',verdict:'pass',findings:[]}),/OWN matrix/);
- await assert.rejects(f.complete(created.task.id,f.actor('user')),/actual current images|Responsive acceptance is incomplete/);assert.equal(f.tasks.get(created.task.id).status,'in_progress');
+ await assert.rejects(f.complete(created.task.id,f.actor('user'),{observations:['No clipping seen in a single selected image.']}),/actual current images|Responsive acceptance is incomplete/);assert.equal(f.tasks.get(created.task.id).status,'in_progress');
 });
 
 test('coordinator can inspect teammate responsive failure images without acquiring the right to accept their evidence',async()=>{
