@@ -2,6 +2,10 @@ import test from 'node:test';import assert from 'node:assert/strict';import path
 import {normalizeScopes,parallelFields,taskAccess,taskConflict,parallelBlocker,writeAllowed,validateWriteScopes,evidencePath} from '../v3/parallel.js';
 const run=()=>({status:'running',roles:[{name:'ui',capability:'edit'},{name:'server',capability:'edit'},{name:'qa',capability:'verify'},{name:'user',capability:'user'}],tasks:[]});
 const task=(id,assignee,extra={})=>({id,assignee,state:'waiting',kind:'work',dependsOn:[],...extra});
+test('service-interrupted runtime tasks wait for actual restored preview readiness while isolated tasks and human pause keep their semantics',()=>{
+ const r=run();r.preview={url:'http://127.0.0.1:5173/',ready:false};const recovered=task('recovered','ui',{waitForPreviewRecovery:true,readScopes:['src'],writeScopes:['src'],resources:['project-runtime']});assert.equal(parallelBlocker(r,recovered).kind,'preview-recovery');assert.equal(parallelBlocker(r,task('isolated','server',{readScopes:['backend'],writeScopes:['backend'],resources:[]})),null);r.preview.ready=true;assert.equal(parallelBlocker(r,recovered),null);r.status='paused';assert.equal(parallelBlocker(r,recovered).kind,'run-stopped');
+});
+
 test('absolute project paths normalize; outside fixtures remain exclusive environment leases without outside Native write permission',()=>{
  const cwd='C:\\Users\\Max\\project';
  const access=parallelFields({writeScopes:['C:\\Users\\Max\\project\\src/**','C:\\Users\\Max\\AppData\\Local\\Fixture\\task152/**'],resources:[]},cwd);

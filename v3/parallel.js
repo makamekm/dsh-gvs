@@ -91,6 +91,7 @@ export function parallelBlocker(run,task,limit=run.parallelLimit??4){
  const missing=(task.dependsOn??[]).filter(id=>run.tasks.find(other=>other.id===id)?.state!=='done');
  if(missing.length)return {kind:'dependencies',taskIds:missing};
  if(needsCodePlan(run,task)&&(!task.codePlan||task.planStale))return {kind:'coordinator-plan',stale:task.planStale??false,files:task.stalePlanFiles??[],next:'Coordinator inspects current files and supplies gvs_task update codePlan before implementation starts.'};
+ if(task.waitForPreviewRecovery&&run.preview?.ready!==true&&taskAccess(run,task).resources.some(r=>r==='project-runtime'||r.startsWith('preview:')))return {kind:'preview-recovery',url:run.preview?.url,next:'Restore the existing managed preview and confirm actual HTTP readiness before retrying this service-interrupted runtime task.'};
  if(role?.capability==='edit'&&!goalStatus(run).discoveryReady)return {kind:'initial-discovery'};
  if(role?.capability!=='user'&&run.analysis&&(run.analysis.state!=='ready'||run.tasks.some(other=>other.kind==='brief'&&other.state!=='done')))return {kind:'user-brief-analysis'};
  if(needsPreview(run,task)&&run.preview.ready===false)return {kind:'preview-not-ready',url:run.preview.url};

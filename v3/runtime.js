@@ -8,7 +8,7 @@ import {motionHint,analysisPlan,parseAnalysisReport,analysisReady,analysisAccept
 import {syncGoal,planGoal,linkGoal,recordFindings,goalStatus,resolvedBlocker} from './goal.js';
 import {refreshRevision} from './revision.js';
 import {decisionKey,reusableDecision,availableDecisions,consultationKey,progressStatus,modelResult} from './flow.js';
-import {previewState,needsPreview} from './preview.js';
+import {previewState,needsPreview,restoreManagedPreview} from './preview.js';
 import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus,visualStates} from './visual.js';
 import {USER_TESTING,planUserJourneys,userJourneyStatus,scenarioKey,userProbeInput,interruptedByLegacyPlan} from './journeys.js';
 import {recordToolFailure,recordToolSuccess,toolIdentity,diagnosticStatus,toolFailureMessage,recoveryAdvice} from './diagnostics.js';
@@ -183,14 +183,15 @@ export function apply(ctx,config={}){
   entry.run.userTestingSeen=[...new Set([...entry.run.userTestingSeen,...input.userProbeFor])];entry.run.userTestingInitial=false;await commit(entry);
  }
  async function schedule(entry,signal){
+  if(entry.recoveringPreview)return;
   if(entry.scheduling)return entry.scheduling;
   entry.scheduling=(async()=>{
    if(entry.run.status!=='running')return;
    await ensureUserProbe(entry,signal);
    const ready=readyTasks(entry.run).sort((a,b)=>(b.priority??0)-(a.priority??0));
-   if(ready.some(task=>needsPreview(entry.run,task))){const observed=await previewState(entry.run.preview,ctx.jobs,entry.root.id,signal);entry.run.preview.ready=observed.ready;await commit(entry);}
+   if(ready.some(task=>needsPreview(entry.run,task)||task.waitForPreviewRecovery)){const observed=await previewState(entry.run.preview,ctx.jobs,entry.root.id,signal);observePreview(entry,observed);await commit(entry);}
    for(const task of ready){
-    if(entry.abort.signal.aborted||signal.aborted)break;
+    if(entry.abort.signal.aborted||signal.aborted||entry.recoveringPreview)break;
     const role=roleOf(entry,task.assignee);
     if(role.capability==='edit'&&!goalStatus(entry.run).discoveryReady)continue;
     if(role.capability!=='user'&&entry.run.analysis&&(entry.run.analysis.state!=='ready'||entry.run.tasks.some(task=>task.kind==='brief'&&task.state!=='done')))continue;
@@ -655,14 +656,30 @@ export function apply(ctx,config={}){
    }
    await commit(entry);await schedule(entry,exec.signal);return {status:entry.run.status,recovered,continued:true};
   }
-  const recovered=await restoreTasks(entry,exec.signal,true);return {status:entry.run.status,recovered,continued:entry.run.status==='running'};
+  const previewRecovery=await recoverPreview(entry,exec.signal),recovered=await restoreTasks(entry,exec.signal,true);return {status:entry.run.status,recovered,previewRecovery,continued:entry.run.status==='running'};
  });
  register('gvs_resume','Resume saved GVS tasks after the user requests continuation; the same named agents keep their conversations.',{},[],async(_args,exec)=>{
   const {member,entry}=await current(exec);lead(member);entry.abort=new AbortController();entry.run.status='running';entry.suspending=false;delete entry.run.suspended;
-  const recovered=await restoreTasks(entry,exec.signal);return {status:entry.run.status,recovered};
+  const previewRecovery=await recoverPreview(entry,exec.signal),recovered=await restoreTasks(entry,exec.signal);return {status:entry.run.status,recovered,previewRecovery};
  });
+ async function recoverPreview(entry,signal){
+  entry.recoveringPreview=true;try{
+  const combined=AbortSignal.any([signal,entry.abort.signal]);
+  const observed=await restoreManagedPreview(entry.run,{signal:combined,observe:()=>previewState(entry.run.preview,ctx.jobs,entry.root.id,combined,fetch,true),start:async recipe=>{
+   const result=await entry.root.ctx.tools.execute({callId:randomUUID(),agent:entry.root,signal:combined,name:'gvs_preview',arguments:{action:'start',...recipe}});if(result.isError)throw new Error('Managed preview startup failed; original tool error is preserved.');const {gvsTeam,...observation}=result.value??{};return observation;
+  }});
+  if(entry.run.preview){observePreview(entry,observed);for(const task of entry.run.tasks.filter(t=>t.state==='blocked'&&t.result?.interrupted)){
+   if(entry.run.preview.ready===true)delete task.waitForPreviewRecovery;
+   else if(taskAccess(entry.run,task).resources.some(r=>r==='project-runtime'||r.startsWith('preview:')))task.waitForPreviewRecovery=true;
+  }await commit(entry);}return observed;
+  }finally{entry.recoveringPreview=false;}
+ }
+ function observePreview(entry,observed){
+  if(!entry.run.preview)return;entry.run.preview.ready=observed.ready===true;
+  if(observed.ready){for(const task of entry.run.tasks)delete task.waitForPreviewRecovery;if(entry.run.status==='running'&&entry.run.previewRestore?.jobId===entry.run.preview.jobId&&!entry.run.previewRestore.disabledByStop)entry.run.previewRestore.enabled=true;}
+ }
  async function previewObserved(entry,observed,signal){
-  if(entry.run.preview){entry.run.preview.ready=observed.ready;await commit(entry);}
+  if(entry.run.preview){observePreview(entry,observed);await commit(entry);}
   if(observed.ready)await schedule(entry,signal);
   return observed;
  }
@@ -674,7 +691,8 @@ export function apply(ctx,config={}){
    if(!task||!taskAccess(entry.run,task).resources.includes('project-runtime'))throw new Error('Preview startup/stop needs the exclusive project-runtime lease. Ask Lead; do not restart another parallel task’s environment.');
   }
   if(args.action==='status')return previewObserved(entry,await previewState(entry.run.preview,jobs,entry.root.id,exec.signal,fetch,true),exec.signal);
-  if(args.action==='stop'){if(!entry.run.preview?.jobId)return {status:'not-running'};const id=entry.run.preview.jobId;jobs.kill(id,entry.root.id,'Stop GVS preview');const settled=await jobs.wait(id,5000,entry.root.id,exec.signal);entry.run.preview.ready=false;await commit(entry);return {status:settled.status,jobId:id};}
+  if(args.action==='stop'){if(entry.run.previewRestore){entry.run.previewRestore.enabled=false;entry.run.previewRestore.disabledByStop=true;}await commit(entry);if(!entry.run.preview?.jobId)return {status:'not-running'};const id=entry.run.preview.jobId;jobs.kill(id,entry.root.id,'Stop GVS preview');const settled=await jobs.wait(id,5000,entry.root.id,exec.signal);entry.run.preview.ready=false;await commit(entry);return {status:settled.status,jobId:id};}
+  if(entry.run.status!=='running')return {status:'run-stopped',accepted:false,started:false,next:'The run is paused or finished. This call did not restart its preview or resume work.'};
   const membership=ctx.agentTeams.membership(exec.agent),role=roleOf(entry,membership.name);
   if(membership.role!=='lead'&&!['edit','verify'].includes(role?.capability))throw new Error('Ask the coordinator to start the preview; this role cannot execute startup commands.');
   const port=args.port??4173,url=previewURL(`http://127.0.0.1:${port}/`).href;
@@ -683,7 +701,7 @@ export function apply(ctx,config={}){
   if(!args.command)throw new Error('Provide the project preview command.');
   let occupied=false;try{const res=await fetch(url,{signal:AbortSignal.timeout(700)});await res.body?.cancel();occupied=true;}catch{}if(occupied)throw new Error('This port already responds; inspect it explicitly or use a free port.');
   const result=await entry.root.ctx.tools.execute({callId:randomUUID(),agent:entry.root,signal:exec.signal,name:process.platform==='win32'?'pwsh':'bash',arguments:{description:'Start GVS project preview',command:args.command,workdir:entry.io.cwd,run_in_background:true}});
-  if(result.isError||!result.value?.jobId)throw new Error('Preview could not start as a managed job.');entry.run.preview={url,jobId:result.value.jobId};await commit(entry);
+  if(result.isError||!result.value?.jobId)throw new Error('Preview could not start as a managed job.');entry.run.preview={url,jobId:result.value.jobId};entry.run.previewRestore={runId:entry.run.runId,url,port,command:args.command,jobId:result.value.jobId,enabled:false,disabledByStop:false};await commit(entry);
   for(let i=0;i<40;i++){
    exec.signal.throwIfAborted();const observed=await previewState(entry.run.preview,jobs,entry.root.id,exec.signal);
    if(observed.ready)return previewObserved(entry,observed,exec.signal);
