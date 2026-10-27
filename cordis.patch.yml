@@ -52,6 +52,17 @@
                 shell/product editing capability. A missing engine/adapter/real-device condition is a concrete
                 uncovered limitation, not a pass.
 
+                SOURCE REPORT ATTESTATION: a Lead-assigned reviewFocus:source, scope:increment, analysisIds:[]
+                may inspect actual saved successful analysis reports from an older revision/plan and cite
+                historicalAnalysisReports:[id] with adapterReviewed:true. Run only concrete read/hash checks
+                within the assigned lease, not a prose command or a writing analyzer forbidden by the task.
+                This records historical source/report provenance only; it cannot establish current runtime,
+                visual, User, motion or full-goal acceptance, refresh a report revision, excuse a failed
+                report, or replace an independent capture agent. Ordinary analysisReports still requires
+                current revision/plan and a different capture agent. Read exact rejection reasons before
+                interpreting a stale report as an authorship failure. Preserve every actual product gap in
+                owned work/recheck tasks.
+
                 RESULT CLASSIFICATION: findings contains actionable defects, missing required coverage,
                 mismatches and blockers ONLY. Put neutral or positive inspections (for example no clipping in
                 a particular captured state) and corrected tool-debug notes in observations. Observations are

@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {motionHint,analysisPlan,parseAnalysisReport,analysisReady,analysisAcceptance,decodeAnalysisRunner,decodeAnalysisOutput,MAX_ANALYSIS_STDOUT_BYTES} from '../v3/analysis.js';
+import {motionHint,analysisPlan,parseAnalysisReport,analysisReady,analysisAcceptance,decodeAnalysisRunner,decodeAnalysisOutput,MAX_ANALYSIS_STDOUT_BYTES,analysisReportReviewStatus} from '../v3/analysis.js';
 const plan=()=>({...analysisPlan({rationale:'The human sees stepping in a moving texture.',requirements:[{id:'motion',reason:'Visible stepping was reported',criterion:'No quantized texture steps or uneven frame cadence',method:'rendered-sequence'}]},true),version:1});
 test('truncated analysis stdout recovers the complete Native spill, preserves failed exits and records provenance',async()=>{
  const raw={schema:'gvs.analysis/1',engine:'real',analyzer:'fixture',results:[]};
@@ -54,6 +54,14 @@ test('current real reports need a different reviewer and received evidence in fi
  const user={receivedAnalysisReports:[],result:{analysisVersion:1,analysisReports:['a1']}};assert.equal(analysisAcceptance(run,user),false);user.receivedAnalysisReports=['a1'];assert.equal(analysisAcceptance(run,user),true);
  run.revision++;assert.equal(analysisReady(run),false);run.revision--;run.analysis.version++;assert.equal(analysisReady(run),false);
 });
+test('report diagnostics distinguish stale source/plan from capture authorship; historical attestation never refreshes current acceptance',()=>{
+ const parsed=parseAnalysisReport(report(),plan(),['desktop']),r={revision:4,analysis:plan(),analysisChecks:[{...parsed,id:'a1',revision:2,planVersion:0,capturedBy:'capture-agent'}],tasks:[]},original=structuredClone(r.analysisChecks);
+ const current=analysisReportReviewStatus(r,'a1','source-reviewer');assert.deepEqual(current.reasons,['stale-source-revision','stale-analysis-plan']);assert.equal(current.capturedBy,'capture-agent');
+ const historical=analysisReportReviewStatus(r,'a1','source-reviewer',{historical:true});assert.equal(historical.reviewable,true);assert.equal(historical.historicalOnly,true);assert.equal(historical.reportRevision,2);
+ r.tasks.push({kind:'review',scope:'increment',reviewFocus:'source',state:'done',assignee:'source-reviewer',result:{verdict:'pass',revision:4,adapterReviewed:true,analysisReports:[],historicalAnalysisReports:['a1'],historicalReportAttestations:[historical]}});assert.equal(analysisReady(r),false);r.analysisChecks[0].revision=4;r.analysisChecks[0].planVersion=1;assert.equal(analysisReady(r),false,'Even now-current reports need explicit current independent acceptance, not a historical citation.');r.analysisChecks=original;
+ assert.ok(analysisReportReviewStatus(r,'a1','capture-agent',{historical:true}).reasons.includes('same-capture-agent'));r.analysisChecks[0].ok=false;assert.ok(analysisReportReviewStatus(r,'a1','source-reviewer',{historical:true}).reasons.includes('failed-report'));assert.deepEqual(analysisReportReviewStatus(r,'invented','source-reviewer',{historical:true}).reasons,['unknown-report']);
+});
+
 test('pending analysis blocks acceptance even when ordinary code and visual checks would pass',()=>{
  assert.equal(analysisReady({analysis:{state:'pending'}}),false);
  assert.equal(analysisReady({analysis:{state:'ready',version:1,requirements:[]},analysisChecks:[],tasks:[]}),true);

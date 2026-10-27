@@ -59,6 +59,19 @@ export function parseAnalysisReport(raw,plan,viewports){
  }
  return {engine:raw.engine,analyzer:raw.analyzer,results:raw.results,ok:raw.results.every(result=>result.cases.every(item=>item.passed))};
 }
+export function analysisReportReviewStatus(run,id,reviewer,{historical=false}={}){
+ const report=(run.analysisChecks??[]).find(r=>r.id===id),reasons=[];
+ if(!report)reasons.push('unknown-report');
+ else{
+  if(report.ok!==true)reasons.push('failed-report');
+  if(!report.capturedBy||!Number.isInteger(report.revision)||!Number.isInteger(report.planVersion))reasons.push('missing-provenance');
+  if(report.capturedBy===reviewer)reasons.push('same-capture-agent');
+  if(!historical&&report.revision!==run.revision)reasons.push('stale-source-revision');
+  if(!historical&&report.planVersion!==run.analysis?.version)reasons.push('stale-analysis-plan');
+ }
+ return {id,reviewable:reasons.length===0,historicalOnly:historical,reasons,capturedBy:report?.capturedBy??null,reportRevision:report?.revision??null,currentRevision:run.revision,reportPlanVersion:report?.planVersion??null,currentPlanVersion:run.analysis?.version??null};
+}
+
 export function acceptedAnalyses(run){
  if(!run.analysis)return [];
  return (run.analysisChecks??[]).filter(report=>report.ok&&report.revision===run.revision&&report.planVersion===run.analysis.version&&run.tasks.some(task=>task.kind==='review'&&task.state==='done'&&task.assignee!==report.capturedBy&&task.result?.verdict==='pass'&&task.result.revision===run.revision&&task.result.adapterReviewed===true&&task.result.analysisReports?.includes(report.id)));
