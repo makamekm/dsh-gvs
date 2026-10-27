@@ -4,6 +4,18 @@ import {requiresWebVerification} from './project-qa.js';
 
 export const VISUAL_CHECKS=['overlap','clipping','spacing','alignment','readability','responsive','interaction'];
 
+// A negative pixel judgement is actionable even if the author forgets to repeat
+// it in findings. Unknown citations remain verification blockers, not proven bugs.
+export function visualAssessmentFindings(run,task,result,checks=run.visualChecks??[]){
+ const selected=new Set(result.images??[]),received=new Set(task.receivedImages??[]);
+ return [...new Set((result.visualReview?.assessments??[]).filter(a=>a.disposition==='defect').map(a=>{
+  const source=checks.find(c=>c.revision===run.revision&&(c.taskId===task.id&&c.capturedBy===task.assignee||received.has(a.imageId))&&c.images?.some(i=>i.attachment?.attachmentId===a.imageId)&&c.views?.some(v=>v.layout?.warnings?.some(w=>w.id===a.warningId&&w.images?.includes(a.imageId))));
+  const reason=String(a.reason??'').slice(0,1600),citation=`Warning ${String(a.warningId??'').slice(0,100)}; image ${String(a.imageId??'').slice(0,150)}`;
+  if(!source||!selected.has(a.imageId)||reason.trim().length<20)return `Unverified visual defect report: ${reason}. ${citation}. Correct the current owned/received screenshot citation and independently verify this report; it is not confirmed product evidence.`;
+  return `${source.caseId?'Responsive '+source.caseId:'Visual'} defect: ${reason} Evidence: ${citation}.`;
+ }))];
+}
+
 // Executed in the actual rendered page, not against JSX or a test-only layout.
 export function collectLayout(){
  const controls='button,[role=button],input,textarea,select,a[href],[role=textbox]';

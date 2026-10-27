@@ -9,7 +9,7 @@ import {syncGoal,planGoal,linkGoal,recordFindings,goalStatus,resolvedBlocker} fr
 import {refreshRevision} from './revision.js';
 import {decisionKey,reusableDecision,availableDecisions,consultationKey,progressStatus,modelResult} from './flow.js';
 import {previewState,needsPreview,restoreManagedPreview} from './preview.js';
-import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus,visualStates} from './visual.js';
+import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus,visualStates,visualAssessmentFindings} from './visual.js';
 import {USER_TESTING,planUserJourneys,userJourneyStatus,scenarioKey,userProbeInput,interruptedByLegacyPlan} from './journeys.js';
 import {recordToolFailure,recordToolSuccess,toolIdentity,diagnosticStatus,toolFailureMessage,recoveryAdvice,checkFailureDetails} from './diagnostics.js';
 import {providerRecoveryCandidates,providerFailureFor,readFailedSelection,inheritSelection} from './models.js';
@@ -416,6 +416,7 @@ export function apply(ctx,config={}){
    const task=entry.run.tasks.find(task=>task.id===args.taskId);
    if(task&&task.assignee!==name)return {status:'not-owner',accepted:false,completed:false,taskId:task.id,state:task.state,assignee:task.assignee,next:'No result was accepted or changed. The assigned teammate must report its own evidence. Read the actual current owner/state and send it concrete feedback; Lead coordinates owned repairs/rechecks instead of completing a colleague task.'};
    if(task?.assignee===name&&task.state==='done')return {status:'already-completed',completed:false,changed:false,taskId:task.id,previousVerdict:task.result?.verdict,previousSummary:clip(task.result?.summary,600),findings:(task.result?.findings??[]).slice(0,4).map(f=>clip(f,400)),findingsTotal:task.result?.findings?.length??0,next:'No new result was accepted. Read the existing verdict/evidence via paged gvs_task list taskId; do not repeat completion or replace this result. New work needs an owned follow-up.'};
+   if(task?.assignee===name&&task.state!=='done'&&Array.isArray(args.findings))args={...args,findings:[...new Set([...args.findings,...visualAssessmentFindings(entry.run,task,args,[...entry.run.visualChecks,...(entry.run.responsiveChecks??[])])])]};
    if(task?.assignee===name&&['waiting','blocked'].includes(task.state)&&['revise','blocked'].includes(args.verdict)&&args.summary&&Array.isArray(args.findings)){
     const issues=recordFindings(entry.run,{...task,result:{verdict:args.verdict,summary:args.summary,findings:args.findings}});await commit(entry);
     if(issues.length)await ctx.agentTeams.sendMessage(exec.agent,{target:'lead',content:[{type:'text',text:`GVS INTERRUPTED REVIEW FEEDBACK ${JSON.stringify({taskId:task.id,state:task.state,summary:clip(args.summary,1500),findings:args.findings,issueIds:issues.map(i=>i.id)})}. Feedback is preserved without completing a queued assignment or claiming current acceptance. Assign repairs and rechecks; the scheduler retains the same task.`}],signal:exec.signal});
@@ -641,6 +642,21 @@ export function apply(ctx,config={}){
  register('gvs_recover','Recover service interruptions, or provider-failed tasks after a human model change actually changes their effective route. Never resumes a human pause or replaces agents/tasks.',{reason:{type:'string',enum:['service','model-change']}},[],async(args,exec)=>{
   const {member,entry}=await current(exec);lead(member);
   if(entry.run.status!=='running'||!entry.run.goal?.autonomous||entry.run.goal?.handoff)return {status:entry.run.status,recovered:[],continued:false};
+  // Reconcile already saved negative judgements from older versions. Keep the
+  // original inspection/result and task state; only add missing owned obligations.
+  const recoveredFeedback=[];
+  for(const check of entry.run.responsiveChecks??[]){
+   if(check.revision!==entry.run.revision||!check.inspection?.visualReview?.assessments?.some(a=>a.disposition==='defect'))continue;
+   const task=entry.run.tasks.find(t=>t.id===check.taskId&&t.assignee===check.capturedBy);if(!task)continue;
+   const findings=visualAssessmentFindings(entry.run,{...task,receivedImages:[]},check.inspection,entry.run.responsiveChecks);
+   if(findings.length)recoveredFeedback.push(...recordFindings(entry.run,{...task,result:{verdict:'revise',findings}}));
+  }
+  if(recoveredFeedback.length)entry.run.visualFeedbackPending=[...new Set([...(entry.run.visualFeedbackPending??[]),...recoveredFeedback.map(i=>i.id)])];
+  if(entry.run.visualFeedbackPending?.length){
+   await commit(entry);const pending=entry.run.goal.issues.filter(i=>entry.run.visualFeedbackPending.includes(i.id));
+   try{await ctx.agentTeams.sendMessage(entry.root,{target:'lead',content:[{type:'text',text:`GVS RECOVERED VISUAL FEEDBACK ${JSON.stringify({total:pending.length,issues:pending.slice(0,12).map(i=>({issueId:i.id,taskId:i.taskId,finding:clip(i.criterion,2000)}))})}. These saved negative pixel assessments were omitted from findings by the previous version. Read all current issues with paged gvs_goal status; preserve original evidence/results and assign actual repair plus independent recheck tasks. No pass or product edit was performed.`}],signal:exec.signal});delete entry.run.visualFeedbackPending;delete entry.run.visualFeedbackNotificationError;}
+   catch(error){entry.run.visualFeedbackNotificationError=clip(error.message,500);}await commit(entry);
+  }
   if(entry.abort.signal.aborted)entry.abort=new AbortController();entry.suspending=false;delete entry.run.suspended;
   if(args.reason==='model-change'){
    const policy=ctx.sessionProjections.stateOf(entry.root.session,'gvsModelRouting')?.policy;
@@ -730,7 +746,7 @@ export function apply(ctx,config={}){
  register('gvs_browser_check','Test actual UI on automatic desktop/phone viewports. press uses key (value alias); assertState accepts boolean true/false. actionsByViewport overrides shared actions for differing responsive controls; both views still need real actions/assertions. Observe current controls first.',{url:text(2000),scenario:text(500),scenarioId:text(40),actions:browserActions,actionsByViewport:object({desktop:browserActions,mobile:browserActions})},['url'],(args,exec)=>browserCheck(args,exec,false));
  const responsiveReview={...object({manualCoverage:text(2000),checked:{type:'array',items:{type:'string',enum:VISUAL_CHECKS},maxItems:7},assessments:{type:'array',maxItems:200,items:{...object({warningId:text(60),imageId:text(150),disposition:{type:'string',enum:['intentional','defect','outside-scope']},reason:text(1000)}),required:['warningId','imageId','disposition','reason']}}}),required:['checked','assessments']};
  register('gvs_responsive','Systematic UI simulation: status pages device/settings and discovered CSS-boundary cases; check executes up to TWO cases with real actions and images; states retrieves stored pixels; review saves your explicit per-batch visual judgement and forwards defects. Complete the matrix independently as QA/User before pass. Missing engines are reported, never treated as tested physical devices.',
- {action:{type:'string',enum:['status','check','states','review']},taskId:text(40),caseIds:{type:'array',items:text(100),minItems:1,maxItems:2},checkId:text(100),scenarioId:text(40),scenario:text(1000),url:text(2000),actions:browserActions,actionsByViewport:object({desktop:browserActions,mobile:browserActions}),actionsByCase:{type:'object',additionalProperties:browserActions,maxProperties:2},offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:6},verdict:{type:'string',enum:['pass','revise']},findings:strings,images:{...strings,maxItems:20},visualReview:responsiveReview},['action'],async(args,exec)=>{
+ {action:{type:'string',enum:['status','check','states','review']},taskId:text(40),caseIds:{type:'array',items:text(100),minItems:1,maxItems:2},checkId:text(100),scenarioId:text(40),scenario:text(1000),url:text(2000),actions:browserActions,actionsByViewport:object({desktop:browserActions,mobile:browserActions}),actionsByCase:{type:'object',additionalProperties:browserActions,maxProperties:2},offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:6},verdict:{type:'string',enum:['pass','revise']},findings:strings,observations:{...strings,items:text(1600),description:'Neutral/positive facts and corrected invocation notes, not required fixes or missing coverage.'},images:{...strings,maxItems:20},visualReview:responsiveReview},['action'],async(args,exec)=>{
   const {entry,name,member}=await current(exec),task=entry.run.tasks.find(t=>t.id===args.taskId)??entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');
   if(args.action!=='states'&&!requiresWebVerification(entry.run))return {status:'not-web-target',accepted:false,required:false,target:entry.run.qaTarget??null,next:'This browser matrix does not apply to the actual native/CLI/service target. Inspect gvs_project, use real engine/process/native-window evidence, and assign a needed driver task; do not start a localhost substitute.'};
   if(!task||!['review','user-review','design-review'].includes(task.kind))throw new Error('Use the exact existing UI review taskId. Briefs/consultations and editing tasks are not responsive acceptance.');
@@ -767,7 +783,7 @@ export function apply(ctx,config={}){
   const inspection=inspectResponsiveCheck(entry.run,task,record,args);
   const findings=[...inspection.findings,...(inspection.visualReview?.assessments??[]).filter(a=>a.disposition==='outside-scope').map(a=>`Responsive ${record.caseId}: ${a.reason} Evidence ${a.imageId}`)];
   const issues=findings.length?recordFindings(entry.run,{...task,result:{verdict:'revise',summary:`Responsive defect in ${record.caseId}`,findings}}):[];await commit(entry);
-  if(findings.length)await ctx.agentTeams.sendMessage(exec.agent,{target:'lead',content:[{type:'text',text:`GVS RESPONSIVE FEEDBACK ${JSON.stringify({taskId:task.id,caseId:record.caseId,checkId:record.id,findings,issueIds:issues.map(i=>i.id)})}. Assign owned repair and independent rechecks; preserve the complete goal.`}],signal:exec.signal});
+  if(findings.length)await ctx.agentTeams.sendMessage(exec.agent,{target:'lead',content:[{type:'text',text:`GVS RESPONSIVE FEEDBACK ${JSON.stringify({taskId:task.id,caseId:record.caseId,checkId:record.id,findings,observations:inspection.observations.slice(0,3),issueIds:issues.map(i=>i.id)})}. Assign owned repair and independent rechecks; preserve the complete goal.`}],signal:exec.signal});
   return {checkId:record.id,inspection,issueIds:issues.map(i=>i.id),coverage:compact()};
  },180000);
  register('gvs_game_check','Exercise an actual Canvas/WebGL game using its test-build __gvsGame v1 bridge. reset/step/hold/press/pointer drive real simulation; assert compares state paths. Returns actual frames, images and category coverage. It never treats a screenshot as collision proof.',{url:text(2000),scenario:text(500),actions:{type:'array',items:action,minItems:1,maxItems:32}},['url','actions'],(args,exec)=>browserCheck(args,exec,true));

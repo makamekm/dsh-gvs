@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {analyzeLayout,addLayoutCapture,VISUAL_CHECKS,validateVisualReview,visualAuditStatus,visualStates} from '../v3/visual.js';
+import {analyzeLayout,addLayoutCapture,VISUAL_CHECKS,validateVisualReview,visualAuditStatus,visualStates,visualAssessmentFindings} from '../v3/visual.js';
 const node=(key,type,x,y,width,height,extra={})=>({key,elementKey:key,type,label:key,rect:{x,y,width,height},ancestors:[],...extra});
 test('rendered geometry detects independent overlaps, edge text, clipping and blocked controls, not normal nested content',()=>{
  const nodes=[node('brand','image',10,30,80,80),node('action','control',20,70,180,40),node('footer','text',0,180,180,20,{surface:{key:'card',rect:{x:0,y:0,width:220,height:200}}}),node('clipped','text',250,0,80,20,{clip:{x:250,y:0,right:300,bottom:30}}),node('blocked','control',350,0,20,20,{hitBlocked:true}),node('button-label','text',25,75,100,20,{ancestors:['action']})];
@@ -14,6 +14,15 @@ function fixture(){
  const warning=view.layout.warnings[0],result={verdict:'pass',revision:3,images:['desktop','mobile'],visualReview:{checked:VISUAL_CHECKS,assessments:[{warningId:warning.id,imageId:'mobile',disposition:'intentional',reason:'Actual screenshot demonstrates readable intentional layering with no obstructed hit area.'}]}};
  return {run,task,warning,result};
 }
+test('negative assessments preserve actual screenshot provenance while stale, foreign or invented citations remain verification blockers',()=>{
+ const {run,task,result}=fixture();result.visualReview.assessments[0].disposition='defect';const input={...result,verdict:'revise',findings:[]};assert.match(visualAssessmentFindings(run,task,input)[0],/^Visual defect:/);
+ run.visualChecks[0].ok=false;assert.match(visualAssessmentFindings(run,task,input)[0],/^Visual defect:/,'Actual failed-check pixels can still prove a defect, never acceptance.');
+ const original=structuredClone(run);run.revision++;assert.match(visualAssessmentFindings(run,task,input)[0],/^Unverified/);run.revision--;
+ assert.match(visualAssessmentFindings(run,{...task,receivedImages:[]},input)[0],/^Unverified/);assert.match(visualAssessmentFindings(run,task,{...input,images:[]})[0],/^Unverified/);
+ input.visualReview.assessments[0].warningId='invented';assert.match(visualAssessmentFindings(run,task,input)[0],/^Unverified/);assert.deepEqual(run,original);
+ input.visualReview.assessments[0].disposition='intentional';assert.deepEqual(visualAssessmentFindings(run,task,input),[]);
+});
+
 test('a green test count or a clean final image cannot replace visual review and warning classification',()=>{
  const {run,task,result}=fixture();assert.throws(()=>validateVisualReview(run,task,{verdict:'pass',images:['desktop','mobile']}),/Visual acceptance needs/);
  assert.throws(()=>validateVisualReview(run,task,{...result,visualReview:{checked:VISUAL_CHECKS,assessments:[]}}),/Classify/);
