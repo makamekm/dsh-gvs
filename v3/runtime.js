@@ -8,6 +8,7 @@ import {syncGoal,planGoal,linkGoal,recordFindings,goalStatus,resolvedBlocker} fr
 import {refreshRevision} from './revision.js';
 import {decisionKey,reusableDecision,consultationKey,progressStatus,modelResult} from './flow.js';
 import {previewState} from './preview.js';
+import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus} from './visual.js';
 
 export const inject=['tools','agentTeams','subagents','fs','workingDirectory','sandboxPolicy','attachments','llm','jobs','sessionProjections'];
 const entries=new Map(),instance=randomUUID();
@@ -16,7 +17,12 @@ const text=(maxLength=4000)=>({type:'string',maxLength});
 const strings={type:'array',items:{type:'string'},maxItems:40};
 const imageParts=images=>images.map(image=>({type:'image',attachment:image.attachment}));
 const roleOf=(entry,name)=>entry.run.roles.find(role=>role.name===name);
-const liveImages=run=>[...run.viewports.map(viewport=>run.visualChecks.filter(check=>check.ok&&check.revision===run.revision).flatMap(check=>check.images).filter(image=>image.viewport===viewport).at(-1)).filter(Boolean),...(run.analysisChecks??[]).filter(check=>check.ok&&check.revision===run.revision&&check.planVersion===run.analysis?.version).slice(-1).flatMap(check=>check.images)].filter((image,i,all)=>all.findIndex(item=>item.attachment.attachmentId===image.attachment.attachmentId)===i);
+const liveImages=run=>{
+ const current=run.visualChecks.filter(c=>c.ok&&c.revision===run.revision),scene=current.filter(c=>c.views?.some(v=>v.layout)).at(-1);
+ const ui=scene?.images??run.viewports.map(viewport=>current.flatMap(c=>c.images).filter(i=>i.viewport===viewport).at(-1)).filter(Boolean);
+ const temporal=(run.analysisChecks??[]).filter(c=>c.ok&&c.revision===run.revision&&c.planVersion===run.analysis?.version).slice(-1).flatMap(c=>c.images);
+ return [...ui,...run.viewports.flatMap(viewport=>temporal.filter(i=>i.viewport===viewport).slice(-2))].filter((image,i,all)=>all.findIndex(item=>item.attachment.attachmentId===image.attachment.attachmentId)===i).slice(0,20);
+};
 const taskSummaries=(tasks,detail=false)=>tasks.map(({id,title,assignee,kind,dependsOn,state,result,instructions,startedAt,priority,scope,analysisIds})=>({id,title,assignee,kind,dependsOn,state,startedAt,priority,scope,analysisIds,...(detail?{instructions}:{}),...(result?{result:detail?result:{...result,summary:clip(result.summary,800),findings:result.findings.map(item=>clip(item,600)),inventory:result.inventory?.slice(0,10).map(item=>({...item,evidence:clip(item.evidence,400)}))}}:{})}));
 
 function reviewPlan(run,input){
@@ -55,6 +61,7 @@ export function apply(ctx,config={}){
   const member=ctx.agentTeams.membership(exec.agent),entry=await load(member.root,exec.signal);
   if(required&&!entry)throw new Error('The coordinator must call gvs_run first.');
   if(entry){
+   if(entry.run.status==='running'&&entry.run.visualRequired)entry.run.visualPolicy=1;
    entry.run.progress??={startedAt:Date.now(),metadataSinceWrite:0,writes:0};
    if(member.role==='lead'){
     if(entry.owner!==ctx&&entry.suspending){entry.abort=new AbortController();entry.suspending=false;}
@@ -190,7 +197,7 @@ export function apply(ctx,config={}){
   const io=await storage(root,exec.signal);if(io.policy.mode==='read-only')throw new Error('GVS work requires Workspace Write.');
   const visualRequired=args.kind!=='code';
   const run={schema:3,sessionId:root.id,runId:`${new Date().toISOString().replace(/[:.]/g,'-')}-${randomUUID().slice(0,8)}`,task:args.task,kind:args.kind,engine:args.engine??'',status:'running',revision:0,
-   visualRequired,viewports:args.viewports??(args.kind==='ui'?['desktop','mobile']:['desktop']),roles:previous?.run.roles??[],tasks:[],checks:[],visualChecks:[],gameChecks:[],analysis:{state:'pending',version:0,requirements:[],rationale:'',motionHint:motionHint(args.task)},analysisChecks:[],preview:null,quality:null,summary:'',progress:{startedAt:Date.now(),metadataSinceWrite:0,writes:0}};
+   visualRequired,visualPolicy:visualRequired?1:0,viewports:args.viewports??(args.kind==='ui'?['desktop','mobile']:['desktop']),roles:previous?.run.roles??[],tasks:[],checks:[],visualChecks:[],gameChecks:[],analysis:{state:'pending',version:0,requirements:[],rationale:'',motionHint:motionHint(args.task)},analysisChecks:[],preview:null,quality:null,summary:'',progress:{startedAt:Date.now(),metadataSinceWrite:0,writes:0}};
   const entry={run,root,io,write:Promise.resolve(),abort:new AbortController(),waiters:new Map(),scheduling:null};entries.set(root.id,entry);
   entry.owner=ctx;owned.add(root.id);
   const human=ctx.sessionProjections?.stateOf(root.session,'gvsHumanGoal')?.messages;
@@ -226,7 +233,7 @@ export function apply(ctx,config={}){
  });
  register('gvs_task','Create tasks with real dependencies; waiting tasks automatically wake their named agents. Teammates complete their own task. Reviews must report actual checks/images and concrete findings; blocked tasks keep downstream work waiting.',
   {action:{type:'string',enum:['create','list','complete','retry','dependencies','update']},taskId:text(40),offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:60},title:text(180),instructions:text(15000),assignee:text(40),kind:{type:'string',enum:taskKinds},dependsOn:strings,writeScopes:strings,priority:{type:'integer',minimum:-100,maximum:100},reason:text(1000),scope:{type:'string',enum:['increment','full']},analysisIds:strings,
-   verdict:{type:'string',enum:['pass','revise','blocked']},summary:text(4000),findings:{...strings,description:'ALL required fixes, missing functionality, visual mismatches or blockers; do not hide scope gaps in summary. For pass use [].'},scopeReviewed:{type:'boolean',description:'Independently compared the entire human goal and feature inventory against implementation; accepting the recent repair alone is insufficient.'},coveredRequirements:strings,addressedIssues:strings,inventory:{type:'array',maxItems:100,items:{...object({feature:text(500),evidence:text(1500),status:{type:'string',enum:['confirmed','unknown']},requirementIds:strings}),required:['feature','evidence','status','requirementIds']}},checks:{...strings,description:'ONLY exact verbatim foreground command strings, e.g. node test.mjs. No commentary, prefixes, read tools or annotations.'},images:strings,analysisReports:strings,simple:{type:'boolean'},scopePreserved:{type:'boolean'},adapterReviewed:{type:'boolean'}},['action'],async(args,exec)=>{
+   verdict:{type:'string',enum:['pass','revise','blocked']},summary:text(4000),findings:{...strings,description:'ALL required fixes, missing functionality, visual mismatches or blockers; do not hide scope gaps in summary. For pass use [].'},scopeReviewed:{type:'boolean',description:'Independently compared the entire human goal and feature inventory against implementation; accepting the recent repair alone is insufficient.'},coveredRequirements:{...strings,maxItems:1000},addressedIssues:{...strings,maxItems:1000},inventory:{type:'array',maxItems:100,items:{...object({feature:text(500),evidence:text(1500),status:{type:'string',enum:['confirmed','unknown']},requirementIds:strings}),required:['feature','evidence','status','requirementIds']}},checks:{...strings,description:'ONLY exact verbatim foreground command strings, e.g. node test.mjs. No commentary, prefixes, read tools or annotations.'},images:{...strings,maxItems:1000},analysisReports:strings,simple:{type:'boolean'},scopePreserved:{type:'boolean'},adapterReviewed:{type:'boolean'},visualReview:{...object({manualCoverage:text(2000),checked:{type:'array',items:{type:'string',enum:VISUAL_CHECKS},maxItems:7},assessments:{type:'array',maxItems:1000,items:{...object({warningId:text(60),imageId:text(150),disposition:{type:'string',enum:['intentional','defect','outside-scope']},reason:text(1000)}),required:['warningId','imageId','disposition','reason']}}}),required:['checked','assessments']}},['action'],async(args,exec)=>{
    const {member,entry,name}=await current(exec);
    if(args.action==='list'){
     if(args.taskId){
@@ -269,13 +276,14 @@ export function apply(ctx,config={}){
    if(name!=='user'&&!task.consultations.some(id=>reusableDecision(entry.run,id))&&args.verdict==='pass')throw new Error('Use gvs_ask_user with a current recorded User decision (reuseTaskId) or one focused unanswered question. Do not repeat the full regression or readiness audit.');
    const checks=args.checks??[];
    if(task.kind==='review'&&args.verdict==='pass'&&(!checks.length||checks.some(command=>!entry.run.checks.some(check=>check.taskId===task.id&&check.command.trim()===command.trim()&&check.finished&&!check.error&&check.exitCode===0))))throw new Error(`checks must contain ONLY verbatim successful command strings, without commentary. Available exact commands for this task: ${JSON.stringify([...new Set(entry.run.checks.filter(check=>check.taskId===task.id&&check.finished&&!check.error&&check.exitCode===0).map(check=>check.command))])}. Move observations to summary. Do not use a game adapter for an ordinary code task.`);
-   task.result={verdict:args.verdict,summary:args.summary,findings:args.findings,inventory:args.inventory??[],scopeReviewed:args.scopeReviewed===true,coveredRequirements:args.coveredRequirements??[],addressedIssues:args.addressedIssues??[],checks,images:args.images??[],analysisReports:args.analysisReports??[],analysisVersion:entry.run.analysis?.version??0,simple:args.simple===true,scopePreserved:args.scopePreserved===true,adapterReviewed:args.adapterReviewed===true,revision:entry.run.revision};
+   const externalVisualFindings=validateVisualReview(entry.run,task,args);
+   task.result={verdict:args.verdict,summary:args.summary,findings:args.findings,inventory:args.inventory??[],scopeReviewed:args.scopeReviewed===true,coveredRequirements:args.coveredRequirements??[],addressedIssues:args.addressedIssues??[],checks,images:args.images??[],analysisReports:args.analysisReports??[],analysisVersion:entry.run.analysis?.version??0,simple:args.simple===true,scopePreserved:args.scopePreserved===true,adapterReviewed:args.adapterReviewed===true,visualReview:args.visualReview??null,revision:entry.run.revision};
    if(name==='user'&&['brief','consultation'].includes(task.kind))task.result.decisionKey=decisionKey(entry.run);
    if(['brief','consultation','discovery'].includes(task.kind))entry.run.progress.metadataSinceWrite++;
    task.state=args.verdict==='blocked'?'blocked':'done';
    if(task.state==='done'){const native=ctx.agentTeams.getTask(entry.root,task.id);await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'complete'});}
    entry.waiters.get(task.id)?.(task.result);entry.waiters.delete(task.id);
-   const issues=recordFindings(entry.run,task);
+   const issues=[...recordFindings(entry.run,task),...(externalVisualFindings.length?recordFindings(entry.run,{...task,result:{verdict:'revise',summary:'Visual defects outside this increment remain mandatory',findings:externalVisualFindings}}):[])];
    await commit(entry);
    try{await ctx.agentTeams.sendMessage(exec.agent,{target:'lead',content:[{type:'text',text:`GVS TASK RESULT ${JSON.stringify({taskId:task.id,assignee:name,kind:task.kind,verdict:task.result.verdict,summary:clip(task.result.summary,1000),findings:task.result.findings.map(item=>clip(item,600)),issueIds:issues.map(item=>item.id),inventoryItems:task.result.inventory.length})}\nCoordinator: read the full result via gvs_task list, process EVERY finding, create/link repair and independent recheck tasks with gvs_goal. Continue the complete human goal; this is not permission to narrow scope or end the run.`}],signal:exec.signal});}
    catch(error){task.notificationError=clip(error.message,500);await commit(entry);}
@@ -310,6 +318,15 @@ export function apply(ctx,config={}){
    checks:entry.run.checks.slice(-8).map(({agent,taskId,command,exitCode,finished,error,output})=>({agent,taskId,command,exitCode,finished,error,output:clip(output,800)})),
    gameChecks:entry.run.gameChecks.slice(-8).map(({mode,ok,revision,capturedBy,coverage,scenario,assertions,advancedFrames,views})=>({mode,ok,revision,capturedBy,coverage,scenario,assertions,advancedFrames,errors:(views??[]).flatMap(view=>view.errors)})),preview:entry.run.preview,progress:progressStatus(entry.run)};
   try{const io=await storage(root,exec.signal);const legacy=JSON.parse(await io.read('.gvs/latest.json'));return {status:legacy.status,legacy:true,summary:legacy.summary};}catch(error){if(['ENOENT','FS_NOT_FOUND'].includes(error.code))return {status:'no-runs'};throw error;}
+ });
+ register('gvs_visual','Read rendered layout warnings and actual screenshots. QA and User independently inspect overlap, clipping, spacing, alignment, readability, responsive states and hit areas. Warnings are candidates, never automatic proof of a defect. Page through all pending warnings; do not substitute a clean final image for initial/intermediate states.',{warningId:text(60),offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:6}},[],async(args,exec)=>{
+  const {entry,name}=await current(exec),status=visualAuditStatus(entry.run),offset=args.offset??0,limit=args.limit??6;
+  const ordered=[...status.warnings.filter(w=>!w.qaReviewed||!w.userReviewed),...status.warnings.filter(w=>w.qaReviewed&&w.userReviewed)];
+  const warnings=args.warningId?ordered.filter(w=>w.id===args.warningId):ordered.slice(offset,offset+limit),images=[];
+  const available=entry.run.visualChecks.filter(c=>c.ok&&c.revision===entry.run.revision).flatMap(c=>c.images);
+  for(const warning of warnings){const image=available.find(i=>warning.images.includes(i.attachment.attachmentId));if(image&&!images.some(i=>i.attachment.attachmentId===image.attachment.attachmentId))images.push(image);}
+  const own=entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');if(own){own.receivedImages=[...new Set([...(own.receivedImages??[]),...images.map(i=>i.attachment.attachmentId)])];await commit(entry);}
+  return {ready:status.ready,total:ordered.length,warnings,images,nextOffset:!args.warningId&&offset+limit<ordered.length?offset+limit:null,requiredChecks:VISUAL_CHECKS,coverageLimits:entry.run.visualChecks.filter(c=>c.ok&&c.revision===entry.run.revision).flatMap(c=>(c.views??[]).filter(v=>v.layout?.truncated||v.uncapturedTransitions>0).map(v=>({viewport:v.viewport,truncated:v.layout?.truncated??false,uncapturedTransitions:v.uncapturedTransitions??0}))),next:'Classify visible candidates with actual image IDs and specific pixel/readability/hit-area evidence. Defects require revise+repair/recheck. An out-of-scope defect in an increment is saved as a mandatory global issue, never waived. No findings does not replace manual visual inspection of all states. Split long journeys to capture omitted transitions; bounded scans require explicit manualCoverage.'};
  });
  const requirement={...object({id:text(40),reason:text(600),criterion:text(1000),method:{type:'string',enum:['runtime','rendered-sequence']}}),required:['id','reason','criterion','method']};
  register('gvs_analysis','Plan conditional task-specific evidence (User only), execute a real analysis runner (assigned verify agent only), or inspect status. Smoothness requires actual rendered pixels AND frame timing with a timestamped frame sequence. Static screenshots and transform-only reports cannot pass.',{action:{type:'string',enum:['plan','check','status']},rationale:text(1200),notRequiredReason:text(1000),requirements:{type:'array',maxItems:6,items:requirement},command:text(5000)},['action'],async(args,exec)=>{
@@ -439,7 +456,7 @@ export function apply(ctx,config={}){
   if(entry.run.visualChecks.length>=64)throw new Error('Browser check budget exhausted.');
   const signal=AbortSignal.any([exec.signal,entry.abort.signal]);
   const report=await (game?captureGame:captureBrowser)(args,{config,signal,saveImage:image=>ctx.attachments.saveImage(image),viewports:entry.run.viewports});
-  const record={...report,revision:entry.run.revision,capturedBy:name};entry.run.visualChecks.push(record);if(game)entry.run.gameChecks.push(record);await commit(entry);return report;
+  const record={...report,revision:entry.run.revision,capturedBy:name,taskId:entry.run.tasks.find(t=>t.assignee===name&&t.state==='running')?.id??null};entry.run.visualChecks.push(record);if(game)entry.run.gameChecks.push(record);await commit(entry);return report;
  }
  register('gvs_browser_check','Inspect the real local UI at desktop/phone sizes with semantic actions and assertions. Returns actual screenshots, errors and layout evidence. Game collision evidence needs gvs_game_check.',{url:text(2000),scenario:text(500),actions:{type:'array',items:action,maxItems:12}},['url'],(args,exec)=>browserCheck(args,exec,false));
  register('gvs_game_check','Exercise an actual Canvas/WebGL game using its test-build __gvsGame v1 bridge. reset/step/hold/press/pointer drive real simulation; assert compares state paths. Returns actual frames, images and category coverage. It never treats a screenshot as collision proof.',{url:text(2000),scenario:text(500),actions:{type:'array',items:action,minItems:1,maxItems:32}},['url','actions'],(args,exec)=>browserCheck(args,exec,true));

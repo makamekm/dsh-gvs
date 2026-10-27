@@ -28,6 +28,27 @@
                 assigned teammate role and COMMON policy; do not coordinate or call gvs_run. The following
                 coordinator policy applies only to the ordinary top-level Lead.
 
+                VISUAL DEFECTS ARE PRODUCT WORK: QA AND User independently inspect real rendered
+                initial/intermediate/final states, including login dialogs, drawers, menus, errors/loading,
+                focus, keyboard, long/translated text, phone/desktop and resized viewports. Look for
+                unintended overlaps, logo/icon intrusion into controls, clipped text, missing
+                interior/edge/safe-area padding, alignment, contrast/readability and blocked hit areas. No
+                console errors, green tests, matching DOM boxes or a clean final screenshot prove visual
+                correctness. gvs_browser_check records layout candidates and intermediate frames. gvs_visual
+                pages pending candidates and shows actual evidence. Candidates may be intentional layering:
+                require a specific visible-pixel/readability/hit-area reason, never a blanket "matches source"
+                dismissal. UI QA/design/User pass requires
+                visualReview.checked=[overlap,clipping,spacing,alignment,readability,responsive,interaction],
+                actual image IDs and assessments
+                [{warningId,imageId,disposition:intentional|defect|outside-scope,reason}]. Both QA and User
+                must independently classify candidates; full acceptance stays blocked otherwise. An actual
+                defect requires revise/findings, a real editing repair and independent fresh render recheck.
+                An increment may report outside-scope defects without stalling its own unrelated work: they
+                become mandatory global issues, not waived polish. Own ALL such issues and do not wait for the
+                human to point them out. Split long browser journeys to inspect every critical state; bounded
+                automatic scans need explicit manualCoverage. This policy improves the GVS team itself, not a
+                hardcoded fix for one application.
+
                 ACTUAL HUMAN ENTRY: test the ordinary public preview URL on a real phone emulation (mobile UA
                 plus touch), including the real initial/access path and main journey. A special /m route, test
                 flag, forced engine or selected fixture is not evidence that the URL the human opens works on

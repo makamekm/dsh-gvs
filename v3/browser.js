@@ -3,6 +3,7 @@ import path from 'node:path';
 import {homedir} from 'node:os';
 import {pathToFileURL} from 'node:url';
 import {clip} from './protocol.js';
+import {collectLayout,addLayoutCapture} from './visual.js';
 
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
 // Local project captures must also work in a Windows service without a GPU session.
@@ -113,7 +114,8 @@ export async function captureBrowser(args, {config = {}, signal, saveImage}) {
       try {
         const response = await page.goto(url.href, {waitUntil: 'domcontentloaded', timeout: 20000});
         if (!response || response.status() >= 400) throw new Error(`Preview returned HTTP ${response?.status() ?? 'no response'}`);
-        await page.locator('body').waitFor({state: 'visible'});
+        // Fixed/absolute app shells can render correctly with a zero-height body.
+        await page.locator('body').waitFor({state: 'attached'});
         Object.assign(view,await page.evaluate(()=>({userAgent:navigator.userAgent,touchPoints:navigator.maxTouchPoints,entryUrl:location.href})),{isMobile:viewport.name==='mobile'});
         const screenshot = async stage => {
           const rendered = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -128,17 +130,21 @@ export async function captureBrowser(args, {config = {}, signal, saveImage}) {
           await canvasErrors(page,view);
           const attachment = await saveImage({data: bytes, mediaType: 'image/jpeg', name: `gvs-${viewport.name}-${stage}.jpg`});
           report.images.push({viewport: viewport.name, stage, attachment});
+          addLayoutCapture(view,await page.evaluate(collectLayout),{imageId:attachment.attachmentId,stage,url:url.href});
         };
         view.initialOutline = clip(await page.locator('body').ariaSnapshot(), 6000);
         await screenshot('initial');
-        for (const action of actions) {
+        let states=0;view.uncapturedTransitions=0;
+        for (const [index,action] of actions.entries()) {
           signal.throwIfAborted();
           await perform(page, action);
           const assertion = action.kind.startsWith('assert');
           if (assertion) report.assertions++; else report.interactions++;
           view.steps.push({kind: action.kind, target: action.name ?? action.label ?? action.testId ?? '', value: clip(action.value, 300), passed: true});
+          if(!assertion){if(states++<3)await screenshot(`step-${index+1}`);else view.uncapturedTransitions++;}
         }
         if (actions.length) await screenshot('journey');
+        view.uncapturedTransitions=Math.max(0,states-4);
         const dimensions = await page.evaluate(() => ({
           viewport: window.innerWidth, document: document.documentElement.scrollWidth,
           controls: document.querySelectorAll('button,input,select,textarea,a[href]').length

@@ -98,6 +98,23 @@ test('incremental visual approval still requires actual received current screens
  const f=fixture(),start=await f.call('gvs_run',{task:'Static UI layout',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
  const task=await f.call('gvs_task',{action:'create',title:'Static visual slice',instructions:'Inspect pixels',kind:'user-review',assignee:'user',scope:'increment',analysisIds:[]});await assert.rejects(f.complete(task.task.id,f.actor('user')),/actual current images/);
 });
+
+test('a passed increment still saves out-of-scope visual defects as mandatory goal issues',async()=>{
+ const {VISUAL_CHECKS}=await import('../v3/visual.js');
+ const f=fixture(),start=await f.call('gvs_run',{task:'Real UI review',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'qa',title:'QA',purpose:'Inspect the actual UI',capability:'verify'});
+ const saved=JSON.parse([...f.files.values()][0]);
+ const warning={id:'layout-overlap',kind:'overlap',targets:[{label:'An unrelated dialog brand'}],images:['mobile']};
+ saved.visualChecks=[{ok:true,revision:saved.revision,capturedBy:'other',images:['desktop','mobile'].map(viewport=>({viewport,stage:'initial',attachment:{attachmentId:viewport}})),views:['desktop','mobile'].map(viewport=>({viewport,layout:{schema:'gvs.layout/1',captures:[{stage:'initial',imageId:viewport,warningIds:viewport==='mobile'?[warning.id]:[]}],warnings:viewport==='mobile'?[warning]:[]}}))}];
+ for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));
+ const fresh=await import(`../v3/runtime.js?visual=${randomUUID()}`);fresh.apply(f.ctx);
+ const work=await f.call('gvs_task',{action:'create',title:'Focused visual review',instructions:'Review the current increment',assignee:'qa',kind:'review',scope:'increment',analysisIds:[]});
+ await f.call('gvs_ask_user',{reuseTaskId:start.briefTaskId},f.actor('qa'));
+ f.hooks['tools/result']({agent:f.actor('qa'),name:'pwsh',arguments:{command:'node actual-review.mjs'}},{isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'Observed'}},content:[]});
+ await f.complete(work.task.id,f.actor('qa'),{checks:['node actual-review.mjs'],images:['desktop','mobile'],visualReview:{checked:VISUAL_CHECKS,assessments:[{warningId:warning.id,imageId:'mobile',disposition:'outside-scope',reason:'This separate dialog has a visible overlap and needs a specifically owned repair and independent recheck.'}]}});
+ const goal=await f.call('gvs_goal',{action:'status'});assert.equal(goal.issues.length,1);assert.match(goal.issues[0].criterion,/visible overlap/);assert.equal(goal.ready,false);
+ assert.equal((await f.call('gvs_task',{action:'list',taskId:work.task.id})).tasks[0].result.verdict,'pass');
+});
 test('a claimed agent turn ending without completion becomes a visible blocker',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Task',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
  await f.call('gvs_agent',{action:'create',name:'helper',title:'Helper',purpose:'Read task',capability:'read'});

@@ -1,6 +1,7 @@
 import {analysisReady,analysisAcceptance} from './analysis.js';
 import {goalStatus} from './goal.js';
 import {sameEntry} from './browser.js';
+import {visualReviewAccepted,visualAuditStatus} from './visual.js';
 export const clip=(value,max=4000)=>String(value??'').slice(0,max);
 export const ID=/^[a-z][a-z0-9-]{0,39}$/;
 export const kinds=['code','ui','game2d','game3d'];
@@ -60,9 +61,10 @@ export function quality(run){
  const current=run.visualChecks.filter(check=>check.ok&&check.revision===run.revision);
  const interaction=!run.visualRequired||current.some(check=>check.interactions>0&&check.assertions>0);
  const entry=run.kind!=='ui'||!run.visualRequired||!run.preview?.url||current.some(check=>sameEntry(check.url,run.preview.url)&&run.viewports.every(viewport=>check.views?.some(view=>view.viewport===viewport&&(viewport!=='mobile'||view.isMobile===true&&view.touchPoints>0&&/Android|iPhone|iPad/.test(view.userAgent??'')))));
- return {goal:goalStatus(run).ready,source:!run.sourceError,entry,technical:accepted(technical)&&technical.result.simple===true&&technical.result.scopePreserved===true&&technical.result.checks.length>0,
-  design:!run.visualRequired||accepted(designer)&&imageAcceptance(run,designer)&&analysisAcceptance(run,designer),
-  user:accepted(user)&&user.assignee==='user'&&imageAcceptance(run,user)&&analysisAcceptance(run,user),
+ return {goal:goalStatus(run).ready,source:!run.sourceError,entry,technical:accepted(technical)&&technical.result.simple===true&&technical.result.scopePreserved===true&&technical.result.checks.length>0&&visualReviewAccepted(run,technical),
+  design:!run.visualRequired||accepted(designer)&&imageAcceptance(run,designer)&&analysisAcceptance(run,designer)&&visualReviewAccepted(run,designer),
+  user:accepted(user)&&user.assignee==='user'&&imageAcceptance(run,user)&&analysisAcceptance(run,user)&&visualReviewAccepted(run,user),
+  visualAudit:visualAuditStatus(run).ready,
   visual:!run.visualRequired||interaction&&run.viewports.every(viewport=>current.some(check=>check.images.some(image=>image.viewport===viewport))),game:gameplay,analysis:analysisReady(run)};
 }
 export function parseGameReport(report){
