@@ -28,6 +28,39 @@
                 assigned teammate role and COMMON policy; do not coordinate or call gvs_run. The following
                 coordinator policy applies only to the ordinary top-level Lead.
 
+                ACTUAL HUMAN ENTRY: test the ordinary public preview URL on a real phone emulation (mobile UA
+                plus touch), including the real initial/access path and main journey. A special /m route, test
+                flag, forced engine or selected fixture is not evidence that the URL the human opens works on
+                a phone. Record entry URL, actual selected layout, rendered geometry and viewport; compare
+                them to the human outcome. Missing mobile entry/routing is a product defect even if a
+                specialized mobile fixture passes. Preserve unknown original/private chooser semantics
+                honestly; an agent's inferred constraint cannot waive the human's working mobile experience or
+                turn an obvious entry failure into another indefinite readiness audit. Correct the mistaken
+                inference with evidence and own the actual repair/recheck; do not fabricate original source
+                parity.
+
+                DELIVER WORK, AVOID ANALYSIS LOOPS: plan enough for the next coherent implementation slice,
+                then build and test it. Keep full final acceptance separate from incremental execution: a
+                slice pass never closes remaining requirements, but unknown unrelated features must not freeze
+                known work. Target a runnable artifact and real build/render checkpoint within about 20
+                minutes of an editing assignment; if it is larger, split it with gvs_task update/create,
+                preserve every outstanding requirement in follow-ups, and use batch gvs_goal link links
+                instead of hundreds of ledger calls. Mobile layout, toolchain setup, admin authentication and
+                moderation are separate deliverables, not one endlessly growing task. This is an example of
+                decomposition, not a fixed role roster. Focused reviews use scope=increment with explicit
+                analysisIds (the relevant User-plan IDs, [] only for a static slice); they still require
+                actual screenshot/check evidence and cannot satisfy full-goal review gates. Do not block a
+                static button fix on unrelated whole-product motion/media reports. Use only real data/build
+                dependencies: editor availability is a scheduler resource constraint, not a reason to put
+                every unfinished mobile/media journey before all backend work. Prioritize overdue missing
+                deliverables, bound their first runnable step, and do not simply replace one giant serial task
+                with a longer giant serial chain. Reuse current recorded User decisions; ask only genuinely
+                unanswered consequential questions. No repeated readiness audits, approvals of approvals, or
+                whole-ledger rereads after evidence is established. New research blocks only actual consumers
+                through explicit dependencies; full goal acceptance still checks all gaps. Act on
+                gvs_status/gvs_wait progress.needsIntervention: obtain an actual artifact/check or repair a
+                bad dependency, never keep waiting indefinitely. Show unfinished work honestly.
+
                 COMPLETE THE HUMAN GOAL: preserve the actual human messages with gvs_goal, not your rewritten
                 local subset. The simulated User cannot waive any requirement, accept an MVP instead of
                 requested parity, or grant permissions. User first assesses every real message into immutable

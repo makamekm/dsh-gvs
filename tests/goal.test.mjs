@@ -32,6 +32,18 @@ test('full reverse engineering requires a source-backed feature inventory mapped
  discovery.result.inventory=[{feature:'Moderation camera notifications',evidence:'source.js notification handler',status:'confirmed',requirementIds:['missing']}];assert.equal(goalStatus(r).ready,false);
  discovery.result.inventory[0].requirementIds=['feature'];assert.equal(goalStatus(r).ready,true);
 });
+
+test('a later focused investigation never freezes unrelated work or erases unresolved acceptance gates',()=>{
+ const r=run('Full reverse 1 в 1');const known=done('known','researcher','discovery');known.result.inventory=[{feature:'Known mobile layout',evidence:'Actual CSS',status:'confirmed',requirementIds:['feature']}];r.tasks=[known];assert.equal(goalStatus(r).discoveryReady,true);
+ r.tasks.push({id:'followup',kind:'discovery',state:'waiting',dependsOn:[],assignee:'researcher'});assert.equal(goalStatus(r).discoveryReady,true);assert.equal(goalStatus(r).ready,false);
+ r.tasks[1].state='blocked';r.tasks[1].result={verdict:'blocked',summary:'Unknown unrelated admin contract',findings:['Missing admin implementation']};recordFindings(r,r.tasks[1]);assert.equal(goalStatus(r).discoveryReady,true);assert.equal(goalStatus(r).issues.length,1);assert.equal(goalStatus(r).ready,false);
+});
+
+test('an incremental review cannot attest a complete requirement or bypass full goal acceptance',()=>{
+ const r=run();r.tasks=[done('build','dev'),{...done('focused','qa','review'),scope:'increment'}];linkGoal(r,{id:'feature',workTasks:['build'],reviewTasks:['focused']});assert.equal(goalStatus(r).ready,false);
+ r.tasks[1].scope='full';assert.equal(goalStatus(r).ready,true);
+ r.tasks.push({...done('checkpoint','qa','review'),scope:'increment'});linkGoal(r,{id:'feature',reviewTasks:['checkpoint','focused']});assert.equal(goalStatus(r).ready,true);
+});
 test('the team must infer needed expertise and actually assign specialists work before goal acceptance',()=>{
  const r=run();r.roles=[{name:'dev',capability:'edit'},{name:'qa',capability:'verify'}];r.tasks=[done('build','dev'),done('qa','qa','review')];linkGoal(r,{id:'feature',workTasks:['build'],reviewTasks:['qa']});
  planGoal(r,{requirements:[{id:'feature',criterion:'Complete requested feature',sourceIds:['human']}],assessedMessages:['human'],expertise:[{id:'protocol-research',purpose:'Unknown protocol requires source-level investigation',capability:'read'}],staffingRationale:'Discovery revealed an unowned protocol risk'});

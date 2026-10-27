@@ -8,6 +8,8 @@ const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
 // Local project captures must also work in a Windows service without a GPU session.
 // Chromium's explicit software GL path; personal browser settings are untouched.
 const renderArgs=['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'];
+export function phoneContext(version){return {isMobile:true,hasTouch:true,userAgent:`Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Mobile Safari/537.36`};}
+export function sameEntry(actual,expected){try{const a=new URL(actual),b=new URL(expected);return a.port===b.port&&a.protocol===b.protocol&&(a.hostname===b.hostname||LOOPBACK.has(a.hostname)&&LOOPBACK.has(b.hostname))&&a.pathname.replace(/\/$/,'')===b.pathname.replace(/\/$/,'')&&a.search===b.search&&a.hash===b.hash;}catch{return false;}}
 async function observeCanvas(page){
   await page.addInitScript(()=>{
     const errors=[];Object.defineProperty(window,'__gvsHarnessCanvasErrors',{value:errors});
@@ -94,7 +96,7 @@ export async function captureBrowser(args, {config = {}, signal, saveImage}) {
     for (const viewport of [{name: 'desktop', width: 1440, height: 960}, {name: 'mobile', width: 390, height: 844}]) {
       signal.throwIfAborted();
       const context = await browser.newContext({viewport: {width: viewport.width, height: viewport.height},
-        isMobile: viewport.name === 'mobile', hasTouch: viewport.name === 'mobile', reducedMotion: 'reduce', serviceWorkers: 'block'});
+        ...(viewport.name==='mobile'?phoneContext(browser.version()):{isMobile:false,hasTouch:false}), reducedMotion: 'reduce', serviceWorkers: 'block'});
       const view = {viewport: viewport.name, width: viewport.width, height: viewport.height, errors: [], steps: [], overflow: false};
       const page = await context.newPage();
       await observeCanvas(page);
@@ -112,6 +114,7 @@ export async function captureBrowser(args, {config = {}, signal, saveImage}) {
         const response = await page.goto(url.href, {waitUntil: 'domcontentloaded', timeout: 20000});
         if (!response || response.status() >= 400) throw new Error(`Preview returned HTTP ${response?.status() ?? 'no response'}`);
         await page.locator('body').waitFor({state: 'visible'});
+        Object.assign(view,await page.evaluate(()=>({userAgent:navigator.userAgent,touchPoints:navigator.maxTouchPoints,entryUrl:location.href})),{isMobile:viewport.name==='mobile'});
         const screenshot = async stage => {
           const rendered = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
           await rendered();

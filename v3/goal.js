@@ -37,8 +37,8 @@ export function planGoal(run,{requirements,assessedMessages,expertise,staffingRa
 const passed=task=>task?.state==='done'&&task.result?.verdict==='pass'&&!task.result.findings?.length;
 function proof(run,item){
  const work=item.workTasks.map(id=>run.tasks.find(task=>task.id===id));
- const reviews=item.reviewTasks.map(id=>run.tasks.find(task=>task.id===id));
  const issue=!!item.taskId;
+ const reviews=item.reviewTasks.map(id=>run.tasks.find(task=>task.id===id)).filter(task=>issue||task?.scope!=='increment');
  return work.length>0&&work.every(passed)&&reviews.length>0&&reviews.every(task=>passed(task)&&task.result.revision===run.revision&&['review','design-review','game-review','user-review'].includes(task.kind)&&!work.some(implementation=>implementation.assignee===task.assignee)&&
   (issue?task.result.addressedIssues:task.result.coveredRequirements)?.includes(item.id))&&(issue||reviews.some(task=>task.result.scopeReviewed===true));
 }
@@ -77,9 +77,11 @@ export function goalStatus(run){
  const requirements=goal.requirements.map(item=>({...item,accepted:proof(run,item)}));
  const issues=goal.issues.map(item=>({...item,resolved:proof(run,item)}));
  const unassessed=goal.messages.filter(message=>!goal.assessed.includes(message.id));
- const discovery=run.tasks.filter(task=>task.kind==='discovery').at(-1);
- const inventory=discovery?.result?.inventory??[];
- const discoveryReady=!goal.discoveryRequired||passed(discovery)&&inventory.length>0&&inventory.every(item=>item.requirementIds?.length&&item.requirementIds.every(id=>requirements.some(req=>req.id===id)));
+ // A later focused investigation must not revoke already established knowledge
+ // and stop unrelated implementation. Its real consumers wait through task DAG
+ // dependencies; all unresolved requirements/findings still block final acceptance.
+ const discoveries=run.tasks.filter(task=>task.kind==='discovery'&&passed(task));
+ const discoveryReady=!goal.discoveryRequired||discoveries.some(task=>task.result.inventory?.length>0&&task.result.inventory.every(item=>item.requirementIds?.length&&item.requirementIds.every(id=>requirements.some(req=>req.id===id))));
  const expertise=[...(goal.roleNeeds??[]),...(goal.roleRequests??[])].map(need=>({...need,assigned:!!need.agent&&run.roles?.some(role=>role.name===need.agent&&role.sessionId&&!role.retired)&&run.tasks.some(task=>task.id===need.taskId&&task.assignee===need.agent)}));
  const staffingReady=!!goal.staffingRationale&&expertise.every(item=>item.assigned);
  return {ready:requirements.length>0&&!unassessed.length&&requirements.every(item=>item.accepted)&&issues.every(item=>item.resolved)&&discoveryReady&&staffingReady,

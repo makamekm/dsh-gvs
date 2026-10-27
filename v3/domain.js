@@ -1,5 +1,6 @@
 import {analysisReady,analysisAcceptance} from './analysis.js';
 import {goalStatus} from './goal.js';
+import {sameEntry} from './browser.js';
 export const clip=(value,max=4000)=>String(value??'').slice(0,max);
 export const ID=/^[a-z][a-z0-9-]{0,39}$/;
 export const kinds=['code','ui','game2d','game3d'];
@@ -50,7 +51,7 @@ export function imageAcceptance(run,task){
  return run.viewports.every(viewport=>images.some(image=>image.viewport===viewport&&received.has(image.attachment.attachmentId)&&(task.result?.images??[]).includes(image.attachment.attachmentId)));
 }
 export function quality(run){
- const latest=kind=>run.tasks.filter(task=>task.kind===kind&&task.state==='done').at(-1);
+ const latest=kind=>run.tasks.filter(task=>task.kind===kind&&task.state==='done'&&task.scope!=='increment').at(-1);
  const accepted=task=>!!task&&task.result.verdict==='pass'&&task.result.findings.length===0&&task.result.revision===run.revision;
  const technical=latest('review'),designer=latest('design-review'),user=latest('user-review'),game=latest('game-review');
  const coverage=new Set(run.gameChecks.filter(check=>check.ok&&check.revision===run.revision&&check.capturedBy===game?.assignee).flatMap(check=>check.coverage));
@@ -58,7 +59,8 @@ export function quality(run){
   ['collision','gameplay','controls',...(run.kind==='game3d'?['camera']:[])].every(category=>coverage.has(category))&&technical?.result.adapterReviewed===true;
  const current=run.visualChecks.filter(check=>check.ok&&check.revision===run.revision);
  const interaction=!run.visualRequired||current.some(check=>check.interactions>0&&check.assertions>0);
- return {goal:goalStatus(run).ready,source:!run.sourceError,technical:accepted(technical)&&technical.result.simple===true&&technical.result.scopePreserved===true&&technical.result.checks.length>0,
+ const entry=run.kind!=='ui'||!run.visualRequired||!run.preview?.url||current.some(check=>sameEntry(check.url,run.preview.url)&&run.viewports.every(viewport=>check.views?.some(view=>view.viewport===viewport&&(viewport!=='mobile'||view.isMobile===true&&view.touchPoints>0&&/Android|iPhone|iPad/.test(view.userAgent??'')))));
+ return {goal:goalStatus(run).ready,source:!run.sourceError,entry,technical:accepted(technical)&&technical.result.simple===true&&technical.result.scopePreserved===true&&technical.result.checks.length>0,
   design:!run.visualRequired||accepted(designer)&&imageAcceptance(run,designer)&&analysisAcceptance(run,designer),
   user:accepted(user)&&user.assignee==='user'&&imageAcceptance(run,user)&&analysisAcceptance(run,user),
   visual:!run.visualRequired||interaction&&run.viewports.every(viewport=>current.some(check=>check.images.some(image=>image.viewport===viewport))),game:gameplay,analysis:analysisReady(run)};

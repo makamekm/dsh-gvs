@@ -2,6 +2,7 @@ import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {z} from 'zod';
 import {clip,view} from './domain.js';
+import {progressStatus} from './flow.js';
 
 export const inject=['agents','agentTeams','tools','workingDirectory','fs','sessionProjections','systemPrompt'];
 export function retryableStop(reason){
@@ -41,13 +42,14 @@ export async function statusSnapshot(ctx,agent,signal){
  return {capturedAt:new Date().toISOString(),savedAt:run?.updatedAt??null,runId:saved?.runId??null,
   status:saved?.status??'no-runs',summary:saved?.summary??'',quality:saved?.quality??null,readError:readError??null,
   revision:saved?.revision??null,goal:saved?.goal??null,
+  delivery:run?progressStatus(run):null,
   progress:{done:saved?.taskCounts?.done??tasks.filter(task=>task.state==='done').length,total:saved?.taskCounts?.total??tasks.length,running:tasks.filter(task=>task.state==='running').length},roles,
   blockers:tasks.filter(task=>task.state==='blocked').map(({title,assignee,summary})=>({title,assignee,summary})),
   recentlyCompleted:tasks.filter(task=>task.state==='done').slice(-3).map(({title,summary})=>({title,summary})),
   next:tasks.filter(task=>task.state==='waiting').slice(0,6).map(({title,assignee,dependsOn})=>({title,assignee,dependsOn}))};
 }
 export function apply(ctx,config={}){
- ctx.systemPrompt?.section({name:'gvs-complete-goal',order:96,text:'For the top-level GVS coordinator: the entire real human goal is binding until gvs_finish returns verified. Use gvs_goal to assess immutable requirements and needed expertise, create/reuse the appropriate specialists yourself and assign real dependency tasks; the human does not choose technical roles. Resolve every review finding with repair and independent recheck. Discover unknown functionality and consequences before dependent implementation. A prototype or needs-review is not completion. Continue the same run across normal model stops; only explicit human cancellation or a documented external dependency can suspend actionable work. On upgrade/recovery preserve agent identities and completed work, inspect gvs_goal status and the paginated gvs_task list; if the User brief predates goal tracking, assign the same User a consultation to assess all humanMessages and needed expertise. Never overwrite the human contract with an agent summary.'});
+ ctx.systemPrompt?.section({name:'gvs-complete-goal',order:96,text:'For the top-level GVS coordinator: the entire real human goal is binding until gvs_finish returns verified. Use gvs_goal to assess immutable requirements and needed expertise, create/reuse the appropriate specialists yourself and assign real dependency tasks; the human does not choose technical roles. Resolve every review finding with repair and independent recheck. Discover unknown functionality and consequences before dependent implementation. A prototype or needs-review is not completion. Continue the same run across normal model stops; only explicit human cancellation or a documented external dependency can suspend actionable work. On upgrade/recovery preserve agent identities and completed work, inspect gvs_goal status and the paginated gvs_task list; if the User brief predates goal tracking, assign the same User a consultation to assess all humanMessages and needed expertise. Never overwrite the human contract with an agent summary. DELIVERY DISCIPLINE: 100% final acceptance is not 100% planning before any code. Bound each implementation assignment to one runnable increment, normally 20 minutes before a build/render checkpoint; split unrelated remaining obligations into subsequent owned tasks with gvs_task update/create and link them in batches with gvs_goal links. Do not append every discovered feature to the same active task. Do not repeat source/readiness/ownership audits after evidence is established unless a concrete new blocker affects that work. Existing passed discovery remains valid for independent work; use explicit DAG dependencies for new unknowns. Reuse passed User decisions for the current contract through gvs_ask_user reuseTaskId. Progress diagnostics needsIntervention requires actual coordinator action: inspect the editor/blocker, get a bounded artifact and real check, change a bad dependency, or assign the next implementable slice. Repeating waits, ledger relinks or acknowledgements is not progress. Never report an assigned mobile/backend task as implemented; use actual runtime evidence and identify remaining unimplemented journeys.'});
  const humanGoal=z.object({messages:z.array(z.object({id:z.string(),text:z.string()}))});
  ctx.sessionProjections.register({key:'gvsHumanGoal',stateVersion:1,stateSchema:humanGoal,init:()=>({messages:[]}),
   apply(state,event){

@@ -1,6 +1,6 @@
 {
   "name": "@makame/dsh-gvs",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "Persistent goal-driven agent teams with adaptive expertise, complete requirement coverage and independent acceptance",
   "type": "module",
   "license": "MIT",

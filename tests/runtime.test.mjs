@@ -20,7 +20,7 @@ function fixture(){
   if(saved.analysis?.state!=='ready')await call('gvs_analysis',{action:'plan',rationale:'Small code-only fixture: existing unit checks cover the goal; no additional visual analysis needed.',requirements:[]},agent);
   const goal=await call('gvs_goal',{action:'status'});await call('gvs_goal',{action:'plan',requirements:[{id:'human-goal',criterion:saved.task,sourceIds:goal.humanMessages.map(item=>item.id)}],assessedMessages:goal.humanMessages.map(item=>item.id),expertise:[],staffingRationale:'The fixture already has all needed capabilities.'},agent);
  }return call('gvs_task',{action:'complete',taskId:id,verdict:'pass',summary:'Observed result',findings:[],...extra},agent);};
- async function consult(agent){const pending=call('gvs_ask_user',{question:'Confirm the exact goal'},agent);await new Promise(resolve=>setImmediate(resolve));let list=await call('gvs_task',{action:'list'});const question=list.tasks.find(task=>task.kind==='consultation'&&task.state==='running');assert.ok(question);await complete(question.id,actor('user'));await pending;}
+ async function consult(agent){let cached;const pending=call('gvs_ask_user',{question:'Confirm the exact goal'},agent).then(value=>(cached=value,value));await new Promise(resolve=>setImmediate(resolve));if(cached)return cached;let list=await call('gvs_task',{action:'list'});const question=list.tasks.find(task=>task.kind==='consultation'&&task.state==='running');assert.ok(question);await complete(question.id,actor('user'));return pending;}
  return {root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,effects,failNextSpawn:()=>{nextSpawnError=new Error('Temporary spawn failure');},changeSource:value=>{source=value;},get spawns(){return spawns;}};
 }
 test('host API defers tasks, forbids early execution and wakes the same role without duplicating work',async()=>{
@@ -43,6 +43,60 @@ test('host API defers tasks, forbids early execution and wakes the same role wit
  await f.complete(review.task.id,f.actor('reviewer'),{checks:['node test.mjs'],simple:true,scopePreserved:true});
  const next=await f.call('gvs_task',{action:'create',title:'Second change',instructions:'New work, same role',kind:'work',assignee:'developer',dependsOn:[review.task.id]});
  assert.equal(next.task.state,'running');assert.equal(f.actor('developer').id,originalId);assert.equal(f.spawns,3);
+});
+
+test('one recorded User decision is reused across roles and later tasks without a consultation storm',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Deliver mobile then admin without reapproving known scope',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'dev',title:'Developer',purpose:'Implement known work',capability:'edit'});
+ const task=await f.call('gvs_task',{action:'create',title:'Mobile slice',instructions:'Implement the known layout and test it',kind:'work',assignee:'dev'}),actor=f.actor('dev');
+ const answer=await f.consult(actor),count=f.tasks.size;
+ const reused=await f.call('gvs_ask_user',{question:'Confirm the exact goal'},actor);assert.equal(reused.reused,true);assert.equal(f.tasks.size,count);
+ await f.complete(task.task.id,actor);
+ const next=await f.call('gvs_task',{action:'create',title:'Admin slice',instructions:'Implement the already decided token flow',kind:'work',assignee:'dev'});
+ assert.ok(next.task.consultations.includes(answer.userTaskId));await f.complete(next.task.id,actor);
+});
+
+test('batch linking is atomic and does not return the full contract for each link',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Batch known obligations',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ const work=await f.call('gvs_task',{action:'create',title:'Work',instructions:'Known work',kind:'work',assignee:'user'});
+ await assert.rejects(f.call('gvs_goal',{action:'link',links:[{id:'human-goal',workTasks:[work.task.id]},{id:'missing',workTasks:[work.task.id]}]}),/Unknown requirement/);
+ assert.deepEqual((await f.call('gvs_goal',{action:'status'})).requirements[0].workTasks,[]);
+ const linked=await f.call('gvs_goal',{action:'link',links:[{id:'human-goal',workTasks:[work.task.id]}]});assert.equal(linked.linked.length,1);assert.equal(linked.humanMessages,undefined);
+ assert.deepEqual((await f.call('gvs_goal',{action:'status'})).requirements[0].workTasks,[work.task.id]);
+});
+
+test('Lead can bound an active assignment and read its exact instructions without editing state files',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Full mobile and admin goal',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'dev',title:'Developer',purpose:'Implement',capability:'edit'});
+ const work=await f.call('gvs_task',{action:'create',title:'Overlarge work',instructions:'Mobile plus every backend feature',kind:'work',assignee:'dev'});
+ await f.call('gvs_task',{action:'update',taskId:work.task.id,title:'Mobile runnable increment',instructions:'Finish mobile layout and real render test; backend remains in the next owned task.',reason:'Stop an oversized assignment from delaying every deliverable',priority:50});
+ const detail=await f.call('gvs_task',{action:'list',taskId:work.task.id});assert.match(detail.tasks[0].instructions,/real render test/);assert.equal(detail.tasks[0].state,'running');assert.equal(detail.tasks[0].priority,50);
+ assert.match(f.sent.filter(x=>x.target==='dev').at(-1).content[0].text,/UPDATED EXISTING/);assert.equal((await f.call('gvs_goal',{action:'status'})).requirements[0].criterion,'Full mobile and admin goal');
+});
+
+test('identical analysis criteria keep existing report versions and stale User decisions cannot be reused',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Test version stability',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ const plan=(await f.call('gvs_analysis',{action:'status'})).plan;
+ await f.call('gvs_task',{action:'create',title:'Consultation',instructions:'Clarify only new criteria',kind:'consultation',assignee:'user'});
+ const repeated=await f.call('gvs_analysis',{action:'plan',rationale:'Same criteria, clearer explanation',requirements:[]},f.actor('user'));assert.equal(repeated.plan.version,plan.version);assert.equal(repeated.unchanged,true);
+ await f.call('gvs_analysis',{action:'plan',rationale:'New latency requirement',requirements:[{id:'latency',criterion:'p95 below the target',reason:'Actual new criterion',method:'runtime'}]},f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'dev',title:'Developer',purpose:'Implement',capability:'edit'});await f.call('gvs_task',{action:'create',title:'Work',instructions:'Work',kind:'work',assignee:'dev'});
+ await assert.rejects(f.call('gvs_ask_user',{reuseTaskId:start.briefTaskId},f.actor('dev')),/current human contract/);
+});
+
+test('static increment checks can finish before unrelated full-plan analysis but never count as final acceptance',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Deliver code with independent latency analysis later',kind:'code'});
+ await f.call('gvs_analysis',{action:'plan',rationale:'Full acceptance needs runtime latency',requirements:[{id:'latency',criterion:'p95 below budget',reason:'Full target',method:'runtime'}]},f.actor('user'));await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'design',title:'Design',purpose:'Inspect static increment',capability:'read'});
+ await assert.rejects(f.call('gvs_task',{action:'create',title:'Ambiguous increment',instructions:'Inspect',kind:'design-review',assignee:'design',scope:'increment'}),/explicit analysisIds/);
+ const review=await f.call('gvs_task',{action:'create',title:'Static increment',instructions:'Static slice only',kind:'design-review',assignee:'design',scope:'increment',analysisIds:[]});await f.call('gvs_ask_user',{reuseTaskId:start.briefTaskId},f.actor('design'));await f.complete(review.task.id,f.actor('design'));
+ const finish=await f.call('gvs_finish');assert.equal(finish.status,'needs-review');assert.equal(finish.quality.analysis,false);assert.equal(finish.quality.goal,false);
+ const whole=await f.call('gvs_task',{action:'create',title:'Full acceptance',instructions:'Full check',kind:'design-review',assignee:'design'});await assert.rejects(f.complete(whole.task.id,f.actor('design')),/analysis is incomplete/);
+});
+
+test('incremental visual approval still requires actual received current screenshots',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Static UI layout',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
+ const task=await f.call('gvs_task',{action:'create',title:'Static visual slice',instructions:'Inspect pixels',kind:'user-review',assignee:'user',scope:'increment',analysisIds:[]});await assert.rejects(f.complete(task.task.id,f.actor('user')),/actual current images/);
 });
 test('a claimed agent turn ending without completion becomes a visible blocker',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Task',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
