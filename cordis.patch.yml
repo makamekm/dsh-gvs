@@ -297,7 +297,7 @@
                   headChars: 4096
                   tailChars: 1024
               - id: gvs-compact-backend
-                name: '@deepseek-ai/dsh-compaction-basic'
+                name: '@makame/dsh-gvs/compaction'
                 config:
                   thresholdRatio: 0.6
                   headroomTokens: 32768

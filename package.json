@@ -1,6 +1,6 @@
 {
   "name": "@makame/dsh-gvs",
-  "version": "2.5.1",
+  "version": "2.5.2",
   "description": "Persistent goal-driven agent teams with adaptive expertise, complete requirement coverage and independent acceptance",
   "type": "module",
   "license": "MIT",
@@ -24,7 +24,8 @@
     "./recovery/icon": "./icon.svg",
     "./models": "./v3/models-host.js",
     "./models/locale/*.json": "./locale/*.json",
-    "./models/icon": "./icon.svg"
+    "./models/icon": "./icon.svg",
+    "./compaction": "./v3/compaction.js"
   },
   "files": [
     "v3/*.js",
