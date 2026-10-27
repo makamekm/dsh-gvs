@@ -1,11 +1,17 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {homedir} from 'node:os';
+import {homedir,networkInterfaces} from 'node:os';
 import {pathToFileURL} from 'node:url';
 import {clip} from './protocol.js';
 import {collectLayout,addLayoutCapture} from './visual.js';
 
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
+const reservedPorts=new Set(['3080','3081','18199']);
+export function localProjectHosts(interfaces=networkInterfaces()){
+ const hosts=new Set(LOOPBACK);
+ for(const rows of Object.values(interfaces))for(const item of rows??[])if(!item.internal&&item.address&&!['0.0.0.0','::'].includes(item.address))hosts.add(item.address.includes(':')?`[${item.address}]`:item.address);
+ return hosts;
+}
 // Local project captures must also work in a Windows service without a GPU session.
 // Chromium's explicit software GL path; personal browser settings are untouched.
 const renderArgs=['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'];
@@ -35,7 +41,7 @@ export function browserPlans(args){
  const plans={desktop:by.desktop??shared,mobile:by.mobile??shared};for(const actions of Object.values(plans))validateBrowserActions(actions);return plans;
 }
 export function phoneContext(version){return {isMobile:true,hasTouch:true,userAgent:`Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Mobile Safari/537.36`};}
-export function sameEntry(actual,expected){try{const a=new URL(actual),b=new URL(expected);return a.port===b.port&&a.protocol===b.protocol&&(a.hostname===b.hostname||LOOPBACK.has(a.hostname)&&LOOPBACK.has(b.hostname))&&a.pathname.replace(/\/$/,'')===b.pathname.replace(/\/$/,'')&&a.search===b.search&&a.hash===b.hash;}catch{return false;}}
+export function sameEntry(actual,expected){try{const a=new URL(actual),b=new URL(expected),hosts=localProjectHosts();return a.port===b.port&&a.protocol===b.protocol&&(a.hostname===b.hostname||hosts.has(a.hostname)&&hosts.has(b.hostname))&&a.pathname.replace(/\/$/,'')===b.pathname.replace(/\/$/,'')&&a.search===b.search&&a.hash===b.hash;}catch{return false;}}
 async function observeCanvas(page){
   await page.addInitScript(()=>{
     const errors=[];Object.defineProperty(window,'__gvsHarnessCanvasErrors',{value:errors});
@@ -47,8 +53,8 @@ async function canvasErrors(page,view){
 }
 export function previewURL(value) {
   const url = new URL(value);
-  if (url.protocol !== 'http:' || !LOOPBACK.has(url.hostname) || url.username || url.password || ['3080', '18199'].includes(url.port)) {
-    throw new Error('Use the project’s local HTTP preview, not Harness, the model server or an external website.');
+  if (url.protocol !== 'http:' || !localProjectHosts().has(url.hostname) || url.username || url.password || reservedPorts.has(url.port)) {
+    throw new Error('Use the project HTTP preview on loopback or a network-interface address of THIS computer, not Harness, the model server or another LAN/external host.');
   }
   return url;
 }
@@ -118,6 +124,7 @@ export async function captureViewport(page){
 
 export async function captureBrowser(args, {config = {}, signal, saveImage}) {
   const url = previewURL(args.url);
+  const allowedHosts=localProjectHosts();
   const plans=browserPlans(args);
   const chromium = await browserRuntime(config);
   signal.throwIfAborted();
@@ -142,7 +149,7 @@ export async function captureBrowser(args, {config = {}, signal, saveImage}) {
         try {
           const request = new URL(route.request().url());
           if (['data:', 'blob:', 'about:'].includes(request.protocol)) return route.continue();
-          if (LOOPBACK.has(request.hostname) && !['3080', '18199'].includes(request.port)) return route.continue();
+          if (allowedHosts.has(request.hostname) && !reservedPorts.has(request.port)) return route.continue();
         } catch {}
         return route.abort('blockedbyclient');
       });
@@ -214,7 +221,7 @@ export function probePath(state,path){
  return keys.reduce((value,key)=>value?.[key],state);
 }
 export async function captureGame(args,{config={},signal,saveImage,viewports=['desktop']}){
- const url=previewURL(args.url);url.searchParams.set('gvs_test','1');
+ const url=previewURL(args.url),allowedHosts=localProjectHosts();url.searchParams.set('gvs_test','1');
  if(!Array.isArray(args.actions)||!args.actions.length||args.actions.length>32)throw new Error('Provide 1–32 real game actions/assertions.');
  const chromium=await browserRuntime(config),executablePath=await browserExecutable(config);
  const browser=await chromium.launch({headless:true,args:renderArgs,...(executablePath?{executablePath}:{}),timeout:20000});
@@ -224,7 +231,7 @@ export async function captureGame(args,{config={},signal,saveImage,viewports=['d
   for(const viewport of viewports){
    const size=viewport==='mobile'?{width:390,height:844}:{width:1280,height:800};
    const context=await browser.newContext({viewport:size,serviceWorkers:'block',reducedMotion:'reduce'});
-   await context.route('**/*',route=>{try{const u=new URL(route.request().url());if(['data:','blob:','about:'].includes(u.protocol)||LOOPBACK.has(u.hostname)&&!['3080','18199'].includes(u.port))return route.continue();}catch{}return route.abort();});
+   await context.route('**/*',route=>{try{const u=new URL(route.request().url());if(['data:','blob:','about:'].includes(u.protocol)||allowedHosts.has(u.hostname)&&!reservedPorts.has(u.port))return route.continue();}catch{}return route.abort();});
    const page=await context.newPage();const view={viewport,...size,overflow:false,errors:[],steps:[]};const covered=new Set();
    await observeCanvas(page);
    page.on('pageerror',error=>view.errors.push(clip(error.message,1000)));
