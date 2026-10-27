@@ -22,7 +22,7 @@ export async function boundedCheckpoint(input,{budget,summarize,signal}){
  for(let round=0;round<8;round++){
   const parts=splitTranscript(text,budget),summaries=[];let last;
   for(let i=0;i<parts.length;i++){
-   signal?.throwIfAborted();last=await summarize({tools:[],messages:[{role:'system',content:[{type:'text',text:notice}]},{role:'user',content:[{type:'text',text:`Historical segment ${i+1}/${parts.length}, reduction round ${round+1}:\n${parts[i]}`}]}]});calls++;
+   signal?.throwIfAborted();last=await summarize({tools:[],messages:[{role:'user',content:[{type:'text',text:`${notice}\nHistorical segment ${i+1}/${parts.length}, reduction round ${round+1}:\n${parts[i]}`}]}]});calls++;
    const summary=last.summary?.filter(b=>b.type==='text').map(b=>b.text).join('\n');if(!summary?.trim())throw new Error('Compaction recovery returned an empty checkpoint; original history remains intact.');summaries.push(summary);
   }
   if(parts.length===1){const {llmStreamCall,usage,...result}=last;return {...result,summary:[{type:'text',text:'Historical image IDs are references only; retrieve the original frames before acceptance.\n'},...last.summary]};}
@@ -39,7 +39,10 @@ export function recoveryBackend(Base){return class GvsCompaction extends Base{
    const info=await this.ctx.llm.resolveModelInfo(provider,model,signal),window=info?.context?.contextWindow,output=policy?.maxTokens??this.config.maxTokens;
    if(!Number.isInteger(window)||window-output<4096)throw new Error('Cannot establish a safe compaction recovery budget for the selected model; original history remains intact.');
    const budget=Math.min(96000,Math.floor((window-output-2048)/2));
-   return boundedCheckpoint(input,{budget,signal,summarize:part=>super.summarize(part,agent,signal)});
+   // Clear only the auxiliary request's declaration history: routes supporting
+   // in-history tools can otherwise reintroduce schemas despite tools:[].
+   const session=new Proxy(agent.session,{get(target,key){if(key==='toolHistory')return()=>({tools:[],updates:[]});const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}}),summaryAgent=new Proxy(agent,{get(target,key){return key==='session'?session:Reflect.get(target,key,target);}});
+   return boundedCheckpoint(input,{budget,signal,summarize:part=>super.summarize(part,summaryAgent,signal)});
   }
  }
 };}
