@@ -30,6 +30,17 @@
                 assigned teammate role and COMMON policy; do not coordinate or call gvs_run. The following
                 coordinator policy applies only to the ordinary top-level Lead.
 
+                For assigned UI QA/design/User REVIEW tasks only (never briefs/consultations, editing or
+                source-only tasks), use gvs_responsive status, check and review. Work through the current
+                device/parameter/CSS-boundary matrix in batches of at most two cases. Observe first, then
+                replay real journeys with actionsByCase when controls differ. Personally inspect every
+                returned initial/intermediate/error/final frame and classify its warning candidates using
+                review; these saved reviews avoid reciting hundreds of image IDs in the final task completion.
+                A failed or stale capture is not proof. Report defects immediately with review verdict:revise
+                and findings; do not wait for the entire matrix. Emulation is not a real phone, and bundled
+                WebKit is not certification on physical Safari. Missing browser engines and untested
+                conditions must remain explicit.
+
                 PARALLEL DELIVERY: actively look for independent runnable branches whenever slots are free.
                 Use gvs_parallel status to see real dependencies, busy agents, file/resource conflicts and
                 capacity; configure normally 4 slots (1..8 supported) according to provider capacity. Do not
@@ -283,6 +294,7 @@
               maxParallel: 4
               maxTasks: 10000
               goalProtocol: 2
+              responsiveTesting: true
     - id: gvs-recovery
       name: '@makame/dsh-gvs/recovery'
       config: {}

@@ -1,7 +1,8 @@
 import path from 'node:path';
 import {randomUUID,createHash} from 'node:crypto';
 import {clip,roleSpec,readyTasks,assertDag,view,quality,kinds,taskKinds,parseGameReport,imageAcceptance} from './domain.js';
-import {captureBrowser,captureGame,previewURL,BROWSER_ACTIONS,BROWSER_STATES} from './browser.js';
+import {captureBrowser,captureGame,previewURL,BROWSER_ACTIONS,BROWSER_STATES,browserCapabilities} from './browser.js';
+import {RESPONSIVE_TESTING,responsiveMatrix,responsiveStatus,responsiveScenarios,mergeResponsiveHints,validateResponsiveAcceptance,inspectResponsiveCheck} from './responsive.js';
 import {COMMON,USER,GAME} from './prompts.js';
 import {motionHint,analysisPlan,parseAnalysisReport,analysisReady,analysisAcceptance,decodeAnalysisOutput} from './analysis.js';
 import {syncGoal,planGoal,linkGoal,recordFindings,goalStatus,resolvedBlocker} from './goal.js';
@@ -14,7 +15,7 @@ import {recordToolFailure,recordToolSuccess,toolIdentity,diagnosticStatus,toolFa
 import {providerRecoveryCandidates,providerFailureFor,readFailedSelection,inheritSelection} from './models.js';
 import {parallelFields,parallelBlocker,parallelStatus,taskAccess,runningAccessChange,writeAllowed,validateWriteScopes,evidencePath} from './parallel.js';
 import {assignmentDelivery} from './delivery.js';
-import {prepareCodePlan,stalePlanFiles,planSources,needsCodePlan,missingPlanOutputs,migrateCodePlan} from './planning.js';
+import {prepareCodePlan,stalePlanFiles,planSources,needsCodePlan,missingPlanOutputs,migrateCodePlan,CodePlanSourceError} from './planning.js';
 import {taskArtifacts} from './artifacts.js';
 
 export const inject=['tools','agentTeams','agents','sessionController','subagents','fs','workingDirectory','sandboxPolicy','attachments','llm','jobs','sessionProjections'];
@@ -78,6 +79,7 @@ export function apply(ctx,config={}){
    for(const task of entry.run.tasks){task.codePlan=migrateCodePlan(task.codePlan);task.planRequired=task.state!=='done'&&needsCodePlan(entry.run,task);}
    entry.run.parallelLimit??=maxParallel;
    if(entry.run.kind==='ui'){
+    if(config.responsiveTesting!==false)entry.run.responsivePolicy=1;
     entry.run.userTestingPolicy=1;
     if(!entry.run.userTestingSeen){entry.run.userTestingSeen=entry.run.tasks.filter(t=>t.state==='done').map(t=>t.id);entry.run.userTestingInitial=true;}
    }
@@ -207,7 +209,7 @@ export function apply(ctx,config={}){
  function register(name,description,properties,required,execute,timeoutMs=120000){
   ctx.tools.register({name,description,parameters:{...object(properties),required},timeoutMs,
    output:{schema:{},presentationMeta:(_args,value)=>({gvsTeam:value.gvsTeam??null}),render:(_args,value)=>[{type:'text',text:JSON.stringify(modelResult(value))},...imageParts(value.images??[])]},
-   async execute(args,exec){try{const value=await execute(args,exec);const info=await current(exec,false);if(info.entry){if(value.ok===false)await noteFailure(info.entry,exec,`Check ${value.id??exec.name} ${value.scenarioId??''} failed: ${JSON.stringify(value.views?.map(v=>({viewport:v.viewport,errors:v.errors}))??value.errors??'Check returned ok:false')}`);else if(recordToolSuccess(info.entry.run,operation(info.entry,exec)))await commit(info.entry);}return JSON.parse(JSON.stringify({...value,...(info.entry?{gvsTeam:view(info.entry.run)}:{})}));}catch(error){const member=exec.agent&&ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);if(entry)try{await noteFailure(entry,exec,error.message);}catch{}throw error;}}});
+   async execute(args,exec){try{const value=await execute(args,exec);const info=await current(exec,false);if(info.entry){if(value.ok===false)await noteFailure(info.entry,exec,`Check ${value.id??exec.name} ${value.scenarioId??''} failed: ${JSON.stringify(value.views?.map(v=>({viewport:v.viewport,errors:v.errors}))??value.errors??'Check returned ok:false')}`);else if(value.accepted!==false&&value.updated!==false&&value.retried!==false&&recordToolSuccess(info.entry.run,operation(info.entry,exec)))await commit(info.entry);}return JSON.parse(JSON.stringify({...value,...(info.entry?{gvsTeam:view(info.entry.run)}:{})}));}catch(error){const member=exec.agent&&ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);if(error instanceof CodePlanSourceError&&entry){await noteFailure(entry,exec,error.message);return JSON.parse(JSON.stringify({status:'needs-current-source',accepted:false,updated:false,created:false,taskId:args.taskId??null,recovery:error.recovery,next:'No task/plan/assignment changes were applied. Coordinator reads the actual current source at nextRead, corrects the anchor/edit and resubmits this SAME task. Missing file: inspect its actual producer/path; null anchor is only for genuinely new source. Never bypass validation or fabricate the file.',gvsTeam:view(entry.run)}));}if(entry)try{await noteFailure(entry,exec,error.message);}catch{}throw error;}}});
  }
  function writeDenial(entry,name,role,exec){
   if(!['write','edit'].includes(exec.name))return;
@@ -332,6 +334,13 @@ export function apply(ctx,config={}){
   {action:{type:'string',enum:['create','list','complete','retry','dependencies','update']},taskId:text(40),offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:60},title:text(180),instructions:text(15000),assignee:text(40),kind:{type:'string',enum:taskKinds},dependsOn:strings,writeScopes:strings,readScopes:strings,externalReadScopes:{...strings,description:"Absolute external environment read leases; scheduling metadata only, not a permission grant."},externalWriteScopes:{...strings,description:"Absolute external environment write leases; outside-workspace Native write/edit remain disallowed."},resources:{...strings,description:'Exclusive resource names. Omit for conservative project-runtime locking on edit/verify tasks; [] only for isolated work. Literal workspace read/write paths may end in /**.'},priority:{type:'integer',minimum:-100,maximum:100},reason:{...text(1000),description:"Optional audit rationale for update. If omitted, an exact description is derived from changed fields."},codePlan:codePlanInput,scope:{type:'string',enum:['increment','full']},reviewFocus:{type:'string',enum:['visual','source'],description:'Lead-assigned source only for static/native/ABI source reviews: kind review, scope increment, analysisIds []. No visual/full-goal waiver.'},analysisIds:strings,
    verdict:{type:'string',enum:['pass','revise','blocked']},summary:text(4000),findings:{...strings,description:'ALL required fixes, missing functionality, visual mismatches or blockers; do not hide scope gaps in summary. For pass use [].'},scopeReviewed:{type:'boolean',description:'Independently compared the entire human goal and feature inventory against implementation; accepting the recent repair alone is insufficient.'},coveredRequirements:{...strings,maxItems:1000},addressedIssues:{...strings,maxItems:1000},inventory:{type:'array',maxItems:100,items:{...object({feature:text(500),evidence:text(1500),status:{type:'string',enum:['confirmed','unknown']},requirementIds:strings}),required:['feature','evidence','status','requirementIds']}},checks:{...strings,description:'ONLY exact verbatim foreground command strings, e.g. node test.mjs. No commentary, prefixes, read tools or annotations.'},images:{...strings,maxItems:1000},analysisReports:strings,simple:{type:'boolean'},scopePreserved:{type:'boolean'},adapterReviewed:{type:'boolean'},visualReview:{...object({manualCoverage:text(2000),checked:{type:'array',items:{type:'string',enum:VISUAL_CHECKS},maxItems:7},assessments:{type:'array',maxItems:1000,items:{...object({warningId:text(60),imageId:text(150),disposition:{type:'string',enum:['intentional','defect','outside-scope']},reason:text(1000)}),required:['warningId','imageId','disposition','reason']}}}),required:['checked','assessments']}},['action'],async(args,exec)=>{
    const {member,entry,name}=await current(exec);
+   if(member.role!=='lead'&&['create','update','retry','dependencies'].includes(args.action)){
+    const own=entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');
+    if(!own)return {status:'not-assigned',accepted:false,applied:false,next:'No live task is assigned to you. Do not change or poll another assignment; the scheduler wakes your same identity when needed.'};
+    entry.forwardedPlanRequests??=new Set();const key=createHash('sha256').update(name+JSON.stringify(args)).digest('hex'),duplicate=entry.forwardedPlanRequests.has(key);
+    if(!duplicate){await ctx.agentTeams.sendMessage(exec.agent,{target:'lead',content:[{type:'text',text:`GVS TASK PLAN PROPOSAL from ${name} on ${own.id}: ${clip(JSON.stringify(args),6000)}. This is a proposal only: NO task/owner/access/dependency/plan changes were applied. Inspect current source and contracts before accepting; the coordinator retains all authority.`}],signal:exec.signal});entry.forwardedPlanRequests.add(key);}
+    return {status:'forwarded-to-coordinator',accepted:false,applied:false,duplicate,taskId:args.taskId??null,next:'Your proposal was sent to Lead without changing the task graph or permissions. Continue the actual owned slice, or report a concrete blocker; do not repeatedly submit the same proposal or impersonate Lead.'};
+   }
    if(args.action==='list'){
     if(args.taskId){
      const tasks=taskSummaries(entry.run.tasks.filter(task=>task.id===args.taskId),true),offset=args.offset??0,limit=args.limit??4;
@@ -377,6 +386,7 @@ export function apply(ctx,config={}){
     lead(member);const task=entry.run.tasks.find(task=>task.id===args.taskId);
     if(!task)throw new Error('Unknown task. Retry/change dependencies only for an existing task.');
     if(args.action==='retry'&&['running','done'].includes(task.state))return {status:task.state==='running'?'already-running':'already-completed',retried:false,task:taskSummaries([task],true)[0],next:'The existing task already advanced; no duplicate assignment or requested instruction/dependency changes were applied. Read its current result; create a follow-up only for new work.'};
+    if(args.action==='dependencies'&&['running','done'].includes(task.state))return {status:task.state==='running'?'already-running':'already-completed',accepted:false,updated:false,taskId:task.id,state:task.state,dependsOn:task.dependsOn,next:'The task advanced before this request. No dependency/instruction changes were applied. Preserve its result or live assignment; use an owned queued follow-up for new prerequisites, or update for instructions that do not change a running lease.'};
     if(!['blocked','waiting'].includes(task.state))throw new Error('Retry/change dependencies only for blocked or waiting tasks.');
     if(args.instructions)task.instructions=args.instructions;
     if(args.dependsOn){assertDag(entry.run.tasks.map(item=>item.id===task.id?{...item,dependsOn:args.dependsOn}:item));const native=ctx.agentTeams.getTask(entry.root,task.id);await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'set_dependencies',blockedBy:args.dependsOn});task.dependsOn=args.dependsOn;}
@@ -384,6 +394,7 @@ export function apply(ctx,config={}){
     await commit(entry);await schedule(entry,exec.signal);return {task};
    }
    const task=entry.run.tasks.find(task=>task.id===args.taskId);
+   if(task&&task.assignee!==name)return {status:'not-owner',accepted:false,completed:false,taskId:task.id,state:task.state,assignee:task.assignee,next:'No result was accepted or changed. The assigned teammate must report its own evidence. Read the actual current owner/state and send it concrete feedback; Lead coordinates owned repairs/rechecks instead of completing a colleague task.'};
    if(task?.assignee===name&&task.state==='done')return {status:'already-completed',completed:false,changed:false,taskId:task.id,previousVerdict:task.result?.verdict,previousSummary:clip(task.result?.summary,600),findings:(task.result?.findings??[]).slice(0,4).map(f=>clip(f,400)),findingsTotal:task.result?.findings?.length??0,next:'No new result was accepted. Read the existing verdict/evidence via paged gvs_task list taskId; do not repeat completion or replace this result. New work needs an owned follow-up.'};
    if(task?.assignee===name&&['waiting','blocked'].includes(task.state)&&['revise','blocked'].includes(args.verdict)&&args.summary&&Array.isArray(args.findings)){
     const issues=recordFindings(entry.run,{...task,result:{verdict:args.verdict,summary:args.summary,findings:args.findings}});await commit(entry);
@@ -394,7 +405,7 @@ export function apply(ctx,config={}){
    if(!task||task.assignee!==name||task.state!=='running')throw new Error('Only the assigned running teammate may complete this task. Inspect its current owner and state; do not complete another role’s task.');
    if(args.reviewFocus!==undefined&&args.reviewFocus!==(task.reviewFocus??'visual'))throw new Error('Review focus belongs to the coordinator assignment. Ask Lead to update an actual source-only increment; do not waive an assigned visual review yourself.');
    if(!args.verdict||!args.summary||!Array.isArray(args.findings))throw new Error(`Provide verdict, summary and findings as TOP-LEVEL gvs_task fields for ${task.id}. Required shape: {action:"complete",taskId:"${task.id}",verdict:"pass|revise|blocked",summary:"actual result",findings:["required fixes/blockers"]}. Use findings:[] only when there are no required fixes. Keep all assigned evidence and review fields; this error did not complete the task.`);
-   if(args.verdict==='pass'&&args.findings.length)throw new Error('For pass, findings must be []. Put positive observations in summary; findings is only for required fixes or blockers.');
+   if(args.verdict==='pass'&&args.findings.length)return {status:'needs-verdict-correction',accepted:false,completed:false,taskId:task.id,state:task.state,findings:args.findings,next:'No pass was accepted and no finding was discarded. Required fixes/blockers require verdict:revise or blocked; positive observations belong in summary. Resubmit the same task with the correct verdict and retain all required evidence.'};
    if(args.verdict==='pass'&&needsCodePlan(entry.run,task)&&task.codePlan){
     const currentSources=await planSources(task.codePlan,entry.io.bytes);
     const successful=entry.run.checks.filter(check=>check.taskId===task.id&&check.at>=task.startedAt&&check.finished&&!check.error&&check.exitCode===0&&JSON.stringify(check.codePlanSources?.filter(item=>currentSources.some(source=>source.path===item.path)))===JSON.stringify(currentSources)).map(check=>check.command);
@@ -415,6 +426,7 @@ export function apply(ctx,config={}){
    if(name!=='user'&&!task.consultations.some(id=>reusableDecision(entry.run,id))&&args.verdict==='pass')throw new Error(`Use gvs_ask_user with a current recorded User decision (reuseTaskId) or one focused unanswered question. Current reusable IDs: ${availableDecisions(entry.run).map(item=>item.taskId).join(', ')||'none'}. gvs_ask_user action:status lists their actual summaries. Do not repeat the full regression or readiness audit.`);
    const checks=args.checks??[];
    if(task.kind==='review'&&args.verdict==='pass'&&(!checks.length||checks.some(command=>!entry.run.checks.some(check=>check.taskId===task.id&&check.command.trim()===command.trim()&&check.finished&&!check.error&&check.exitCode===0))))throw new Error(`checks must contain ONLY verbatim successful command strings, without commentary. Available exact commands for this task: ${JSON.stringify([...new Set(entry.run.checks.filter(check=>check.taskId===task.id&&check.finished&&!check.error&&check.exitCode===0).map(check=>check.command))])}. Move observations to summary. Do not use a game adapter for an ordinary code task.`);
+   validateResponsiveAcceptance(entry.run,task,args);
    const externalVisualFindings=validateVisualReview(entry.run,task,args),artifacts=await artifactManifest(entry,task,exec.signal);
    task.result={verdict:args.verdict,summary:args.summary,findings:args.findings,inventory:args.inventory??[],scopeReviewed:args.scopeReviewed===true,coveredRequirements:args.coveredRequirements??[],addressedIssues:args.addressedIssues??[],checks,images:args.images??[],analysisReports:args.analysisReports??[],analysisVersion:entry.run.analysis?.version??0,simple:args.simple===true,scopePreserved:args.scopePreserved===true,reviewFocus:task.reviewFocus??'visual',adapterReviewed:args.adapterReviewed===true,visualReview:args.visualReview??null,revision:entry.run.revision};
    if(name==='user'&&['brief','consultation'].includes(task.kind))task.result.decisionKey=decisionKey(entry.run);
@@ -670,11 +682,53 @@ export function apply(ctx,config={}){
   const revision=entry.run.revision;
   const report=await (game?captureGame:captureBrowser)(args,{config,signal,saveImage:image=>ctx.attachments.saveImage(image),viewports:entry.run.viewports});
   await refreshRevision(entry,ctx.fs,exec.signal);
+  if(!game&&revision===entry.run.revision)for(const view of report.views)mergeResponsiveHints(entry.run,view.responsiveHints);
   const record={...report,id:`browser-${randomUUID()}`,at:Date.now(),revision,capturedBy:name,taskId:own?.id??null,...(scenario?{scenarioId:scenario.id,scenarioKey:scenarioKey(scenario)}:{})};entry.run.visualChecks.push(record);if(game)entry.run.gameChecks.push(record);await commit(entry);
   return {...report,id:record.id,revision,scenarioId:record.scenarioId,sourceChanged:revision!==entry.run.revision,...(own?{visualStateCount:visualStates(entry.run,own).length,next:'Inspect existing required frames via gvs_visual action:states; copy literal imageIds. Do not recapture journeys to fix completion citations.'}:{})};
  }
  const browserAction={...action,properties:{...action.properties,kind:{type:'string',enum:BROWSER_ACTIONS},state:{type:'string',enum:BROWSER_STATES},key:{...text(60),description:'Keyboard key for press, e.g. Escape. value remains an alias; do not supply conflicting keys.'}}},browserActions={type:'array',items:browserAction,maxItems:12};
  register('gvs_browser_check','Test actual UI on automatic desktop/phone viewports. press uses key (value alias); assertState accepts boolean true/false. actionsByViewport overrides shared actions for differing responsive controls; both views still need real actions/assertions. Observe current controls first.',{url:text(2000),scenario:text(500),scenarioId:text(40),actions:browserActions,actionsByViewport:object({desktop:browserActions,mobile:browserActions})},['url'],(args,exec)=>browserCheck(args,exec,false));
+ const responsiveReview={...object({manualCoverage:text(2000),checked:{type:'array',items:{type:'string',enum:VISUAL_CHECKS},maxItems:7},assessments:{type:'array',maxItems:200,items:{...object({warningId:text(60),imageId:text(150),disposition:{type:'string',enum:['intentional','defect','outside-scope']},reason:text(1000)}),required:['warningId','imageId','disposition','reason']}}}),required:['checked','assessments']};
+ register('gvs_responsive','Systematic UI simulation: status pages device/settings and discovered CSS-boundary cases; check executes up to TWO cases with real actions and images; states retrieves stored pixels; review saves your explicit per-batch visual judgement and forwards defects. Complete the matrix independently as QA/User before pass. Missing engines are reported, never treated as tested physical devices.',
+ {action:{type:'string',enum:['status','check','states','review']},taskId:text(40),caseIds:{type:'array',items:text(100),minItems:1,maxItems:2},checkId:text(100),scenarioId:text(40),scenario:text(1000),url:text(2000),actions:browserActions,actionsByViewport:object({desktop:browserActions,mobile:browserActions}),actionsByCase:{type:'object',additionalProperties:browserActions,maxProperties:2},offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:6},verdict:{type:'string',enum:['pass','revise']},findings:strings,images:{...strings,maxItems:20},visualReview:responsiveReview},['action'],async(args,exec)=>{
+  const {entry,name,member}=await current(exec),task=entry.run.tasks.find(t=>t.id===args.taskId)??entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');
+  if(!task||!['review','user-review','design-review'].includes(task.kind))throw new Error('Use the exact existing UI review taskId. Briefs/consultations and editing tasks are not responsive acceptance.');
+  const offset=args.offset??0,limit=args.limit??3;
+  entry.run.responsiveEngines=await browserCapabilities(config);
+  const compact=()=>{const s=responsiveStatus(entry.run,task);return {...s,missing:s.missing.slice(0,6),missingTotal:s.missing.length};};
+  if(args.action==='status'){
+   const matrix=responsiveMatrix(entry.run),missingIds=new Set(responsiveStatus(entry.run,task).missing.map(m=>m.caseId)),ordered=[...matrix.cases.filter(c=>missingIds.has(c.id)),...matrix.cases.filter(c=>!missingIds.has(c.id))];await commit(entry);
+   return {taskId:task.id,revision:entry.run.revision,cases:args.caseIds?ordered.filter(c=>args.caseIds.includes(c.id)):ordered.slice(offset,offset+limit),caseCount:matrix.cases.length,nextOffset:!args.caseIds&&offset+limit<ordered.length?offset+limit:null,scenarios:responsiveScenarios(task),coverage:compact(),instructions:RESPONSIVE_TESTING};
+  }
+  if(args.action==='states'){
+   const record=entry.run.responsiveChecks?.find(c=>c.id===args.checkId&&c.taskId===task.id);if(!record)throw new Error('Use an actual existing taskId/checkId from responsive feedback or check results.');
+   return {checkId:record.id,taskId:record.taskId,caseId:record.caseId,capturedBy:record.capturedBy,readOnly:true,revision:record.revision,current:record.revision===entry.run.revision,ok:record.ok,views:record.views,images:record.images.slice(offset,offset+limit),nextOffset:offset+limit<record.images.length?offset+limit:null,next:'These are shared diagnostic pixels, not your independent proof or visual approval. Only the assigned capture owner may record review. Lead can use these actual images to plan an owned repair; QA and User still execute their own cases.'};
+  }
+  const own=entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');
+  if(member.role==='lead'||!own||own.id!==task.id)throw new Error('The assigned QA/design/User must perform and inspect its OWN matrix. Lead may read status but cannot attest on behalf of another role.');
+  if(args.action==='check'){
+   if(!args.caseIds?.length)throw new Error('Copy up to two literal caseIds from status; preserve remaining cases for following batches.');
+   const matrix=responsiveMatrix(entry.run),cases=args.caseIds.map(id=>matrix.cases.find(c=>c.id===id));if(cases.some(c=>!c)||new Set(args.caseIds).size!==cases.length)throw new Error('Use unique actual caseIds from the current responsive status.');
+   if(Object.keys(args.actionsByCase??{}).some(id=>!args.caseIds.includes(id)))throw new Error('actionsByCase keys must be exactly selected caseIds, not guessed device labels.');
+   const scenario=responsiveScenarios(task).find(s=>s.id===(args.scenarioId??'current-surface'));if(!scenario)throw new Error('Use a saved scenarioId from responsive status / gvs_user_testing; first register the real observed User journey.');
+   await vision(exec);const records=[],images=[];
+   for(const item of cases){
+    const revision=entry.run.revision,report=await captureBrowser({...args,url:args.url??entry.run.preview?.url,scenario:args.scenario??scenario.expected},{config:{...config,browserEngine:item.engine},signal:AbortSignal.any([exec.signal,entry.abort.signal]),saveImage:image=>ctx.attachments.saveImage(image),viewports:[item]});
+    await refreshRevision(entry,ctx.fs,exec.signal);
+    if(revision===entry.run.revision)for(const view of report.views)mergeResponsiveHints(entry.run,view.responsiveHints);
+    const record={...report,id:`responsive-${randomUUID()}`,caseId:item.id,caseKey:item.key,scenarioId:scenario.id,scenarioKey:scenarioKey(scenario),taskId:task.id,capturedBy:name,revision,at:Date.now()};
+    entry.run.responsiveChecks??=[];entry.run.responsiveChecks.push(record);records.push(record);images.push(...record.images);await commit(entry);
+   }
+   return {ok:records.every(c=>c.ok),taskId:task.id,views:records.flatMap(c=>c.views.map(v=>({viewport:v.viewport,caseId:v.caseId,errors:v.errors}))),checks:records.map(({images,...r})=>r),images,coverage:compact(),next:'Inspect every returned frame and warning, then review each literal checkId. Report defects immediately; a capture is not visual approval.'};
+  }
+  const record=entry.run.responsiveChecks?.find(c=>c.id===args.checkId&&c.taskId===task.id);
+  if(!record||record.capturedBy!==name)throw new Error('Copy your exact existing checkId from check results; another role cannot supply your inspection.');
+  const inspection=inspectResponsiveCheck(entry.run,task,record,args);
+  const findings=[...inspection.findings,...(inspection.visualReview?.assessments??[]).filter(a=>a.disposition==='outside-scope').map(a=>`Responsive ${record.caseId}: ${a.reason} Evidence ${a.imageId}`)];
+  const issues=findings.length?recordFindings(entry.run,{...task,result:{verdict:'revise',summary:`Responsive defect in ${record.caseId}`,findings}}):[];await commit(entry);
+  if(findings.length)await ctx.agentTeams.sendMessage(exec.agent,{target:'lead',content:[{type:'text',text:`GVS RESPONSIVE FEEDBACK ${JSON.stringify({taskId:task.id,caseId:record.caseId,checkId:record.id,findings,issueIds:issues.map(i=>i.id)})}. Assign owned repair and independent rechecks; preserve the complete goal.`}],signal:exec.signal});
+  return {checkId:record.id,inspection,issueIds:issues.map(i=>i.id),coverage:compact()};
+ },180000);
  register('gvs_game_check','Exercise an actual Canvas/WebGL game using its test-build __gvsGame v1 bridge. reset/step/hold/press/pointer drive real simulation; assert compares state paths. Returns actual frames, images and category coverage. It never treats a screenshot as collision proof.',{url:text(2000),scenario:text(500),actions:{type:'array',items:action,minItems:1,maxItems:32}},['url','actions'],(args,exec)=>browserCheck(args,exec,true));
  register('gvs_native_game_check','Run the actual native engine test command in foreground and read its GVS_GAME_RESULT JSON report. Accepts engine-generated screenshot files under the workspace. Independent code review must verify the adapter uses real game/physics logic.',{command:text(5000)},['command'],async(args,exec)=>{
   const {entry,name}=await current(exec);const result=await exec.agent.ctx.tools.execute({callId:randomUUID(),agent:exec.agent,signal:exec.signal,name:process.platform==='win32'?'pwsh':'bash',arguments:{description:'Run actual engine gameplay tests',command:args.command,workdir:entry.io.cwd,timeoutMs:120000}});

@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {captureBrowser,validateBrowserActions,browserPlans,captureViewport} from '../v3/browser.js';
+import {captureBrowser,validateBrowserActions,browserPlans,captureViewport,currentControlOutline} from '../v3/browser.js';
 test('unsupported viewport action is rejected before any browser or screenshot capture with a specific correction',async()=>{
  let captured=false;await assert.rejects(captureBrowser({url:'http://127.0.0.1:5173/',actions:[{kind:'viewport',value:'1440x960'}]},{signal:new AbortController().signal,saveImage:async()=>{captured=true;}}),error=>/Unsupported browser action "viewport"/.test(error.message)&&/automatically/.test(error.message));assert.equal(captured,false);
 });
@@ -23,4 +23,10 @@ test('capture retries a transient protocol failure once on the same page and nev
  assert.equal(await captureViewport(page),bytes);assert.equal(attempts,2);
  attempts=0;page.screenshot=async()=>{attempts++;throw Error('Page.captureScreenshot: persistent failure');};await assert.rejects(captureViewport(page),/persistent failure/);assert.equal(attempts,2);
  attempts=0;page.screenshot=async()=>{attempts++;throw Error('Target page closed');};await assert.rejects(captureViewport(page),/page closed/);assert.equal(attempts,1);
+});
+
+test('control discovery prioritizes the real active dialog instead of truncating its controls behind background page text',async()=>{
+ const surface={isVisible:async()=>true,evaluate:async()=>true,ariaSnapshot:async()=>'- button "Continue with FB"\n- button "Dismiss notice"'},page={locator:selector=>selector==='body'?{ariaSnapshot:async()=>'- Background article text '.repeat(2000)}:{count:async()=>1,nth:()=>surface}};
+ const text=await currentControlOutline(page);assert.match(text,/Continue with FB/);assert.ok(!text.includes('Background article'));
+ surface.isVisible=async()=>false;assert.match(await currentControlOutline(page),/Background article/);
 });

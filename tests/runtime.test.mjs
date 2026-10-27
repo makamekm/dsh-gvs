@@ -13,7 +13,7 @@ function fixture(config={}){
  const ctx={agentTeams:team,on:(name,fn)=>{hooks[name]=fn;},effect:fn=>effects.push(fn),jobs:{attachController:()=>()=>{}},tools:{register:definition=>definitions.set(definition.name,definition),guard:fn=>{guard=fn;}},
   workingDirectory:{ensure:async()=>path.resolve('work/in-memory-fixture')},sandboxPolicy:{resolve:()=>({mode:'workspace-write'})},
   fs:{resolve:async file=>({file}),contains:()=>true,listDir:async()=>[{name:'app.js',type:'file'}],lstat:async()=>({type:'file'}),readBytes:async()=>Buffer.from(source),readText:async target=>{if(!files.has(target.file))throw Object.assign(new Error('missing'),{code:'ENOENT'});return files.get(target.file);},writeText:async(target,value)=>{files.set(target.file,value);}}};
- apply(ctx,{requireCoordinatorPlan:false,...config});
+ apply(ctx,{requireCoordinatorPlan:false,responsiveTesting:false,...config});
  const actor=name=>{const member=[...members.values()].find(member=>member.name===name);return {id:member.id,session:{header:{parentSession:root.id}},ctx:{}};};
  async function call(name,args={},agent=root){const exec={agent,name,arguments:args,signal:new AbortController().signal};await hooks['tools/pre-execute'](exec,async()=>({kind:'allow'}));const denied=guard(exec);if(denied)throw new Error(denied);return definitions.get(name).execute(args,exec);}
  const complete=async(id,agent,extra={})=>{const saved=JSON.parse([...files.values()][0]);if(saved.tasks.find(task=>task.id===id)?.kind==='brief'){
@@ -61,6 +61,23 @@ test('Native failure recovery context preserves errors, outputs and images and i
  await f.call('gvs_pause',{});assert.equal(await f.hooks['tools/execute'](exec,async()=>error),error);
 });
 
+test('live UI acceptance exposes the paged responsive matrix and cannot pass from the old single-phone checks or coordinator attestations',async()=>{
+ const f=fixture({responsiveTesting:true}),start=await f.call('gvs_run',{task:'Test responsive windows and visual collisions',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
+ const created=await f.call('gvs_task',{action:'create',title:'User live layout review',instructions:'Exercise real windows and inspect pixels',kind:'user-review',scope:'increment',analysisIds:[],assignee:'user',readScopes:['src'],resources:[]});
+ const status=await f.call('gvs_responsive',{action:'status',taskId:created.task.id,limit:2});assert.equal(status.cases.length,2);assert.ok(status.caseCount>=22);assert.equal(status.coverage.ready,false);assert.equal(status.nextOffset,2);
+ await assert.rejects(f.call('gvs_responsive',{action:'review',taskId:created.task.id,checkId:'invented',verdict:'pass',findings:[]}),/OWN matrix/);
+ await assert.rejects(f.complete(created.task.id,f.actor('user')),/actual current images|Responsive acceptance is incomplete/);assert.equal(f.tasks.get(created.task.id).status,'in_progress');
+});
+
+test('coordinator can inspect teammate responsive failure images without acquiring the right to accept their evidence',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Inspect responsive feedback',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
+ const work=await f.call('gvs_task',{action:'create',title:'Actual User review',instructions:'Observe actual pixels',kind:'user-review',scope:'increment',analysisIds:[],assignee:'user',resources:[]});
+ const saved=JSON.parse([...f.files.values()][0]);saved.responsiveChecks=[{id:'responsive-peer',taskId:work.task.id,caseId:'chromium-phone-wide',capturedBy:'user',revision:saved.revision,ok:false,views:[{viewport:'mobile',errors:['Visible brand is covered']}],images:[{viewport:'mobile',attachment:{attachmentId:'actual-peer-frame'}}]}];
+ for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));const fresh=await import(`../v3/runtime.js?responsive-read=${randomUUID()}`);fresh.apply(f.ctx,{requireCoordinatorPlan:false,responsiveTesting:true});
+ const read=await f.call('gvs_responsive',{action:'states',taskId:work.task.id,checkId:'responsive-peer'});assert.equal(read.readOnly,true);assert.equal(read.images[0].attachment.attachmentId,'actual-peer-frame');assert.equal(read.capturedBy,'user');
+ await assert.rejects(f.call('gvs_responsive',{action:'review',taskId:work.task.id,checkId:'responsive-peer',verdict:'pass',findings:[]}),/OWN matrix/);assert.equal(f.tasks.get(work.task.id).status,'in_progress');
+});
+
 test('coordinator plans gate editing, source drift stops dispatch, and completion requires actual changed code with fresh exact checks',async()=>{
  const f=fixture({requireCoordinatorPlan:true}),start=await f.call('gvs_run',{task:'Implement actual source changes',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
  await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement the plan',capability:'edit'});
@@ -68,7 +85,7 @@ test('coordinator plans gate editing, source drift stops dispatch, and completio
  assert.equal(work.status,'needs-coordinator-plan');assert.equal(work.task.state,'waiting');assert.equal((await f.call('gvs_parallel',{action:'status'})).parallel.waiting[0].reason.kind,'coordinator-plan');
  const plan={summary:'Correct actual source',changes:[{path:'app.js',anchor:'initial source',edit:'Replace initial source with the required implemented behavior.'}],checks:['node check.mjs'],acceptance:['Required behavior works in the actual app.']};
  const updated=await f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan});assert.equal(updated.task.state,'running');assert.equal(updated.task.codePlan.authoredBy,f.root.id);
- const agent=f.actor('developer');await assert.rejects(f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan},agent),/coordinator/);
+ const agent=f.actor('developer'),count=f.sent.length;const proposal=await f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan},agent);assert.equal(proposal.status,'forwarded-to-coordinator');assert.equal(proposal.applied,false);assert.equal(f.sent.length,count+1);const duplicate=await f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan},agent);assert.equal(duplicate.duplicate,true);assert.equal(f.sent.length,count+1);
  const denial=await f.hooks['tools/pre-execute']({agent:f.root,name:'write',arguments:{file_path:path.resolve('work/in-memory-fixture/app.js')},signal:new AbortController().signal},async()=>({kind:'allow'}));assert.equal(denial.kind,'deny');
  await f.consult(agent);
  const exec={agent,name:'pwsh',arguments:{command:'node check.mjs'}},result={isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'passed'}},content:[]};
@@ -87,7 +104,7 @@ test('a queued plan whose source changes waits for Lead to inspect and refresh i
  const work=await f.call('gvs_task',{action:'create',title:'Planned after dependency',instructions:'Implement exact plan',kind:'work',assignee:'developer',writeScopes:['app.js'],readScopes:['app.js'],resources:[],dependsOn:[dependency.task.id],codePlan:plan});assert.equal(work.task.state,'waiting');
  f.changeSource('new current source');await f.complete(dependency.task.id,f.actor('user'));
  const waiting=await f.call('gvs_task',{action:'list',taskId:work.task.id});assert.equal(waiting.tasks[0].state,'waiting');assert.equal(waiting.tasks[0].planning.state,'stale');
- await assert.rejects(f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan}),/anchor not found/);
+ const recovery=await f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan});assert.equal(recovery.status,'needs-current-source');assert.equal(recovery.accepted,false);assert.equal(recovery.updated,false);assert.equal(recovery.recovery.path,'app.js');assert.equal(recovery.recovery.nextRead.tool,'read');assert.equal((await f.call('gvs_task',{action:'list',taskId:work.task.id})).tasks[0].state,'waiting');
  plan.changes[0].anchor='new current source';const refreshed=await f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan});assert.equal(refreshed.task.id,work.task.id);assert.equal(refreshed.task.state,'running');
 });
 
@@ -150,7 +167,7 @@ test('host API defers tasks, forbids early execution and wakes the same role wit
  const early=await f.call('gvs_task',{action:'complete',taskId:review.task.id,verdict:'pass',summary:'False',findings:[]},f.actor('reviewer'));assert.equal(early.accepted,false);assert.equal(early.completed,false);assert.equal(f.tasks.get(review.task.id).status,'pending');
  const originalId=f.actor('developer').id;await f.consult(f.actor('developer'));await f.complete(work.task.id,f.actor('developer'));
  assert.equal(f.sent.filter(message=>message.target==='reviewer').length,1);
- await assert.rejects(f.call('gvs_task',{action:'complete',taskId:review.task.id,verdict:'pass',summary:'Checks',findings:['positive observation']},f.actor('reviewer')),/findings must be/);
+ const correction=await f.call('gvs_task',{action:'complete',taskId:review.task.id,verdict:'pass',summary:'Checks',findings:['positive observation']},f.actor('reviewer'));assert.equal(correction.status,'needs-verdict-correction');assert.equal(correction.accepted,false);assert.deepEqual(correction.findings,['positive observation']);assert.equal(f.tasks.get(review.task.id).status,'in_progress');
  await f.consult(f.actor('reviewer'));
  f.hooks['tools/result']({agent:f.actor('reviewer'),name:'pwsh',arguments:{command:'node test.mjs'}},{isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'passed'}},content:[]});
  await assert.rejects(f.complete(review.task.id,f.actor('reviewer'),{checks:['node test.mjs: passed']}),/ONLY verbatim/);
@@ -208,7 +225,7 @@ test('a stale retry/update reports an advanced task without duplicating work or 
  await f.complete(start.briefTaskId,f.actor('user'));
  const done=await f.call('gvs_task',{action:'retry',taskId:start.briefTaskId});assert.equal(done.status,'already-completed');
  const update=await f.call('gvs_task',{action:'update',taskId:start.briefTaskId,title:'Must not overwrite accepted result',reason:'The task completed after the stale status read'});assert.equal(update.updated,false);assert.equal(update.status,'already-completed');assert.equal(update.task.title,before.tasks[0].title);assert.equal(f.tasks.size,count);
- await assert.rejects(f.call('gvs_task',{action:'dependencies',taskId:start.briefTaskId,dependsOn:[]}),/blocked or waiting/);
+ const lateDeps=await f.call('gvs_task',{action:'dependencies',taskId:start.briefTaskId,dependsOn:[]});assert.equal(lateDeps.status,'already-completed');assert.equal(lateDeps.updated,false);const foreign=await f.call('gvs_task',{action:'complete',taskId:start.briefTaskId,verdict:'pass',summary:'Cannot attest for User',findings:[]});assert.equal(foreign.status,'not-owner');assert.equal(foreign.accepted,false);assert.equal(f.tasks.get(start.briefTaskId).status,'completed');
  await assert.rejects(f.call('gvs_task',{action:'retry',taskId:'not-real'}),/Unknown task/);
  const staleUpdate=await f.call('gvs_task',{action:'update',taskId:start.briefTaskId,title:'No reason'});assert.equal(staleUpdate.status,'already-completed');assert.equal(staleUpdate.updated,false);
 });
@@ -343,7 +360,7 @@ test('teammates can inspect their wait without coordinator authority and interru
  const feedback={action:'complete',taskId:review.task.id,verdict:'revise',summary:'Window failed before interruption',findings:['Observed dialog stays open after Close is pressed.']};
  const result=await f.call('gvs_task',feedback,actor);assert.equal(result.completed,false);assert.equal(result.status,'feedback-forwarded');assert.equal(result.state,'waiting');assert.equal(f.tasks.get(review.task.id).status,'pending');assert.equal(result.issueIds.length,1);assert.match(f.sent.at(-1).content[0].text,/INTERRUPTED REVIEW FEEDBACK/);
  await f.call('gvs_task',feedback,actor);assert.equal((await f.call('gvs_goal',{action:'status'})).issues.length,1);
- const queued=await f.complete(review.task.id,actor);assert.equal(queued.status,'not-running');assert.equal(queued.accepted,false);assert.equal(queued.completed,false);await assert.rejects(f.call('gvs_task',feedback,f.actor('developer')),/assigned running/);
+ const queued=await f.complete(review.task.id,actor);assert.equal(queued.status,'not-running');assert.equal(queued.accepted,false);assert.equal(queued.completed,false);const foreign=await f.call('gvs_task',feedback,f.actor('developer'));assert.equal(foreign.status,'not-owner');assert.equal(foreign.completed,false);assert.equal(f.tasks.get(review.task.id).status,'pending');
 });
 
 test('a stale repeat cannot replace an already recorded revise with pass',async()=>{
@@ -376,7 +393,7 @@ test('a passed increment still saves out-of-scope visual defects as mandatory go
  const warning={id:'layout-overlap',kind:'overlap',targets:[{label:'An unrelated dialog brand'}],images:['mobile']};
  saved.visualChecks=[{ok:true,revision:saved.revision,capturedBy:'other',images:['desktop','mobile'].map(viewport=>({viewport,stage:'initial',attachment:{attachmentId:viewport}})),views:['desktop','mobile'].map(viewport=>({viewport,layout:{schema:'gvs.layout/1',captures:[{stage:'initial',imageId:viewport,warningIds:viewport==='mobile'?[warning.id]:[]}],warnings:viewport==='mobile'?[warning]:[]}}))}];
  for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));
- const fresh=await import(`../v3/runtime.js?visual=${randomUUID()}`);fresh.apply(f.ctx,{requireCoordinatorPlan:false});
+ const fresh=await import(`../v3/runtime.js?visual=${randomUUID()}`);fresh.apply(f.ctx,{requireCoordinatorPlan:false,responsiveTesting:false});
  const work=await f.call('gvs_task',{action:'create',title:'Focused visual review',instructions:'Review the current increment',assignee:'qa',kind:'review',scope:'increment',analysisIds:[]});
  await f.call('gvs_ask_user',{reuseTaskId:start.briefTaskId},f.actor('qa'));
  f.hooks['tools/result']({agent:f.actor('qa'),name:'pwsh',arguments:{command:'node actual-review.mjs'}},{isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'Observed'}},content:[]});

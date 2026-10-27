@@ -2,6 +2,9 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {isReportFile} from './artifacts.js';
 export const CODE_PLANNING='COORDINATOR OWNS CODE PLANNING. Top-level Lead inspects current production files and actual reference/runtime evidence, resolves UX/architecture with the existing User/specialists, and authors codePlan on each edit work task: summary, changes[{path,anchor,edit}], checks (exact executable foreground commands), acceptance (observable outcomes). anchor is an exact CURRENT source fragment or sha256:<actual file hash>; null is only a genuinely new source file. Text handoff/report files are outputs, not code anchors: preserve earlier notes, and discover their real paths with gvs_artifacts rather than inventing HANDOFF.md/INTEGRATION.md. Generated report headings do not gate product code planning. edit describes the precise before/after change and relevant functions/selectors/data flow, not just a vague goal. The Host pins source hashes; a missing/stale plan prevents dispatch. Use gvs_task update to plan existing queued tasks; preserve IDs, full requirements, scopes and independent QA. Existing in-flight legacy work can finish its slice during migration. Do not create more analysis/approval roles instead of a concrete plan. Independent plans/implementations can still run in parallel. Lead coordinates and plans; delegate actual product file edits to edit specialists. Executors read the plan, implement it, run its exact checks and return actual evidence. No self-directed redesign, scope reduction, fake completion or replacing the requested behavior with a convenient alternative. If source changed, a plan is impossible, or a necessary deviation appears, message lead with the exact evidence and get a corrected plan; do not blindly apply stale code. QA/User independently compare the actual result to the real human/reference goal AND the intended plan; a faithfully executed bad plan must be rejected and corrected by Lead. Gates and current human steering remain binding.';
+export class CodePlanSourceError extends Error{
+ constructor(message,file,bytes,reason){super(message);this.code='GVS_PLAN_SOURCE_MISMATCH';this.recovery={reason,path:file,exists:bytes!==null,bytes:bytes?.length??0,sha256:bytes===null?null:createHash('sha256').update(bytes).digest('hex'),nextRead:{tool:'read',file_path:file,offset:1,limit:80}};}
+}
 export function needsCodePlan(run,task){
  const generated=['artifacts','test-results','playwright-report','dist','build','coverage','node_modules'];
  const sourceWrites=(task.writeScopes??['*']).some(scope=>!generated.some(root=>{const value=scope.replaceAll('\\','/').replace(/\/\*\*$/,'').toLowerCase();return value===root||value.startsWith(root+'/');}));
@@ -24,10 +27,10 @@ export async function prepareCodePlan(input,{cwd,read,allowed,author}){
   const bytes=await source(read,relative),sha256=bytes===null?null:hash(bytes);
   const report=isReportFile(relative);
   if(report){outputs.add(relative);notices.push({path:relative,kind:'report-output',note:'Append/update the actual report while preserving earlier evidence; a prose heading is not a product-source anchor.'});}
-  else if(item.anchor===null){if(bytes!==null)throw new Error(`Code plan marks ${file} as new, but it already exists. Inspect the actual file.`);outputs.add(relative);}
+  else if(item.anchor===null){if(bytes!==null)throw new CodePlanSourceError(`Code plan marks ${file} as new, but it already exists. Inspect the actual file.`,relative,bytes,'existing-file-marked-new');outputs.add(relative);}
   else{
    const anchor=nonempty(item.anchor,'an exact existing source anchor (or null for a new file)',2000);
-   if(bytes===null||!(anchor===`sha256:${sha256}`||new TextDecoder().decode(bytes).replace(/\r\n?/g,'\n').includes(anchor.replace(/\r\n?/g,'\n'))))throw new Error(`Code plan anchor not found in ${file}. Coordinator must inspect the current source and correct the plan.`);
+   if(bytes===null||!(anchor===`sha256:${sha256}`||new TextDecoder().decode(bytes).replace(/\r\n?/g,'\n').includes(anchor.replace(/\r\n?/g,'\n'))))throw new CodePlanSourceError(`Code plan anchor not found in ${file}. Coordinator must inspect the current source and correct the plan.`,relative,bytes,bytes===null?'missing-source-file':'missing-current-anchor');
   }
   changes.push({path:relative,anchor:item.anchor,edit:nonempty(item.edit,'a precise before/after edit instruction',6000),...(report?{kind:'report'}:{})});
   if(!report)sources.set(relative,{path:relative,sha256});

@@ -4,6 +4,7 @@ import {homedir,networkInterfaces} from 'node:os';
 import {pathToFileURL} from 'node:url';
 import {clip} from './protocol.js';
 import {collectLayout,addLayoutCapture} from './visual.js';
+import {collectResponsiveHints} from './responsive.js';
 
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
 const reservedPorts=new Set(['3080','3081','18199']);
@@ -15,7 +16,7 @@ export function localProjectHosts(interfaces=networkInterfaces()){
 // Local project captures must also work in a Windows service without a GPU session.
 // Chromium's explicit software GL path; personal browser settings are untouched.
 const renderArgs=['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'];
-export const BROWSER_ACTIONS=['click','fill','select','press','check','scroll','assertText','assertState','assertVisible','assertHidden'];
+export const BROWSER_ACTIONS=['click','hover','fill','select','press','check','scroll','assertText','assertState','assertVisible','assertHidden'];
 export const BROWSER_STATES=['checked','pressed','expanded','disabled','invalid','focused','value'];
 function pressKey(action){
  const key=action.key??action.value;
@@ -45,11 +46,18 @@ export function sameEntry(actual,expected){try{const a=new URL(actual),b=new URL
 async function observeCanvas(page){
   await page.addInitScript(()=>{
     const errors=[];Object.defineProperty(window,'__gvsHarnessCanvasErrors',{value:errors});
+    const inputs=[];Object.defineProperty(window,'__gvsHarnessInputs',{value:inputs});
+    for(const type of ['pointerdown','touchstart','keydown'])document.addEventListener(type,event=>{if(inputs.length<32)inputs.push({type,pointerType:event.pointerType??(type==='touchstart'?'touch':undefined),key:type==='keydown'?(event.key.length===1?'character':event.key):undefined,trusted:event.isTrusted});},true);
     for(const type of ['webglcontextlost','contextlost'])window.addEventListener(type,()=>errors.push(`Canvas renderer reported ${type}`),true);
   });
 }
 async function canvasErrors(page,view){
   for(const message of await page.evaluate(()=>window.__gvsHarnessCanvasErrors??[]))if(!view.errors.includes(message))view.errors.push(message);
+}
+export async function currentControlOutline(page){
+ const surfaces=page.locator('[role=dialog],[aria-modal=true],dialog[open],[role=menu]'),count=await surfaces.count();
+ for(let i=count-1;i>=Math.max(0,count-12);i--){const surface=surfaces.nth(i);if(await surface.isVisible()&&await surface.evaluate(el=>{for(let p=el;p;p=p.parentElement)if(Number(getComputedStyle(p).opacity)===0)return false;return true;}))return clip(await surface.ariaSnapshot(),6000);}
+ return clip(await page.locator('body').ariaSnapshot(),6000);
 }
 export function previewURL(value) {
   const url = new URL(value);
@@ -60,13 +68,31 @@ export function previewURL(value) {
 }
 
 async function browserRuntime(config) {
-  const candidates = [config.browserModule,
-    path.join(homedir(), '.cache', 'codex-runtimes', 'codex-primary-runtime', 'dependencies', 'node', 'node_modules', 'playwright-core', 'index.mjs')].filter(Boolean);
-  for (const filename of candidates) {
-    try {const module = await import(pathToFileURL(filename).href); if (module.chromium) return module.chromium;} catch {}
+  const engine=config.browserEngine??'chromium';
+  if(!['chromium','firefox','webkit'].includes(engine))throw new Error('Choose an actual Playwright engine: chromium, firefox or webkit.');
+  for (const filename of [config.browserModule].filter(Boolean)) {
+    try {const module = await import(pathToFileURL(filename).href); if (module[engine]) return module[engine];} catch {}
   }
-  try {return (await import('playwright-core')).chromium;} catch {}
+  try {return (await import('playwright-core'))[engine];} catch {}
+  try {const module=await import(pathToFileURL(path.join(homedir(),'.cache','codex-runtimes','codex-primary-runtime','dependencies','node','node_modules','playwright-core','index.mjs')).href);if(module[engine])return module[engine];}catch{}
   throw new Error('Visual verification needs playwright-core. Set browserModule to its installed index.mjs.');
+}
+const capabilityProbes=new Map();
+export async function browserCapabilities(config={}){
+ const rows=[];for(const engine of ['chromium','firefox','webkit'])try{
+  const type=await browserRuntime({...config,browserEngine:engine}),file=engine==='chromium'?(await browserExecutable(config)??type.executablePath()):type.executablePath(),stat=await fs.stat(file),key=JSON.stringify([engine,file,stat.size,stat.mtimeMs]);
+  let cached=capabilityProbes.get(key);
+  if(!cached||Date.now()-cached.at>60000){cached={at:Date.now(),promise:(async()=>{let browser;try{
+   browser=await type.launch({headless:true,executablePath:file,...(engine==='chromium'?{args:renderArgs}:{}),timeout:10000});
+   const probe='data:text/html,<meta name=viewport content="width=device-width,initial-scale=1"><body><button id="a">GVS probe A</button><button id="b">GVS probe B</button></body>',page=await browser.newPage({viewport:{width:320,height:240}});await page.goto(probe);const data=await page.screenshot({type:'jpeg',timeout:7000});if(data.length<100)throw new Error('Engine returned no usable screenshot');
+   let keyboardNavigation=null;
+   for(const key of ['Tab','Alt+Tab']){for(let i=0;i<5;i++){await page.keyboard.press(key);if(await page.evaluate(()=>document.activeElement?.tagName==='BUTTON')){keyboardNavigation=key;break;}}if(keyboardNavigation)break;}
+   const features={keyboardNavigation};let featureError;
+   try{const settings=await browser.newPage({viewport:{width:320,height:240},deviceScaleFactor:2,hasTouch:true,isMobile:engine!=='firefox',colorScheme:'dark',reducedMotion:'reduce',contrast:'more'});await settings.goto(probe);await settings.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));await settings.evaluate(()=>{window.__gvsProbeTouch=false;document.addEventListener('pointerdown',e=>{window.__gvsProbeTouch=e.pointerType==='touch'&&e.isTrusted;},{once:true});});await settings.getByRole('button',{name:'GVS probe A'}).tap();Object.assign(features,await settings.evaluate(()=>({dpr:devicePixelRatio===2,touch:window.__gvsProbeTouch===true,dark:matchMedia('(prefers-color-scheme: dark)').matches,reducedMotion:matchMedia('(prefers-reduced-motion: reduce)').matches,contrast:matchMedia('(prefers-contrast: more)').matches})));try{await settings.emulateMedia({forcedColors:'active'});features.forcedColors=await settings.evaluate(()=>matchMedia('(forced-colors: active)').matches);}catch{features.forcedColors=false;}}catch(error){featureError=clip(error.message,300);}
+   return {engine,available:true,features,...(featureError?{featureError}:{}),evidence:'Actual isolated launch, screenshot and parameter/keyboard probes. Physical-device equivalence is not claimed.'};
+  }catch(error){return {engine,available:false,reason:clip(error.message,500)};}finally{await browser?.close().catch(()=>{});}})()};capabilityProbes.set(key,cached);}
+  rows.push(await cached.promise);
+ }catch(error){rows.push({engine,available:false,reason:clip(error.code??error.message,500)});}return rows;
 }
 async function browserExecutable(config) {
   const candidates = [config.browserExecutable, process.env.GVS_BROWSER_EXECUTABLE,
@@ -82,10 +108,14 @@ function locator(page, action) {
   if (action.role && action.name) return page.getByRole(action.role, {name: action.name, exact: true});
   throw new Error('Target an observed control by role+name, label or testId.');
 }
-async function perform(page, action) {
+async function keyboardReach(page,target,tabKey='Tab'){
+ for(let i=0;i<80;i++){if(await target.evaluate(element=>element===document.activeElement||element.contains(document.activeElement)))return;await page.keyboard.press(tabKey);}
+ throw new Error('The observed target is not reachable through 80 real Tab steps. Do not force focus/click; inspect keyboard reachability and focus traps.');
+}
+async function perform(page, action, inputMode='pointer',tabKey='Tab') {
   if (action.kind === 'assertText') return page.getByText(action.value, {exact: false}).first().waitFor({state: 'visible'});
   if (action.kind === 'press' && !action.role && !action.label && !action.testId) return page.keyboard.press(pressKey(action));
-  if (action.kind === 'scroll') return page.mouse.wheel(0, Number(action.value) || 600);
+  if (action.kind === 'scroll') return inputMode==='keyboard'?page.keyboard.press(Number(action.value)<0?'PageUp':'PageDown'):page.mouse.wheel(0, Number(action.value) || 600);
   const target = locator(page, action);
   if (action.kind === 'assertState') {
     const expected = expectedState(action);
@@ -101,11 +131,21 @@ async function perform(page, action) {
     }
     throw new Error(`Expected ${action.state}=${JSON.stringify(expected)}, observed ${JSON.stringify(actual)}.`);
   }
-  if (action.kind === 'click') return target.click();
-  if (action.kind === 'fill') return target.fill(action.value);
-  if (action.kind === 'select') return target.selectOption(action.value);
+  if (action.kind === 'click') {
+   if(inputMode==='keyboard'){await keyboardReach(page,target,tabKey);return page.keyboard.press('Enter');}
+   return inputMode==='touch'?target.tap():target.click();
+  }
+  if(action.kind==='hover'){if(inputMode!=='pointer')throw new Error('Hover requires a fine pointer case; do not fake hover as a touch or keyboard interaction.');return target.hover();}
+  if (action.kind === 'fill') {if(inputMode==='keyboard'){await keyboardReach(page,target,tabKey);await page.keyboard.press('ControlOrMeta+A');return page.keyboard.type(action.value);}return target.fill(action.value);}
+  if (action.kind === 'select') {
+   if(inputMode==='keyboard'){await keyboardReach(page,target,tabKey);const values=await target.locator('option').evaluateAll(options=>options.filter(o=>!o.disabled).map(o=>o.value)),index=values.indexOf(action.value);if(index<0)throw new Error('Observed native select has no enabled option matching the requested value.');await page.keyboard.press('Home');for(let i=0;i<index;i++)await page.keyboard.press('ArrowDown');return;}
+   return target.selectOption(action.value);
+  }
   if (action.kind === 'press') return target.press(pressKey(action));
-  if (action.kind === 'check') return target.setChecked(action.value !== false && action.value !== 'false');
+  if (action.kind === 'check') {
+   const expected=action.value!==false&&action.value!=='false';if(inputMode==='pointer')return target.setChecked(expected);
+   if(await target.isChecked()!==expected){if(inputMode==='keyboard'){await keyboardReach(page,target,tabKey);await page.keyboard.press('Space');}else await target.tap();}return;
+  }
   if (action.kind === 'assertVisible') return target.waitFor({state: 'visible'});
   if (action.kind === 'assertHidden') return target.waitFor({state: 'hidden'});
   throw new Error(`Unsupported browser action: ${action.kind}`);
@@ -114,44 +154,52 @@ async function perform(page, action) {
 export async function captureViewport(page){
  const rendered=()=>page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
  await rendered();
- try{return await page.screenshot({type:'jpeg',quality:82,animations:'disabled',timeout:10000});}
+ try{return await page.screenshot({type:'jpeg',quality:82,scale:'css',animations:'allow',timeout:10000});}
  catch(error){
   if(!/Page.captureScreenshot|Unable to capture screenshot/.test(error.message))throw error;
   await rendered();
-  return page.screenshot({type:'jpeg',quality:82,animations:'disabled',timeout:10000});
+  return page.screenshot({type:'jpeg',quality:82,scale:'css',animations:'allow',timeout:10000});
  }
 }
 
-export async function captureBrowser(args, {config = {}, signal, saveImage}) {
+export async function captureBrowser(args, {config = {}, signal, saveImage, viewports}) {
   const url = previewURL(args.url);
   const allowedHosts=localProjectHosts();
   const plans=browserPlans(args);
   const chromium = await browserRuntime(config);
   signal.throwIfAborted();
-  const executablePath = await browserExecutable(config);
-  const browser = await chromium.launch({headless: true, args:renderArgs, ...(executablePath ? {executablePath} : {}), timeout: 20000});
+  const engine=config.browserEngine??'chromium',executablePath = engine==='chromium'?await browserExecutable(config):undefined;
+  const browser = await chromium.launch({headless: true, ...(engine==='chromium'?{args:renderArgs}:{}), ...(executablePath ? {executablePath} : {}), timeout: 20000});
   const abort = () => {browser.close().catch(() => {});};
   signal.addEventListener('abort', abort, {once: true});
   const report = {url: url.href, scenario: clip(args.scenario || 'Inspect page layout and controls', 500), ok: true,
     interactions: 0, assertions: 0, images: [], views: []};
   try {
-    for (const viewport of [{name: 'desktop', width: 1440, height: 960}, {name: 'mobile', width: 390, height: 844}]) {
-      const actions=plans[viewport.name];
+    for (const viewport of viewports?.every(v=>v&&typeof v==='object')?viewports:[{name: 'desktop', width: 1440, height: 960}, {name: 'mobile', width: 390, height: 844}]) {
+      const actions=args.actionsByCase?.[viewport.id]??plans[viewport.name];validateBrowserActions(actions);
       signal.throwIfAborted();
       const context = await browser.newContext({viewport: {width: viewport.width, height: viewport.height},
-        ...(viewport.name==='mobile'?phoneContext(browser.version()):{isMobile:false,hasTouch:false}), reducedMotion: 'reduce', serviceWorkers: 'block'});
-      const view = {viewport: viewport.name, width: viewport.width, height: viewport.height, errors: [], steps: [], overflow: false};
+        ...(viewport.name==='mobile'?phoneContext(browser.version()):{isMobile:false,hasTouch:false}),
+        ...(engine==='firefox'?{isMobile:false,userAgent:viewport.name==='mobile'?'Mozilla/5.0 (Android; Mobile; rv:130.0) Gecko/130.0 Firefox/130.0':undefined}:engine==='webkit'&&viewport.name==='mobile'?{userAgent:'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1'}:{}),
+        ...(viewport.isMobile!==undefined?{isMobile:viewport.isMobile}:{}),...(viewport.hasTouch!==undefined?{hasTouch:viewport.hasTouch}:{}),...(viewport.deviceScaleFactor?{deviceScaleFactor:viewport.deviceScaleFactor}:{}),
+        colorScheme:viewport.colorScheme??'light',contrast:viewport.contrast??'no-preference',forcedColors:viewport.forcedColors??'none',reducedMotion:viewport.reducedMotion??'reduce', serviceWorkers: 'block'});
+      const inputMode=viewport.inputMode??((viewport.hasTouch??viewport.name==='mobile')?'touch':'pointer');
+      const view = {viewport: viewport.name, caseId:viewport.id,engine,inputMode,width: viewport.width, height: viewport.height,parameters:viewport, errors: [], steps: [], overflow: false};
       const page = await context.newPage();
       await observeCanvas(page);
       page.setDefaultTimeout(7000);
       page.on('pageerror', error => view.errors.push(clip(error.message, 1000)));
       await context.route('**/*', route => {
+        if(viewport.blockFonts&&route.request().resourceType()==='font'||viewport.blockImages&&route.request().resourceType()==='image')return route.abort('blockedbyclient');
+        const proceed=()=>{
         try {
           const request = new URL(route.request().url());
           if (['data:', 'blob:', 'about:'].includes(request.protocol)) return route.continue();
           if (allowedHosts.has(request.hostname) && !reservedPorts.has(request.port)) return route.continue();
         } catch {}
         return route.abort('blockedbyclient');
+        };
+        return viewport.requestDelayMs?new Promise(resolve=>setTimeout(resolve,viewport.requestDelayMs)).then(proceed):proceed();
       });
       try {
         const response = await page.goto(url.href, {waitUntil: 'domcontentloaded', timeout: 20000});
@@ -165,23 +213,28 @@ export async function captureBrowser(args, {config = {}, signal, saveImage}) {
           return !!body.innerText.trim()||[...body.querySelectorAll('canvas,img,svg,video,input,button,[role]')].some(element=>{const r=element.getBoundingClientRect();return r.width>0&&r.height>0&&getComputedStyle(element).visibility!=='hidden';});
         },undefined,{timeout:15000});
         await page.waitForFunction(()=>document.fonts.status==='loaded',undefined,{timeout:7000});
-        Object.assign(view,await page.evaluate(()=>({userAgent:navigator.userAgent,touchPoints:navigator.maxTouchPoints,entryUrl:location.href})),{isMobile:viewport.name==='mobile'});
+        if(viewport.rootFontScale&&viewport.rootFontScale!==1)await page.evaluate(scale=>{document.documentElement.style.setProperty('font-size',`${parseFloat(getComputedStyle(document.documentElement).fontSize)*scale}px`,'important');},viewport.rootFontScale);
+        view.responsiveHints=await page.evaluate(collectResponsiveHints);
+        Object.assign(view,await page.evaluate(()=>({userAgent:navigator.userAgent,touchPoints:navigator.maxTouchPoints,entryUrl:location.href,devicePixelRatio,layoutViewport:{width:innerWidth,height:innerHeight},visualViewport:window.visualViewport?{width:window.visualViewport.width,height:window.visualViewport.height,scale:window.visualViewport.scale}:null,rootFontSize:getComputedStyle(document.documentElement).fontSize,media:{dark:matchMedia('(prefers-color-scheme: dark)').matches,reducedMotion:matchMedia('(prefers-reduced-motion: reduce)').matches,forcedColors:matchMedia('(forced-colors: active)').matches,moreContrast:matchMedia('(prefers-contrast: more)').matches,coarsePointer:matchMedia('(pointer: coarse)').matches,hover:matchMedia('(hover: hover)').matches}})),{isMobile:viewport.isMobile??(engine!=='firefox'&&viewport.name==='mobile')});
         const screenshot = async stage => {
           const bytes=await captureViewport(page);
           await canvasErrors(page,view);
-          const attachment = await saveImage({data: bytes, mediaType: 'image/jpeg', name: `gvs-${viewport.name}-${stage}.jpg`});
-          report.images.push({viewport: viewport.name, stage, attachment});
+          const attachment = await saveImage({data: bytes, mediaType: 'image/jpeg', name: `gvs-${viewport.id??viewport.name}-${stage}.jpg`});
+          report.images.push({viewport: viewport.name,caseId:viewport.id,width:viewport.width,height:viewport.height, stage, attachment});
           addLayoutCapture(view,await page.evaluate(collectLayout),{imageId:attachment.attachmentId,stage,url:url.href});
+          view.responsiveHints=await page.evaluate(collectResponsiveHints);
         };
-        view.initialOutline = clip(await page.locator('body').ariaSnapshot(), 6000);
+        view.initialOutline = await currentControlOutline(page);
         await screenshot('initial');
+        if(viewport.offlineAfterLoad){await context.setOffline(true);view.networkCondition='Offline after actual initial load; not a cold offline launch.';}
         let states=0;view.uncapturedTransitions=0;
         for (const [index,action] of actions.entries()) {
           signal.throwIfAborted();
-          try{await perform(page, action);}catch(error){view.steps.push({kind:action.kind,target:action.name??action.label??action.testId??'',value:clip(action.value??action.key,300),...(action.state?{state:action.state}:{}),passed:false,error:clip(error.message,1000)});await screenshot(`failed-step-${index+1}`).catch(()=>{});throw error;}
+          await page.evaluate(()=>{window.__gvsHarnessInputs.length=0;});
+          try{await perform(page, action,inputMode,viewport.keyboardNavigation??'Tab');}catch(error){view.steps.push({kind:action.kind,target:action.name??action.label??action.testId??'',value:clip(action.value??action.key,300),...(action.state?{state:action.state}:{}),passed:false,error:clip(error.message,1000)});await screenshot(`failed-step-${index+1}`).catch(()=>{});throw error;}
           const assertion = action.kind.startsWith('assert');
           if (assertion) report.assertions++; else report.interactions++;
-          view.steps.push({kind: action.kind, target: action.name ?? action.label ?? action.testId ?? '', value: clip(action.value??action.key, 300), ...(action.state?{state:action.state}:{}), passed: true});
+          view.steps.push({kind: action.kind,inputMode:action.kind==='scroll'&&inputMode!=='keyboard'?'wheel':inputMode,inputEvents:await page.evaluate(()=>window.__gvsHarnessInputs.splice(0)), target: action.name ?? action.label ?? action.testId ?? '', value: clip(action.value??action.key, 300), ...(action.state?{state:action.state}:{}), passed: true});
           if(!assertion){if(states++<3)await screenshot(`step-${index+1}`);else view.uncapturedTransitions++;}
         }
         if (actions.length) await screenshot('journey');
@@ -193,12 +246,13 @@ export async function captureBrowser(args, {config = {}, signal, saveImage}) {
         view.overflow = dimensions.document > dimensions.viewport + 1;
         view.controls = dimensions.controls;
         view.title = await page.title();
-        view.finalOutline = clip(await page.locator('body').ariaSnapshot(), 6000);
+        view.finalOutline = await currentControlOutline(page);
         await page.keyboard.press('Tab');
         view.keyboardFocus = await page.locator(':focus').evaluate(element => ({tag: element.tagName, name: element.getAttribute('aria-label') || element.textContent?.trim().slice(0,100)})).catch(() => null);
       } catch (error) {
         signal.throwIfAborted();
         view.errors.push(clip(error.message, 1500));
+        view.failedOutline=await currentControlOutline(page).catch(()=>null);
       } finally {await context.close();}
       if (view.errors.length || view.overflow) report.ok = false;
       report.views.push(view);

@@ -51,3 +51,13 @@ test('the team must infer needed expertise and actually assign specialists work 
  r.roles.push({name:'researcher',capability:'read',sessionId:'real-researcher'});assert.throws(()=>linkGoal(r,{roleNeedId:'protocol-research',agentName:'researcher',taskId:'absent'}),/actual task/);
  r.tasks.push(done('inspect','researcher'));linkGoal(r,{roleNeedId:'protocol-research',agentName:'researcher',taskId:'inspect'});assert.equal(goalStatus(r).ready,true);
 });
+
+test('a registered verify specialist can satisfy independent read expertise with its real assigned discovery task, without creating a replacement role',()=>{
+ const r=run();r.roles=[{name:'reverse',capability:'verify',sessionId:'existing-reverse'},{name:'editor',capability:'edit',sessionId:'existing-editor'}];r.tasks=[{id:'inspect-source',kind:'discovery',assignee:'reverse',state:'running'},{id:'implement',kind:'work',assignee:'editor',state:'running'}];
+ r.goal.roleNeeds=[{id:'source-discovery',capability:'read',purpose:'Independent source inspection'}];r.goal.roleRequests=[{id:'need-read-input',capability:'read',purpose:'Inspect captured source'}];
+ for(const link of [{roleNeedId:'source-discovery'},{requestId:'need-read-input'}])assert.doesNotThrow(()=>linkGoal(r,{...link,agentName:'reverse',taskId:'inspect-source'}));assert.ok(goalStatus(r).expertise.every(n=>n.assigned));assert.equal(r.roles.length,2);
+ assert.throws(()=>linkGoal(r,{roleNeedId:'source-discovery',agentName:'editor',taskId:'implement'}),/edit\/User roles do not replace/);
+ assert.throws(()=>linkGoal(r,{requestId:'need-read-input',agentName:'editor',taskId:'inspect-source'}),/currently assigned to reverse/);
+ r.tasks[0].assignee='editor';assert.ok(goalStatus(r).expertise.every(n=>!n.assigned));
+ r.goal.roleNeeds.push({id:'must-verify',capability:'verify'});r.roles.push({name:'reader',capability:'read',sessionId:'read-only'});r.tasks.push({id:'read-task',assignee:'reader'});assert.throws(()=>linkGoal(r,{roleNeedId:'must-verify',agentName:'reader',taskId:'read-task'}),/requires verify/);
+});

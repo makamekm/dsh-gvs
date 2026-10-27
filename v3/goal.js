@@ -35,6 +35,7 @@ export function planGoal(run,{requirements,assessedMessages,expertise,staffingRa
  delete goal.handoff;
 }
 const passed=task=>task?.state==='done'&&task.result?.verdict==='pass'&&!task.result.findings?.length;
+export function expertiseRoleSuitable(need,role){return !!role?.sessionId&&!role.retired&&!role.error&&(!need.capability||role.capability===need.capability||need.capability==='read'&&role.capability==='verify');}
 function proof(run,item){
  const work=item.workTasks.map(id=>run.tasks.find(task=>task.id===id));
  const issue=!!item.taskId;
@@ -45,8 +46,10 @@ function proof(run,item){
 export function linkGoal(run,{id,issueId,workTasks,reviewTasks,roleNeedId,requestId,agentName,taskId}){
  if(roleNeedId||requestId){
   const need=roleNeedId?run.goal.roleNeeds?.find(item=>item.id===roleNeedId):run.goal.roleRequests?.find(item=>item.id===requestId);
-  const role=run.roles.find(role=>role.name===agentName&&!role.retired),task=run.tasks.find(task=>task.id===taskId&&task.assignee===agentName);
-  if(!need||!role?.sessionId||!task||need.capability&&role.capability!==need.capability)throw new Error('Resolve an expertise need/request with a successfully registered suitable role AND an actual task assigned to it.');
+  const role=run.roles.find(role=>role.name===agentName),task=run.tasks.find(task=>task.id===taskId);
+  if(!need)throw new Error(`Unknown expertise ${roleNeedId?'roleNeedId':'requestId'} ${roleNeedId??requestId}. Read gvs_goal status and copy the exact existing ID; no changes applied.`);
+  if(!task||task.assignee!==agentName)throw new Error(`Expertise ${need.id} needs an actual task assigned to ${agentName}. ${task?`${task.id} is currently assigned to ${task.assignee}; use its current owner or schedule a suitable owned task.`:`Unknown task ${taskId}.`} No new role is needed merely to correct an ID/owner.`);
+  if(!expertiseRoleSuitable(need,role))throw new Error(`Expertise ${need.id} requires ${need.capability}; role ${agentName} has ${role?.capability??'no registered capability'}${role?.sessionId?'':' and no successful registration'}. Use a registered suitable role and its actual task. Verify roles also satisfy read-only expertise; edit/User roles do not replace independent read/verify roles.`);
   need.agent=agentName;need.taskId=taskId;delete run.goal.handoff;return need;
  }
  const item=issueId?run.goal.issues.find(item=>item.id===issueId):run.goal.requirements.find(item=>item.id===id);
@@ -82,7 +85,7 @@ export function goalStatus(run){
  // dependencies; all unresolved requirements/findings still block final acceptance.
  const discoveries=run.tasks.filter(task=>task.kind==='discovery'&&passed(task));
  const discoveryReady=!goal.discoveryRequired||discoveries.some(task=>task.result.inventory?.length>0&&task.result.inventory.every(item=>item.requirementIds?.length&&item.requirementIds.every(id=>requirements.some(req=>req.id===id))));
- const expertise=[...(goal.roleNeeds??[]),...(goal.roleRequests??[])].map(need=>({...need,assigned:!!need.agent&&run.roles?.some(role=>role.name===need.agent&&role.sessionId&&!role.retired)&&run.tasks.some(task=>task.id===need.taskId&&task.assignee===need.agent)}));
+ const expertise=[...(goal.roleNeeds??[]),...(goal.roleRequests??[])].map(need=>({...need,assigned:!!need.agent&&run.roles?.some(role=>role.name===need.agent&&expertiseRoleSuitable(need,role))&&run.tasks.some(task=>task.id===need.taskId&&task.assignee===need.agent)}));
  const staffingReady=!!goal.staffingRationale&&expertise.every(item=>item.assigned);
  return {ready:requirements.length>0&&!unassessed.length&&requirements.every(item=>item.accepted)&&issues.every(item=>item.resolved)&&discoveryReady&&staffingReady,
   requirements,issues,unassessed,expertise,staffingReady,discoveryRequired:goal.discoveryRequired,discoveryReady,handoff:goal.handoff??null};

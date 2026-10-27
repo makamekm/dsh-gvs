@@ -6,7 +6,7 @@ export const VISUAL_CHECKS=['overlap','clipping','spacing','alignment','readabil
 // Executed in the actual rendered page, not against JSX or a test-only layout.
 export function collectLayout(){
  const controls='button,[role=button],input,textarea,select,a[href],[role=textbox]';
- const visible=el=>{const r=el.getBoundingClientRect();if(!(r.width>1&&r.height>1&&r.right>0&&r.bottom>0&&r.left<innerWidth&&r.top<innerHeight)||el.closest('[hidden],[inert],[aria-hidden=true]'))return false;for(let p=el;p;p=p.parentElement){const s=getComputedStyle(p);if(s.visibility==='hidden'||s.display==='none'||Number(s.opacity)===0)return false;}return true;};
+ const visible=el=>{const r=el.getBoundingClientRect();if(!(r.width>1&&r.height>1&&r.right>0&&r.bottom>0&&r.left<innerWidth&&r.top<innerHeight))return false;for(let p=el;p;p=p.parentElement){const s=getComputedStyle(p);if(s.visibility==='hidden'||s.display==='none'||Number(s.opacity)===0)return false;}return true;};
  const dialogs=[...document.querySelectorAll('[role=dialog],[aria-modal=true],dialog[open],[role=menu]')].filter(visible);
  const root=dialogs.at(-1)??document.body,nodes=[],limit=240;
  const rect=el=>{const r=el.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};};
@@ -31,14 +31,22 @@ export function collectLayout(){
   nodes.push({key:key(el)+suffix,elementKey:key(el),ancestors,type,label:(label??'').trim().slice(0,90),rect:bounds,surface,clip,hitBlocked});
  }
  for(const el of root.querySelectorAll(controls))add(el,'control',rect(el),el.getAttribute('aria-label')||el.textContent||el.getAttribute('placeholder'));
- for(const el of root.querySelectorAll('img,svg,[role=img]'))if(!el.parentElement?.closest('img,svg,[role=img]'))add(el,'image',rect(el),el.getAttribute('alt')||el.getAttribute('aria-label')||el.getAttribute('data-ui')||el.tagName);
+ const visualImages=new Set();
+ for(const el of root.querySelectorAll('img,svg,[role=img]'))if(!el.parentElement?.closest('img,svg,[role=img]')){add(el,'image',rect(el),el.getAttribute('alt')||el.getAttribute('aria-label')||el.getAttribute('data-ui')||el.tagName);visualImages.add(el);}
+ // RN Web Image commonly paints a background div and a 1px accessibility img.
+ // Inspect actual painted boxes, not just semantic <img>/<svg> elements.
+ let backgroundsSeen=0;
+ for(const el of root.querySelectorAll('*')){if(++backgroundsSeen>3000)break;if(!visualImages.has(el)&&visible(el)&&/url\(/i.test(getComputedStyle(el).backgroundImage)&&!el.closest('svg,[role=img]')){
+  const owner=el.closest('[aria-label],[data-ui]');
+  add(el,'image',rect(el),el.getAttribute('aria-label')||el.getAttribute('data-ui')||owner?.getAttribute('aria-label')||owner?.getAttribute('data-ui')||'CSS background image',':background-image');
+ }}
  const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);let node,seen=0;
  while((node=walker.nextNode())&&seen++<3000){
   const el=node.parentElement;if(!el||node.textContent.trim().length<2||el.closest('script,style,noscript,svg,[role=img]')||!visible(el))continue;
   const range=document.createRange();range.selectNodeContents(node);const r=range.getBoundingClientRect();
   if(r.width>1&&r.height>1)add(el,'text',{x:r.x,y:r.y,width:r.width,height:r.height},node.textContent,':text'+[...el.childNodes].indexOf(node));
  }
- return {schema:'gvs.layout/1',viewport:{width:innerWidth,height:innerHeight},scope:root===document.body?'page':'active-surface',nodes,truncated:nodes.length>=limit||seen>=3000};
+ return {schema:'gvs.layout/1',viewport:{width:innerWidth,height:innerHeight},scope:root===document.body?'page':'active-surface',nodes,truncated:nodes.length>=limit||seen>=3000||backgroundsSeen>3000};
 }
 
 export function analyzeLayout(snapshot){

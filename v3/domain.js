@@ -2,6 +2,7 @@ import {analysisReady,analysisAcceptance} from './analysis.js';
 import {goalStatus} from './goal.js';
 import {sameEntry} from './browser.js';
 import {visualReviewAccepted,visualAuditStatus} from './visual.js';
+import {responsiveRunReady,responsiveStatus,needsResponsive} from './responsive.js';
 import {parallelBlocker} from './parallel.js';
 export const clip=(value,max=4000)=>String(value??'').slice(0,max);
 export const ID=/^[a-z][a-z0-9-]{0,39}$/;
@@ -38,10 +39,11 @@ export function view(run){
    const current=run.tasks.find(task=>task.assignee===role.name&&task.state==='running');
    const blocked=run.tasks.find(task=>task.assignee===role.name&&task.state==='blocked');
    const waiting=run.tasks.find(task=>task.assignee===role.name&&task.state==='waiting');
+   const responsive=current&&needsResponsive(run,current)?responsiveStatus(run,current):null;
    const dependencies=waiting?.dependsOn.filter(id=>run.tasks.find(task=>task.id===id)?.state!=='done').map(id=>run.tasks.find(task=>task.id===id));
    return {name:role.name,title:role.title,purpose:role.purpose,sessionId:role.sessionId??null,
     waitingForUser:role.waitingForUser===true,scheduling:!current&&waiting?parallelBlocker(run,waiting):null,state:role.waitingForUser?'waiting':current?'running':blocked?'blocked':waiting?'waiting':role.error?'error':'idle',
-    activity:clip(role.waitingForUser?'Ждёт ответа Пользователя':current?.title??blocked?.result?.summary??waiting?.title??'Ожидает новую задачу',280),
+    activity:clip(role.waitingForUser?'Ждёт ответа Пользователя':current?current.title+(responsive?` · матрица ${responsive.completed}/${responsive.total}`:''):blocked?.result?.summary??waiting?.title??'Ожидает новую задачу',280),
     waitingFor:(dependencies??[]).filter(Boolean).map(task=>({id:task.id,title:task.title,agent:run.roles.find(role=>role.name===task.assignee)?.title??task.assignee})),
     completed:run.tasks.filter(task=>task.assignee===role.name&&task.state==='done').length,error:role.error??null};
   }),tasks:shownTasks.map(({id,title,assignee,kind,state,dependsOn,result})=>({id,title,assignee,kind,state,dependsOn,verdict:result?.verdict??null,findings:result?.findings?.map(item=>clip(item,400))??[],summary:clip(result?.summary,280)})),summary:run.summary??''};
@@ -65,7 +67,7 @@ export function quality(run){
  return {goal:goalStatus(run).ready,source:!run.sourceError,entry,technical:accepted(technical)&&technical.result.simple===true&&technical.result.scopePreserved===true&&technical.result.checks.length>0&&visualReviewAccepted(run,technical),
   design:!run.visualRequired||accepted(designer)&&imageAcceptance(run,designer)&&analysisAcceptance(run,designer)&&visualReviewAccepted(run,designer),
   user:accepted(user)&&user.assignee==='user'&&imageAcceptance(run,user)&&analysisAcceptance(run,user)&&visualReviewAccepted(run,user),
-  visualAudit:visualAuditStatus(run).ready,
+  visualAudit:visualAuditStatus(run).ready,responsive:responsiveRunReady(run),
   visual:!run.visualRequired||interaction&&run.viewports.every(viewport=>current.some(check=>check.images.some(image=>image.viewport===viewport))),game:gameplay,analysis:analysisReady(run)};
 }
 export function parseGameReport(report){
