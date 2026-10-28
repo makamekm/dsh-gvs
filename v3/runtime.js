@@ -230,12 +230,16 @@ export function apply(ctx,config={}){
   if(!['write','edit'].includes(exec.name))return;
   const task=entry.run.tasks.find(task=>task.assignee===name&&task.state==='running'),target=exec.arguments?.file_path??exec.arguments?.path;
   if(!task)return 'No dependency-ready task is assigned. Wait for the scheduler.';
+  if(['edit','verify'].includes(role.capability)&&(typeof target!=='string'||!target.trim())){
+   const args=exec.arguments??{},hint=typeof args.command==='string'?'These are shell arguments: use pwsh/bash with the actual assigned command and workdir.':args.taskId&&args.index!==undefined?'These are planned-check arguments: use gvs_plan_check with the actual assigned taskId and check index.':'Read the actual tool schema and supply its exact file_path/path plus the required file contents or replacement.';
+   return `Invalid ${exec.name} arguments: no file_path/path was supplied. No file was targeted; this is not an outside-writeScopes rejection. ${hint} No task, lease or permission change is needed to correct a wrong-tool call. Do not substitute a guessed path, widen scopes, or bypass the existing task/check restrictions.`;
+  }
   if(role.capability==='verify'){
    if(target&&evidencePath(target,entry.io.cwd)&&writeAllowed({...task,writeScopes:task.writeScopes??[]},target,entry.io.cwd))return;
    return 'Verification may write/edit only reports or evidence inside explicitly assigned artifacts/, test-results/ or playwright-report/ scopes. Product sources remain read-only; ask Lead for a precise report lease.';
   }
   if(role.capability!=='edit')return 'This role may not edit project files.';
-  if(!target||!writeAllowed(task,target,entry.io.cwd))return 'The file is outside this task writeScopes. Ask Lead to schedule a separate scoped task; do not modify another parallel branch.';
+  if(!writeAllowed(task,target,entry.io.cwd))return 'The file is outside this task writeScopes. Ask Lead to schedule a separate scoped task; do not modify another parallel branch.';
   if(task.codePlan&&!evidencePath(target,entry.io.cwd)&&!task.codePlan.changes.some(change=>path.resolve(entry.io.cwd,change.path).toLowerCase()===path.resolve(entry.io.cwd,target).toLowerCase()))return 'This product file is outside the coordinator codePlan. Report the concrete missing change to Lead and obtain a corrected plan before editing it.';
  }
  ctx.on('tools/pre-execute',async(exec,next)=>{

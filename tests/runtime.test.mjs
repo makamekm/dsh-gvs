@@ -348,6 +348,21 @@ test('host API defers tasks, forbids early execution and wakes the same role wit
  const next=await f.call('gvs_task',{action:'create',title:'Second change',instructions:'New work, same role',kind:'work',assignee:'developer',dependsOn:[review.task.id]});
  assert.equal(next.task.state,'running');assert.equal(f.actor('developer').id,originalId);assert.equal(f.spawns,3);
 });
+test('wrong-tool edit/write arguments identify the real invocation error without inventing a lease conflict or dispatching another tool',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Capture a real owned rendered scenario',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ let mutations=0;for(const name of ['edit','write'])f.definitions.set(name,{execute:async()=>{mutations++;return {ok:true};}});
+ for(const [name,capability] of [['capture','edit'],['verifier','verify']]){
+  await f.call('gvs_agent',{action:'create',name,title:name,purpose:'Own bounded evidence',capability});const root='artifacts/'+name,work=await f.call('gvs_task',{action:'create',title:name,instructions:'Write and execute the actual owned adapter',kind:'work',assignee:name,readScopes:[],writeScopes:[root],resources:[]}),actor=f.actor(name),before=JSON.parse([...f.files.values()][0]);
+  const cases=[{args:{taskId:work.task.id,index:0,timeoutMs:180000},hint:/use gvs_plan_check/},{args:{description:'Execute owned check',command:'node '+root+'/check.mjs',workdir:'.',timeoutMs:180000},hint:/use pwsh\/bash/},{args:{},hint:/actual tool schema/},{args:{file_path:' '},hint:/actual tool schema/},{args:{path:{bad:true}},hint:/actual tool schema/}];
+  for(const tool of ['edit','write'])for(const item of cases){const exec={agent:actor,name:tool,arguments:item.args,signal:new AbortController().signal},pre=await f.hooks['tools/pre-execute'](exec,async()=>({kind:'allow'}));assert.equal(pre.kind,'deny');assert.match(pre.reason,/no file_path\/path/);assert.match(pre.reason,item.hint);assert.doesNotMatch(pre.reason,/The file is outside/);assert.equal(f.nativeGuard(exec),pre.reason);await assert.rejects(f.call(tool,item.args,actor),item.hint);}
+  assert.equal(mutations,capability==='edit'?0:1,'Invalid calls must not dispatch a mutation or a suggested replacement tool');
+  const valid=await f.call('write',{file_path:root+'/check.mjs',content:'actual owned script'},actor);assert.equal(valid.ok,true);
+  await assert.rejects(f.call('edit',{file_path:'src/foreign.js',old_string:'a',new_string:'b'},actor),capability==='edit'?/outside this task writeScopes/:/Product sources remain read-only/);
+  const after=JSON.parse([...f.files.values()][0]);assert.equal(after.status,before.status);assert.equal(after.runId,before.runId);assert.deepEqual(after.tasks.find(t=>t.id===work.task.id).writeScopes,[root]);assert.equal(f.tasks.get(work.task.id).status,'in_progress');
+ }
+ assert.equal(mutations,2);
+});
+
 test('scheduler overlaps independent scoped branches, preserves conflict waits, and guards direct edits',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Parallel project',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
  for(const [name,capability] of [['ui','edit'],['server','edit'],['qa','verify'],['spare','edit']])await f.call('gvs_agent',{action:'create',name,title:name,purpose:'Independent branch',capability});
