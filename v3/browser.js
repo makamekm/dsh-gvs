@@ -16,7 +16,7 @@ export function localProjectHosts(interfaces=networkInterfaces()){
 // Local project captures must also work in a Windows service without a GPU session.
 // Chromium's explicit software GL path; personal browser settings are untouched.
 const renderArgs=['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'];
-export const BROWSER_ACTIONS=['click','hover','fill','select','press','check','scroll','assertText','assertState','assertVisible','assertHidden'];
+export const BROWSER_ACTIONS=['click','hover','fill','select','press','check','scroll','swipe','assertText','assertState','assertVisible','assertHidden'];
 export const BROWSER_STATES=['checked','pressed','expanded','disabled','invalid','focused','value'];
 function pressKey(action){
  const key=action.key??action.value;
@@ -32,9 +32,18 @@ export function validateBrowserActions(actions){
  for(const [index,action] of actions.entries()){
   if(!action||!BROWSER_ACTIONS.includes(action.kind))throw new Error(`Unsupported browser action ${JSON.stringify(action?.kind)} at index ${index}. Allowed: ${BROWSER_ACTIONS.join(', ')}. Desktop and phone viewports are already captured automatically; do not add a viewport action.`);
   if(action.kind==='press')pressKey(action);
+  if(action.kind==='swipe')swipeSpec(action);
   if(action.kind==='assertState')expectedState(action);
   if(action.kind==='check'&&action.value!==undefined&&typeof action.value!=='boolean'&&!['true','false'].includes(action.value))throw new Error('check accepts boolean true/false or their string aliases. Omit value to check the box.');
  }
+}
+function swipeSpec(action){
+ const {direction,distance=.7,durationMs=400}=action;
+ if(!['left','right','up','down'].includes(direction)||!Number.isFinite(distance)||distance<.1||distance>.9||!Number.isInteger(durationMs)||durationMs<100||durationMs>2000)throw new Error('swipe needs direction left/right/up/down, distance 0.1..0.9 of the observed target (default 0.7), and durationMs integer100..2000 (default400).');
+ const semantic=typeof action.testId==='string'&&action.testId.trim()||typeof action.label==='string'&&action.label.trim()||typeof action.role==='string'&&action.role.trim()&&typeof action.name==='string'&&action.name.trim();
+ if(action.selector!==undefined&&(typeof action.selector!=='string'||!action.selector.trim()||action.selector.length>300||action.selector.includes('>>')||semantic))throw new Error('swipe selector must be one literal CSS selector observed in the actual DOM, at most300 characters, used instead of an ambiguous semantic target. Do not inject a test ID or guess a selector.');
+ if(!semantic&&!action.selector)throw new Error('swipe needs the exact observed target by role+name, label, testId or literal CSS selector; inspect its real gesture surface, not an unrelated button.');
+ return {direction,distance,durationMs};
 }
 export function browserPlans(args){
  const shared=args.actions??[];validateBrowserActions(shared);const by=args.actionsByViewport??{};
@@ -106,6 +115,7 @@ async function browserExecutable(config) {
 }
 
 function locator(page, action) {
+  if(action.kind==='swipe'&&action.selector)return page.locator('css='+action.selector);
   if (action.testId) return page.getByTestId(action.testId);
   if (action.label) return page.getByLabel(action.label, {exact: true});
   if (action.role && action.name) return page.getByRole(action.role, {name: action.name, exact: true});
@@ -115,11 +125,38 @@ async function keyboardReach(page,target,tabKey='Tab'){
  for(let i=0;i<80;i++){if(await target.evaluate(element=>element===document.activeElement||element.contains(document.activeElement)))return;await page.keyboard.press(tabKey);}
  throw new Error('The observed target is not reachable through 80 real Tab steps. Do not force focus/click; inspect keyboard reachability and focus traps.');
 }
-async function perform(page, action, inputMode='pointer',tabKey='Tab') {
+export async function nativeTouchSwipe(page,target,action,inputMode='touch',signal){
+ const {direction,distance,durationMs}=swipeSpec(action);
+ if(inputMode!=='touch')throw new Error('swipe requires a touch input case; use actionsByViewport/actionsByCase for the actual touch surface. Wheel and mouse drag are not touch swipes.');
+ const context=page.context();
+ if(context.browser()?.browserType().name()!=='chromium'||typeof context.newCDPSession!=='function')throw new Error('Native touch swipe requires Chromium/Edge CDP. This engine was not tested by a substitute mouse/wheel/DOM event.');
+ signal?.throwIfAborted();
+ if(await target.count()!==1)throw new Error('swipe target must identify exactly one observed surface; refine the real role+name, label, testId or observed literal CSS selector.');
+ await target.waitFor({state:'visible'});await target.scrollIntoViewIfNeeded();
+ const box=await target.boundingBox(),viewport=await page.evaluate(()=>({width:innerWidth,height:innerHeight}));
+ if(!box||![box.x,box.y,box.width,box.height,viewport.width,viewport.height].every(Number.isFinite)||box.width<4||box.height<4)throw new Error('swipe target has no usable visible bounds.');
+ const horizontal=['left','right'].includes(direction),delta=(horizontal?box.width:box.height)*distance,sign=['left','up'].includes(direction)?-1:1;
+ const center={x:box.x+box.width/2,y:box.y+box.height/2},start={x:center.x-(horizontal?sign*delta/2:0),y:center.y-(horizontal?0:sign*delta/2)},end={x:center.x+(horizontal?sign*delta/2:0),y:center.y+(horizontal?0:sign*delta/2)};
+ if([start,end].some(p=>p.x<0||p.y<0||p.x>=viewport.width||p.y>=viewport.height))throw new Error('swipe path is outside the actual viewport; inspect clipped/oversized surface geometry.');
+ if(!await target.evaluate((el,p)=>{const hit=document.elementFromPoint(p.x,p.y);return !!hit&&(hit===el||el.contains(hit));},start))throw new Error('swipe start is covered by another visible surface. Inspect/dismiss the actual overlay through a real observed control; do not force the gesture.');
+ const session=await context.newCDPSession(page),steps=Math.max(6,Math.ceil(durationMs/25)),startedAt=Date.now();let completed=false;
+ const point=p=>({...p,id:1,radiusX:1,radiusY:1,force:1});
+ try{
+  signal?.throwIfAborted();await session.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[point(start)]});
+  for(let i=1;i<=steps;i++){await new Promise(r=>setTimeout(r,durationMs/steps));signal?.throwIfAborted();await session.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[point({x:start.x+(end.x-start.x)*i/steps,y:start.y+(end.y-start.y)*i/steps})]});}
+  await session.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});completed=true;
+  return {kind:'native-touch-swipe',direction,distance,requestedDurationMs:durationMs,elapsedMs:Date.now()-startedAt,touchEvents:steps+2,start,end};
+ }finally{
+  if(!completed)try{await session.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});}catch{}
+  try{await session.detach();}catch{}
+ }
+}
+async function perform(page, action, inputMode='pointer',tabKey='Tab',signal) {
   if (action.kind === 'assertText') return page.getByText(action.value, {exact: false}).first().waitFor({state: 'visible'});
   if (action.kind === 'press' && !action.role && !action.label && !action.testId) return page.keyboard.press(pressKey(action));
   if (action.kind === 'scroll') return inputMode==='keyboard'?page.keyboard.press(Number(action.value)<0?'PageUp':'PageDown'):page.mouse.wheel(0, Number(action.value) || 600);
   const target = locator(page, action);
+  if(action.kind==='swipe')return nativeTouchSwipe(page,target,action,inputMode,signal);
   if (action.kind === 'assertState') {
     const expected = expectedState(action);
     let actual;
@@ -234,10 +271,11 @@ export async function captureBrowser(args, {config = {}, signal, saveImage, view
         for (const [index,action] of actions.entries()) {
           signal.throwIfAborted();
           await page.evaluate(()=>{window.__gvsHarnessInputs.length=0;});
-          try{await perform(page, action,inputMode,viewport.keyboardNavigation??'Tab');}catch(error){view.steps.push({kind:action.kind,target:action.name??action.label??action.testId??'',value:clip(action.value??action.key,300),...(action.state?{state:action.state}:{}),passed:false,error:clip(error.message,1000)});await screenshot(`failed-step-${index+1}`).catch(()=>{});throw error;}
+          let actionEvidence;
+          try{actionEvidence=await perform(page, action,inputMode,viewport.keyboardNavigation??'Tab',signal);}catch(error){view.steps.push({kind:action.kind,target:action.name??action.label??action.testId??'',value:clip(action.value??action.key,300),...(action.state?{state:action.state}:{}),passed:false,error:clip(error.message,1000)});await screenshot(`failed-step-${index+1}`).catch(()=>{});throw error;}
           const assertion = action.kind.startsWith('assert');
           if (assertion) report.assertions++; else report.interactions++;
-          view.steps.push({kind: action.kind,inputMode:action.kind==='scroll'&&inputMode!=='keyboard'?'wheel':inputMode,inputEvents:await page.evaluate(()=>window.__gvsHarnessInputs.splice(0)), target: action.name ?? action.label ?? action.testId ?? '', value: clip(action.value??action.key, 300), ...(action.state?{state:action.state}:{}), passed: true});
+          view.steps.push({kind: action.kind,inputMode:action.kind==='scroll'&&inputMode!=='keyboard'?'wheel':inputMode,inputEvents:await page.evaluate(()=>window.__gvsHarnessInputs.splice(0)), target: action.name ?? action.label ?? action.testId ?? '', value: clip(action.value??action.key, 300), ...(action.state?{state:action.state}:{}),...(action.kind==='swipe'?{gesture:actionEvidence}:{}), passed: true});
           if(!assertion){if(states++<3)await screenshot(`step-${index+1}`);else view.uncapturedTransitions++;}
         }
         if (actions.length) await screenshot('journey');
