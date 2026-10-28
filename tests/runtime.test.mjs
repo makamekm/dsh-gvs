@@ -27,6 +27,30 @@ function fixture(config={}){
  return {root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,effects,nativeGuard:exec=>guard(exec),failNextSpawn:()=>{nextSpawnError=new Error('Temporary spawn failure');},changeSource:value=>{source=value;},get spawns(){return spawns;}};
 }
 
+test('long runtime analyses forward a bounded observation budget without completing tasks or bypassing independent acceptance',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Verify real connection idle expiry',kind:'code'}),user=f.actor('user');
+ await f.call('gvs_analysis',{action:'plan',rationale:'Observe real connection expiry',requirements:[{id:'idle',reason:'The connection must stay alive before expiry',criterion:'Observe the required 180-second idle window',method:'runtime'}]},user);await f.complete(start.briefTaskId,user);
+ await f.call('gvs_agent',{action:'create',name:'observer',title:'Runtime verifier',purpose:'Measure actual idle behavior',capability:'verify'});
+ const work=await f.call('gvs_task',{action:'create',title:'Actual idle measurement',instructions:'Execute the full observation window',kind:'work',assignee:'observer',readScopes:['app.js'],resources:[]}),actor=f.actor('observer'),requests=[];
+ const raw={schema:'gvs.analysis/1',engine:'fixture transport',analyzer:'idle-check.mjs',results:[{id:'idle',cases:[{name:'required idle window',source:'runtime',passed:true,actual:180000,expected:180000}]}]};
+ actor.ctx.tools={execute:async request=>{requests.push(request);return {isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'GVS_ANALYSIS_RESULT: '+JSON.stringify(raw)},stderr:{text:''}}};}};
+ const definition=f.definitions.get('gvs_analysis');assert.equal(definition.parameters.properties.timeoutMs.maximum,600000);assert.ok(definition.timeoutMs>600000);
+ await assert.rejects(f.call('gvs_analysis',{action:'check',command:'node idle-check.mjs',timeoutMs:240000}),/independent verify agent/);
+ for(const timeoutMs of [0,999,600001,Infinity,240000.5,'240000'])await assert.rejects(f.call('gvs_analysis',{action:'check',command:'node idle-check.mjs',timeoutMs},actor),/integer from 1000 to 600000/);
+ assert.equal(requests.length,0);
+ for(const timeoutMs of [240000,600000,1000,undefined]){const report=await f.call('gvs_analysis',{action:'check',command:'node idle-check.mjs',...(timeoutMs===undefined?{}:{timeoutMs})},actor),request=requests.at(-1);assert.equal(request.arguments.timeoutMs,timeoutMs??120000);assert.equal(report.timeoutMs,request.arguments.timeoutMs);assert.equal(request.arguments.command,'node idle-check.mjs');assert.equal(request.signal.aborted,false);assert.ok(request.callId);assert.equal(report.ok,true);assert.equal(report.taskId,work.task.id);}
+ assert.equal(f.tasks.get(work.task.id).status,'in_progress');assert.equal((await f.call('gvs_analysis',{action:'status'})).ready,false);
+});
+
+test('extended analysis budgets preserve failed exits, timeouts, cancellation and missing-report failures',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Measure the complete lifecycle',kind:'code'}),user=f.actor('user');await f.call('gvs_analysis',{action:'plan',rationale:'Actual runtime behavior',requirements:[{id:'lifecycle',reason:'Runtime required',criterion:'Actual lifecycle completes',method:'runtime'}]},user);await f.complete(start.briefTaskId,user);
+ await f.call('gvs_agent',{action:'create',name:'observer',title:'Verifier',purpose:'Actual lifecycle',capability:'verify'});const work=await f.call('gvs_task',{action:'create',title:'Lifecycle',instructions:'Run complete lifecycle',kind:'work',assignee:'observer',resources:[]}),actor=f.actor('observer');
+ const raw={schema:'gvs.analysis/1',engine:'fixture',analyzer:'lifecycle.mjs',results:[{id:'lifecycle',cases:[{name:'lifecycle',source:'runtime',passed:true,actual:'closed',expected:'closed'}]}]};
+ for(const failure of [{exitCode:1},{timedOut:true},{aborted:true},{signal:'SIGTERM'}]){actor.ctx.tools={execute:async()=>({isError:false,value:{kind:'foreground',exitCode:0,...failure,stdout:{text:'GVS_ANALYSIS_RESULT: '+JSON.stringify(raw)},stderr:{text:''}}})};const report=await f.call('gvs_analysis',{action:'check',command:'node lifecycle.mjs',timeoutMs:600000},actor);assert.equal(report.ok,false);}
+ actor.ctx.tools={execute:async()=>({isError:false,value:{kind:'foreground',exitCode:1,timedOut:true,stdout:{text:''},stderr:{text:'Actual runner exceeded its budget'}}})};await assert.rejects(f.call('gvs_analysis',{action:'check',command:'node lifecycle.mjs',timeoutMs:600000},actor),/timed out/);
+ assert.equal(f.tasks.get(work.task.id).status,'in_progress');assert.equal((await f.call('gvs_analysis',{action:'status'})).ready,false);assert.equal(JSON.parse([...f.files.values()][0]).analysisChecks.length,4);
+});
+
 test('planned-check helper executes actual build/assertion processes separately, requires exact fresh Native proof and never completes or bypasses a task',async t=>{
  const directory=await fs.mkdtemp(path.join(tmpdir(),'gvs-plan-native-')),artifact=path.join(directory,'actual-build.txt');t.after(async()=>{assert.equal(path.dirname(directory),path.resolve(tmpdir()));assert.ok(path.basename(directory).startsWith('gvs-plan-native-'));await fs.rm(directory,{recursive:true,force:true});});
  const build=path.join(directory,'real-build.cjs'),verify=path.join(directory,'real-verify.cjs');await fs.writeFile(build,`require('node:fs').writeFileSync(${JSON.stringify(artifact)},'42')`);await fs.writeFile(verify,`require('node:assert/strict').equal(require('node:fs').readFileSync(${JSON.stringify(artifact)},'utf8'),'42')`);

@@ -564,7 +564,7 @@ export function apply(ctx,config={}){
   return {...userJourneyStatus(entry.run,task),instructions:USER_TESTING,next:'Execute saved scenarios now using their exact scenarioId; add/update more by ID as you discover states. missingCategories blocks only final pass, not registration/execution. Other saved scenarios and actual proof remain. No scenario is passed just by planning.'};
  });
  const requirement={...object({id:text(40),reason:text(600),criterion:text(1000),method:{type:'string',enum:['runtime','rendered-sequence']}}),required:['id','reason','criterion','method']};
- register('gvs_analysis','Plan conditional task-specific evidence (User only), execute a real analysis runner (assigned verify agent only), or inspect status. Smoothness requires actual rendered pixels AND frame timing with a timestamped frame sequence. Static screenshots and transform-only reports cannot pass.',{action:{type:'string',enum:['plan','check','status']},rationale:text(1200),notRequiredReason:text(1000),requirements:{type:'array',maxItems:6,items:requirement},command:text(5000)},['action'],async(args,exec)=>{
+ register('gvs_analysis','Plan conditional task-specific evidence (User only), execute a real analysis runner (assigned verify agent only), or inspect status. For long real-time checks set timeoutMs to cover all observation windows and setup (default 120000, maximum 600000); never shorten required measurements to fit the default. Smoothness requires actual rendered pixels AND frame timing with a timestamped frame sequence. Static screenshots and transform-only reports cannot pass.',{action:{type:'string',enum:['plan','check','status']},rationale:text(1200),notRequiredReason:text(1000),requirements:{type:'array',maxItems:6,items:requirement},command:text(5000),timeoutMs:{type:'integer',minimum:1000,maximum:600000,description:'Actual foreground runner budget in milliseconds, including setup and real-time observations. Default 120000. Use a larger bounded budget for long scenarios; do not reduce required observation time.'}},['action'],async(args,exec)=>{
   const {entry,name}=await current(exec);const own=entry.run.tasks.find(task=>task.assignee===name&&task.state==='running');
   if(args.action==='status')return {plan:entry.run.analysis??null,ready:analysisReady(entry.run),reports:(entry.run.analysisChecks??[]).map(({id,ok,revision,capturedBy,planVersion,frameSummary})=>({id,ok,revision,capturedBy,planVersion,frameSummary,reviewStatus:analysisReportReviewStatus(entry.run,id,name)}))};
   if(args.action==='plan'){
@@ -576,11 +576,13 @@ export function apply(ctx,config={}){
   if(!own||roleOf(entry,name)?.capability!=='verify')throw new Error('Assign an independent verify agent a dependency-ready task before running analysis.');
   if(entry.run.analysis?.state!=='ready'||!entry.run.analysis.requirements.length)throw new Error('The User must define required conditional analyses first; do not invent extra work for a simple task.');
   if(!args.command)throw new Error('Provide the actual project analysis runner command.');
+  const timeoutMs=args.timeoutMs??120000;
+  if(!Number.isInteger(timeoutMs)||timeoutMs<1000||timeoutMs>600000)throw new Error('Analysis timeoutMs must be an integer from 1000 to 600000; include setup and all required real-time observation windows.');
   const revision=entry.run.revision,planVersion=entry.run.analysis.version;
   if(entry.run.analysis.requirements.some(item=>item.method==='rendered-sequence'))await vision(exec);
-  const result=await exec.agent.ctx.tools.execute({callId:randomUUID(),agent:exec.agent,signal:exec.signal,name:process.platform==='win32'?'pwsh':'bash',arguments:{description:'Run task-specific real runtime/render analysis',command:args.command,workdir:entry.io.cwd,timeoutMs:120000}});
+  const result=await exec.agent.ctx.tools.execute({callId:randomUUID(),agent:exec.agent,signal:exec.signal,name:process.platform==='win32'?'pwsh':'bash',arguments:{description:'Run task-specific real runtime/render analysis',command:args.command,workdir:entry.io.cwd,timeoutMs}});
   const decoded=await decodeAnalysisOutput(result,async(file,maxBytes)=>ctx.fs.readBytes(await ctx.fs.resolve(file,{cwd:entry.io.cwd,signal:exec.signal}),exec.signal,maxBytes));
-  const report={...parseAnalysisReport(decoded.raw,entry.run.analysis,entry.run.viewports),id:`analysis-${randomUUID()}`,revision,planVersion,capturedBy:name,taskId:own.id,command:args.command,images:[],frameSummary:[]};
+  const report={...parseAnalysisReport(decoded.raw,entry.run.analysis,entry.run.viewports),id:`analysis-${randomUUID()}`,revision,planVersion,capturedBy:name,taskId:own.id,command:args.command,timeoutMs,images:[],frameSummary:[]};
   report.ok=report.ok&&decoded.ok;
   if(decoded.outputSource)report.outputSource=decoded.outputSource;
   let capturedBytes=0;
@@ -601,7 +603,7 @@ export function apply(ctx,config={}){
   entry.run.analysisChecks.push(report);
   if(report.images.length)entry.run.visualChecks.push({...report,interactions:1,assertions:report.results.reduce((count,item)=>count+item.cases.length,0),views:entry.run.viewports.map(viewport=>({viewport,errors:[],overflow:false}))});
   await commit(entry);return {...report,results:report.results.map(({frames,samples,...result})=>result)};
- },180000);
+ },660000);
  const goalRequirement={...object({id:text(60),criterion:text(1500),sourceIds:strings}),required:['id','criterion','sourceIds']};
  const expertise={...object({id:text(60),purpose:text(1200),capability:{type:'string',enum:['read','edit','verify']}}),required:['id','purpose','capability']};
  function goalPage(run,args={}){
