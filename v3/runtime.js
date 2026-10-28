@@ -107,7 +107,7 @@ export function apply(ctx,config={}){
    syncGoal(entry.run,messages?.length?messages:!entry.run.goal?[{id:'initial-request',text:entry.run.task}]:[]);
    if(migrating){for(const task of entry.run.tasks)recordFindings(entry.run,task);entry.run.revision++;}
    await refreshRevision(entry,ctx.fs,exec.signal);
-   if(config.projectInspection!==false&&entry.run.qaTarget?.revision!==entry.run.revision){const target=await inspectProject(member.root,exec.signal,entry.run.engine);if(target.surfaces.includes('code-or-unknown')&&entry.run.qaTarget?.sourceConfirmed){target.surfaces=entry.run.qaTarget.surfaces;target.engines=entry.run.qaTarget.engines;target.warnings.push('Preserved previously confirmed targets while current metadata is incomplete; source changes cannot silently waive verification.');}entry.run.qaTarget=target;if(entry.run.viewportsAuto&&entry.run.visualRequired&&requiresWebVerification(entry.run))entry.run.viewports=[...new Set([...entry.run.viewports,'desktop','mobile'])];await commit(entry);}
+   if(config.projectInspection!==false&&(entry.run.qaTarget?.version!==2||entry.run.qaTarget?.revision!==entry.run.revision)){const target=await inspectProject(member.root,exec.signal,entry.run.engine);if(target.surfaces.includes('code-or-unknown')&&entry.run.qaTarget?.sourceConfirmed){target.surfaces=entry.run.qaTarget.surfaces;target.engines=entry.run.qaTarget.engines;target.warnings.push('Preserved previously confirmed targets while current metadata is incomplete; source changes cannot silently waive verification.');}entry.run.qaTarget=target;if(entry.run.viewportsAuto&&entry.run.visualRequired&&requiresWebVerification(entry.run))entry.run.viewports=[...new Set([...entry.run.viewports,'desktop','mobile'])];await commit(entry);}
   }
   return {member,entry,root:member.root,name:member.name};
  }
@@ -170,7 +170,7 @@ export function apply(ctx,config={}){
   const native=await ctx.agentTeams.createTask(entry.root,{subject:clip(input.title,180),description:clip(input.instructions,15000),blockedBy:dependsOn,writeScopes:access.writeScopes??[]});
   const inherited=entry.run.tasks.filter(task=>task.assignee===input.assignee).flatMap(task=>task.consultations??[]).filter(id=>reusableDecision(entry.run,id));
   const task={id:native.id,title:clip(input.title,180),instructions:clip(input.instructions,15000),assignee:input.assignee,kind:input.kind,dependsOn,state:'waiting',receivedImages:[],consultations:[...new Set(inherited)],priority:input.priority??0,...scope,...access};
-  if(input.autoUserProbe)Object.assign(task,{autoUserProbe:true,userProbeFor:input.userProbeFor});
+  if(input.autoUserProbe)Object.assign(task,{autoUserProbe:true,userProbeFor:input.userProbeFor,userProbeTargets:input.userProbeTargets,userProbeInitial:input.userProbeInitial});
   if(plan)task.codePlan=plan;
   task.planRequired=needsCodePlan(entry.run,task);
   entry.run.progress.metadataSinceWrite++;
@@ -179,7 +179,7 @@ export function apply(ctx,config={}){
  async function ensureUserProbe(entry,signal){
   const input=userProbeInput(entry.run);if(!input)return;
   const queued=entry.run.tasks.find(t=>t.autoUserProbe&&t.state==='waiting');
-  if(queued){const combined=userProbeInput(entry.run,queued.userProbeFor??[])??input;queued.userProbeFor=[...new Set([...(queued.userProbeFor??[]),...combined.userProbeFor])];queued.instructions=clip(combined.instructions,15000);queued.readScopes=[...new Set([...queued.readScopes,...combined.readScopes])];}
+  if(queued){const combined=userProbeInput(entry.run,queued.userProbeFor??[],queued.userProbeInitial??!queued.userProbeFor?.length)??input;queued.userProbeFor=[...new Set([...(queued.userProbeFor??[]),...combined.userProbeFor])];queued.instructions=clip(combined.instructions,15000);queued.readScopes=[...new Set([...queued.readScopes,...combined.readScopes])];queued.resources=[...new Set([...(queued.resources??[]),...combined.resources])];queued.userProbeTargets=combined.userProbeTargets;queued.userProbeInitial=combined.userProbeInitial;}
   else await createTask(entry,input,signal,false);
   entry.run.userTestingSeen=[...new Set([...entry.run.userTestingSeen,...input.userProbeFor])];entry.run.userTestingInitial=false;await commit(entry);
  }

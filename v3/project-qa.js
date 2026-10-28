@@ -19,12 +19,23 @@ export function classifyProjectQA({files=[],documents={},engineHint=''}={}){
  const cargo=doc('Cargo.toml');if(/teloxide|serenity|poise/i.test(cargo))mark('bot-service','rust-bot','Cargo.toml',['src']);
  if(/axum|actix-web|rocket/i.test(cargo)||names.some(n=>['express','fastify','koa','hono'].includes(n))||/fastapi|flask|django/i.test(python))mark('service','http-service',cargo?'Cargo.toml':'package.json',['src']);
  for(const file of files.filter(f=>/\.csproj$/i.test(f)))if(/UseWPF|UseWindowsForms|Avalonia|Microsoft\.Maui/i.test(doc(file)))mark('native-ui','dotnet-native-ui',file,['src']);
+ if(/^\s*\[\[bin\]\]/m.test(cargo)&&!surfaces.size)mark('cli','rust-cli','Cargo.toml',['src']);
+ // Preserve component boundaries even for unknown nested manifests. A web
+ // shell does not turn every nested command/service into a browser surface.
+ const components=[{root:'',surfaces:surfaces.size?[...surfaces]:['code-or-unknown'],sourceConfirmed:evidence.length>0}];
  const nestedRoots=[...new Set(Object.keys(documents).filter(p=>/\/(?:package\.json|Cargo\.toml|pyproject\.toml|requirements\.txt|project\.godot|[^/]+\.(?:csproj|uproject))$/i.test(p)).map(p=>p.slice(0,p.lastIndexOf('/'))))];
- for(const prefix of nestedRoots){const nested=classifyProjectQA({files:files.filter(f=>f.startsWith(prefix+'/')).map(f=>f.slice(prefix.length+1)).filter(f=>!f.includes('/')),documents:Object.fromEntries(Object.entries(documents).filter(([p])=>p.startsWith(prefix+'/')).map(([p,text])=>[p.slice(prefix.length+1),text]))});for(const s of nested.surfaces)if(s!=='code-or-unknown')surfaces.add(s);for(const e of nested.engines)engines.add(e);for(const root of nested.sourceRoots)roots.add(root==='*'?prefix:prefix+'/'+root);for(const e of nested.evidence)evidence.push({...e,path:prefix+'/'+e.path});warnings.push(...nested.warnings.map(w=>`${prefix}: ${w}`));}
+ for(const prefix of nestedRoots){const nested=classifyProjectQA({files:files.filter(f=>f.startsWith(prefix+'/')).map(f=>f.slice(prefix.length+1)).filter(f=>!f.includes('/')),documents:Object.fromEntries(Object.entries(documents).filter(([p])=>p.startsWith(prefix+'/')).map(([p,text])=>[p.slice(prefix.length+1),text]))});for(const s of nested.surfaces)if(s!=='code-or-unknown')surfaces.add(s);for(const e of nested.engines)engines.add(e);for(const root of nested.sourceRoots)roots.add(root==='*'?prefix:prefix+'/'+root);for(const e of nested.evidence)evidence.push({...e,path:prefix+'/'+e.path});for(const c of nested.components)components.push({...c,root:prefix+(c.root?'/'+c.root:'')});warnings.push(...nested.warnings.map(w=>`${prefix}: ${w}`));}
  if(!surfaces.size&&/godot|unity|unreal/i.test(engineHint)){const engine=engineHint.match(/godot|unity|unreal/i)[0].toLowerCase();surfaces.add('native-game');engines.add(engine);warnings.push('Engine name is an intent hint only; inspect actual project/runtime before accepting any result.');}
  if(!surfaces.size){surfaces.add('code-or-unknown');warnings.push('Execution target is not established. Inspect source/entrypoints and the human goal; do not default to a browser.');}
  const adapters=[...surfaces].map(surface=>({surface,tools:surface==='web'?['gvs_browser_check','gvs_responsive','gvs_visual']:surface==='native-game'?['gvs_native_game_check','gvs_analysis','gvs_visual','native window/input tools']:surface==='native-ui'?['gvs_analysis','gvs_visual','native window/input tools']:['gvs_analysis','actual process/protocol/handler test runner'],evidence:surface==='web'?'Actual browser inputs, DOM/pixel/layout states and device matrix':surface==='native-game'?'Actual engine update/physics/state, native input and engine/window screenshots; frame pacing when relevant':surface==='native-ui'?'Actual native windows, control state, focus/reopen/negative/recovery journeys and rendered pixels':'Actual production execution and state transitions; failures/recovery/idempotency/permissions where relevant',availability:'Runtime and adapter must be discovered and executed; metadata is not a successful test.'}));
- return {version:1,surfaces:[...surfaces],engines:[...engines],sourceRoots:roots.size?[...roots]:['*'],evidence,warnings,adapters,mixed:surfaces.size>1,sourceConfirmed:evidence.length>0,instructions:PROJECT_QA};
+ return {version:2,surfaces:[...surfaces],engines:[...engines],sourceRoots:roots.size?[...roots]:['*'],components,evidence,warnings,adapters,mixed:surfaces.size>1,sourceConfirmed:evidence.length>0,instructions:PROJECT_QA};
+}
+
+export function affectedVerificationTargets(target,files=[]){
+ const fallback=()=>({surfaces:target?.surfaces??['code-or-unknown'],unknown:true,components:[],basis:'Incomplete component/write evidence: inspect actual changed entrypoints; do not infer a browser target.'});
+ if(!files.length||!target?.components?.length)return fallback();const selected=new Map();
+ for(const file of files){const path=String(file).replaceAll('\\','/').replace(/^\.\//,''),matches=target.components.filter(c=>!c.root||path===c.root||path.startsWith(c.root+'/'));if(!matches.length)return fallback();const longest=Math.max(...matches.map(c=>c.root.length));for(const c of matches.filter(c=>c.root.length===longest))selected.set(JSON.stringify(c),c);}
+ const components=[...selected.values()],unknown=components.some(c=>!c.sourceConfirmed||c.surfaces.includes('code-or-unknown'));return {surfaces:[...new Set(components.flatMap(c=>c.surfaces))],unknown,components,basis:'Most specific actual manifest boundary for recorded changed paths; metadata is not execution or acceptance.'};
 }
 
 export function requiresWebVerification(run){
@@ -33,5 +44,10 @@ export function requiresWebVerification(run){
  if(run.qaTarget?.surfaces?.includes('code-or-unknown'))return !!run.preview?.url;
  return run.kind==='ui'; // Legacy runs migrate after real metadata inspection.
 }
-export function isRenderedProject(run){return run.visualRequired!==false&&(run.kind==='ui'||run.kind?.startsWith('game')||run.qaTarget?.surfaces?.some(s=>['web','native-game','native-ui'].includes(s)));}
+export function isRenderedProject(run){
+ if(run.visualRequired===false)return false;const surfaces=run.qaTarget?.surfaces;
+ if(surfaces?.some(s=>s!=='code-or-unknown'))return surfaces.some(s=>['web','native-game','native-ui'].includes(s));
+ if(surfaces?.includes('code-or-unknown'))return !!run.preview?.url||!!run.kind?.startsWith('game');
+ return run.kind==='ui'||!!run.kind?.startsWith('game');
+}
 export function isInteractiveProject(run){return isRenderedProject(run)||run.qaTarget?.surfaces?.some(s=>['cli','bot-service'].includes(s));}

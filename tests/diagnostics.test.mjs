@@ -69,3 +69,8 @@ test('recovery instructions address real edit whitespace, stale tabs and missing
  for(const extension of ['png','jpg','jpeg','gif','webp'])assert.match(recoveryAdvice(`cannot read "C:\\work\\real capture.${extension}": binary file`),/read_image.*exact existing image path/);
  assert.equal(recoveryAdvice('cannot read "C:\\work\\asset.uasset": binary file'),null);assert.equal(recoveryAdvice('cannot read "C:\\work\\missing.png": not found'),null);
 });
+
+test('unsupported JSON/document image reads do not masquerade as SVG or prove an existing screenshot',()=>{
+ const suffix='extension does not declare a supported image format; read_image accepts PNG/JPEG/WebP/GIF files';for(const ext of ['json','txt','pdf']){const advice=recoveryAdvice(`cannot read "missing.${ext}": the .${ext} ${suffix}`);assert.match(advice,/textual sources\/reports such as JSON with read/);assert.match(advice,/if missing, enumerate/);assert.ok(!advice.includes('SVG/vector'));assert.match(advice,/not.*visual inspection/);}
+ assert.match(recoveryAdvice(`cannot read "icon.svg": the .svg ${suffix}`),/SVG\/vector/);
+});
