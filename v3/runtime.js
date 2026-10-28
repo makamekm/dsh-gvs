@@ -47,6 +47,7 @@ function reviewPlan(run,input){
 export function apply(ctx,config={}){
  const owned=new Set();
  const checkedPlanSources=new WeakMap();
+ const planSourceFailures=new WeakMap();
  const planCheckCommands=new WeakMap();
  const maxParallel=config.maxParallel??4,maxTasks=!config.goalProtocol&&[64,160].includes(config.maxTasks)?10000:config.maxTasks??10000;
  ctx.effect(()=>ctx.jobs.attachController('gvs-team-preview'));
@@ -114,7 +115,10 @@ export function apply(ctx,config={}){
  function lead(member){if(member.role!=='lead')throw new Error('Only the coordinator can change team composition or the task plan. Send the precise request with gvs_agent action:message name:lead; for missing expertise use gvs_agent action:request. Continue your own assignment or preserve negative feedback without changing team authority.');}
  async function checkpointPlan(io,task){
   const plan=migrateCodePlan(task.codePlan);if(!plan)return;
-  task.planContinuation={plannedAt:plan.plannedAt,sources:await planSources(plan,io.bytes)};
+  let sources;try{sources=await planSources(plan,io.bytes);}catch{
+   delete task.planContinuation;task.planStale=true;task.stalePlanFiles=plan.sources.map(source=>source.path);task.planCheckpointError='Source checkpoint unavailable. Inspect actual code-plan paths/types/read access; no continuation was granted.';return;
+  }
+  task.planContinuation={plannedAt:plan.plannedAt,sources};delete task.planCheckpointError;
   task.planStale=false;task.stalePlanFiles=[];
  }
  async function codePlan(entry,task,input){
@@ -198,7 +202,7 @@ export function apply(ctx,config={}){
     if(role.capability!=='user'&&entry.run.analysis&&(entry.run.analysis.state!=='ready'||entry.run.tasks.some(task=>task.kind==='brief'&&task.state!=='done')))continue;
     if(role.retired||parallelBlocker(entry.run,task,entry.run.parallelLimit??maxParallel))continue;
     const continuation=task.planContinuation?.plannedAt===task.codePlan?.plannedAt?task.planContinuation:null;
-    if(needsCodePlan(entry.run,task)&&task.codePlan){const baseline=continuation?{sources:continuation.sources.filter(item=>task.codePlan.sources.some(source=>source.path===item.path))}:task.codePlan;const stale=await stalePlanFiles(baseline,entry.io.bytes);if(stale.length){task.planStale=true;task.stalePlanFiles=stale;await commit(entry);continue;}}
+    if(needsCodePlan(entry.run,task)&&task.codePlan){const baseline=continuation?{sources:continuation.sources.filter(item=>task.codePlan.sources.some(source=>source.path===item.path))}:task.codePlan;let stale;try{stale=await stalePlanFiles(baseline,entry.io.bytes);}catch{task.planStale=true;task.stalePlanFiles=baseline.sources.map(source=>source.path);task.planCheckpointError='Code-plan source inspection failed. Coordinator must inspect actual file paths/types/read access; dispatch and continuation remain blocked.';await commit(entry);continue;}if(stale.length){task.planStale=true;task.stalePlanFiles=stale;await commit(entry);continue;}}
     const native=ctx.agentTeams.getTask(entry.root,task.id);
     await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'reassign',owner:role.name});
     task.state='running';task.startedAt=Date.now();task.startedRevision=entry.run.revision;task.nonce=randomUUID();delete task.executionTurn;delete task.planContinuation;
@@ -274,7 +278,13 @@ export function apply(ctx,config={}){
   if(exec.agent&&['pwsh','bash'].includes(exec.name)){
    const member=ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);
    const task=entry?.run.tasks.find(task=>task.assignee===member.name&&task.state==='running');
-   if(task?.codePlan&&!result.isError&&result.value?.kind==='foreground'&&result.value.exitCode===0&&!result.value.timedOut&&!result.value.aborted&&result.value.signal==null)checkedPlanSources.set(exec,await planSources(task.codePlan,entry.io.bytes));
+   if(task?.codePlan&&!result.isError&&result.value?.kind==='foreground'&&result.value.exitCode===0&&!result.value.timedOut&&!result.value.aborted&&result.value.signal==null){
+    checkedPlanSources.delete(exec);planSourceFailures.delete(exec);
+    const proofExec={...exec,name:'code-plan-evidence'};let sources;
+    try{sources=await planSources(task.codePlan,entry.io.bytes);}
+    catch(error){planSourceFailures.set(exec,task.id);await noteFailure(entry,proofExec,`Code-plan source evidence could not be captured after a successful foreground command: ${error.message}`).catch(()=>{});}
+    if(sources){checkedPlanSources.set(exec,sources);if(recordToolSuccess(entry.run,operation(entry,proofExec)))await commit(entry).catch(()=>{});}
+   }
   }
   return next();
  });
@@ -283,10 +293,14 @@ export function apply(ctx,config={}){
   const member=exec.agent&&ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);
   if(!entry||entry.run.status!=='running')return result;
   const message=toolFailureMessage(result),advice=message&&recoveryAdvice(message);
-  if(!advice)return result;
+  const proofTask=planSourceFailures.get(exec);
+  if(!advice&&!proofTask)return result;
   // Keep the canonical outcome/error and all images. Context survives Native
   // definition-owned content finalizers and is delivered after this failed call.
-  return {...result,additionalContexts:[...(result.additionalContexts??[]),{id:randomUUID(),role:'user',source:{kind:'gvs-tool-recovery',form:'notice',summary:'Correct the failed tool operation before retrying'},content:[{type:'text',text:`GVS TOOL RECOVERY (${exec.name}): ${advice} This notice does not satisfy any test or acceptance gate.`}]}]};
+  const contexts=[...(result.additionalContexts??[])];
+  if(advice)contexts.push({id:randomUUID(),role:'user',source:{kind:'gvs-tool-recovery',form:'notice',summary:'Correct the failed tool operation before retrying'},content:[{type:'text',text:`GVS TOOL RECOVERY (${exec.name}): ${advice} This notice does not satisfy any test or acceptance gate.`}]});
+  if(proofTask)contexts.push({id:randomUUID(),role:'user',source:{kind:'gvs-tool-recovery',form:'notice',summary:'Successful command lacks code-plan source evidence'},content:[{type:'text',text:`GVS CODE-PLAN EVIDENCE (${proofTask}): This foreground command finished successfully; its original exit status, output and effects are preserved. Source hashes could not be captured, so NO current code-plan check proof was recorded. Inspect gvs_diagnostics and ask Lead to correct the actual source paths/types or read failure; directories are not source files. Do not blindly rerun a side-effecting command to fix metadata. Keep the same task/lease and all remaining requirements. This notice does not pass any check or acceptance gate.`}]});
+  return {...result,additionalContexts:contexts};
  });
  ctx.on('tools/result',(exec,result)=>{
   if(!exec.agent)return;const member=ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);if(!entry||entry.run.status!=='running')return;
@@ -397,7 +411,7 @@ export function apply(ctx,config={}){
     if(!fields.length)return {status:'unchanged',updated:false,task:taskSummaries([task],true)[0],next:'The requested values already match. The task, assignment and remaining requirements are unchanged.'};
     const reason=args.reason?.trim()||`Updated ${fields.join(', ')} on existing ${task.id}. Remaining human requirements and owned follow-ups stay binding.`;
     if(fields.includes('writeScopes')){const native=ctx.agentTeams.getTask(entry.root,task.id);await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'edit',writeScopes:access.writeScopes});}
-    Object.assign(task,changes);if(fields.includes('codePlan')||reassign)delete task.planContinuation;if(reassign)task.consultations=[];
+    Object.assign(task,changes);if(fields.includes('codePlan')||reassign){delete task.planContinuation;delete task.planCheckpointError;}if(reassign)task.consultations=[];
     task.lastUpdate={at:new Date().toISOString(),reason,reasonSource:args.reason?.trim()?'provided':'derived',fields};
     await commit(entry);
     if(task.state==='running'){
