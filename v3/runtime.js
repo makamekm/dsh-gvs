@@ -779,6 +779,11 @@ export function apply(ctx,config={}){
   const {entry,name,member}=await current(exec),task=entry.run.tasks.find(t=>t.id===args.taskId)??entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');
   if(args.action!=='states'&&!requiresWebVerification(entry.run))return {status:'not-web-target',accepted:false,required:false,target:entry.run.qaTarget??null,next:'This browser matrix does not apply to the actual native/CLI/service target. Inspect gvs_project, use real engine/process/native-window evidence, and assign a needed driver task; do not start a localhost substitute.'};
   if(!task||!['review','user-review','design-review'].includes(task.kind))throw new Error('Use the exact existing UI review taskId. Briefs/consultations and editing tasks are not responsive acceptance.');
+  if(!['status','states'].includes(args.action)){
+   const own=entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');
+   if(member.role!=='lead'&&task.assignee===name&&task.state!=='running')return {status:'not-running',accepted:false,executed:false,reviewed:false,taskId:task.id,taskState:task.state,next:`This assigned task is ${task.state}; no capture or inspection was performed. Read its existing result/status with gvs_task list. Use gvs_responsive states or gvs_visual states for read-only saved pixels. Preserve the recorded verdict and findings; end this turn and let Lead schedule any actual follow-up. Do not repeat a completed task, retry it yourself or claim new acceptance.`};
+   if(member.role==='lead'||!own||own.id!==task.id)throw new Error(`The assigned QA/design/User must perform and inspect its OWN matrix. Requested task ${task.id} belongs to ${task.assignee} and is ${task.state}; your running task is ${own?.id??'none'}. Lead may read status but cannot attest on behalf of another role. Use your actual assigned taskId; foreign saved pixels are read-only via states.`);
+  }
   const offset=args.offset??0,limit=args.limit??3;
   entry.run.responsiveEngines=await browserCapabilities(config);
   const compact=()=>{const s=responsiveStatus(entry.run,task);return {...s,missing:s.missing.slice(0,6),missingTotal:s.missing.length};};
@@ -792,8 +797,6 @@ export function apply(ctx,config={}){
    const record=saved.find(c=>c.id===args.checkId);if(!record)throw new Error('Use an actual existing taskId/checkId from responsive feedback or action:states without checkId. Actual saved IDs: '+JSON.stringify(index.slice(0,6)));
    return {checkId:record.id,taskId:record.taskId,caseId:record.caseId,capturedBy:record.capturedBy,readOnly:true,revision:record.revision,current:record.revision===entry.run.revision,ok:record.ok,views:record.views,images:record.images.slice(offset,offset+limit),nextOffset:offset+limit<record.images.length?offset+limit:null,next:'These are shared diagnostic pixels, not your independent proof or visual approval. Only the assigned capture owner may record review. Lead can use these actual images to plan an owned repair; QA and User still execute their own cases.'};
   }
-  const own=entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');
-  if(member.role==='lead'||!own||own.id!==task.id)throw new Error('The assigned QA/design/User must perform and inspect its OWN matrix. Lead may read status but cannot attest on behalf of another role.');
   if(args.action==='check'){
    if(!args.caseIds?.length)throw new Error('Copy up to two literal caseIds from status; preserve remaining cases for following batches.');
    const matrix=responsiveMatrix(entry.run),cases=args.caseIds.map(id=>matrix.cases.find(c=>c.id===id));if(cases.some(c=>!c)||new Set(args.caseIds).size!==cases.length)throw new Error('Use unique actual caseIds from the current responsive status.');
@@ -809,6 +812,8 @@ export function apply(ctx,config={}){
    }
    return {ok:records.every(c=>c.ok),taskId:task.id,views:records.flatMap(c=>c.views.map(v=>({viewport:v.viewport,caseId:v.caseId,errors:v.errors}))),checks:records.map(({images,...r})=>r),images,coverage:compact(),next:'Inspect every returned frame and warning, then review each literal checkId. Report defects immediately; a capture is not visual approval.'};
   }
+  const browserRecord=entry.run.visualChecks?.find(c=>c.id===args.checkId);
+  if(browserRecord)throw new Error(`This checkId belongs to gvs_browser_check, not a responsive-matrix batch. It cannot supply matrix coverage or responsive inspection. Inspect its saved pixels using gvs_visual action:states taskId:${browserRecord.taskId}; report owned observations/findings with your actual gvs_task completion and visualReview. Foreign images remain read-only. To inspect a matrix batch, first execute gvs_responsive action:check for your assigned task and use its literal checkId. Do not recapture merely to repair a screenshot citation.`);
   const record=entry.run.responsiveChecks?.find(c=>c.id===args.checkId&&c.taskId===task.id);
   if(!record||record.capturedBy!==name)throw new Error('Copy your exact existing checkId from check results; another role cannot supply your inspection.');
   const inspection=inspectResponsiveCheck(entry.run,task,record,args);

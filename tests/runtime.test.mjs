@@ -145,6 +145,28 @@ test('live UI acceptance exposes the paged responsive matrix and cannot pass fro
  await assert.rejects(f.complete(created.task.id,f.actor('user'),{observations:['No clipping seen in a single selected image.']}),/actual current images|Responsive acceptance is incomplete/);assert.equal(f.tasks.get(created.task.id).status,'in_progress');
 });
 
+test('ordinary browser capture cannot be reviewed as a matrix batch and the refusal explains the actual evidence route',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Inspect actual browser output without fabricated matrix proof',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
+ const work=await f.call('gvs_task',{action:'create',title:'Actual User UI review',instructions:'Inspect current actual windows',kind:'user-review',scope:'increment',analysisIds:[],assignee:'user',resources:[]}),saved=JSON.parse([...f.files.values()][0]),browser={id:'actual-browser-check',taskId:work.task.id,capturedBy:'user',revision:saved.revision,ok:true,views:[{viewport:'mobile',layout:{captures:[{imageId:'actual-browser-pixels',stage:'initial'}]}}],images:[{viewport:'mobile',attachment:{attachmentId:'actual-browser-pixels'}}]};saved.visualChecks=[browser];saved.responsiveChecks=[];
+ for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));const fresh=await import(`../v3/runtime.js?browser-not-matrix=${randomUUID()}`);fresh.apply(f.ctx,{requireCoordinatorPlan:false,responsiveTesting:true,projectInspection:false});await f.call('gvs_recover');const actor=f.actor('user');
+ await assert.rejects(f.call('gvs_responsive',{action:'review',taskId:work.task.id,checkId:browser.id,verdict:'revise',findings:['Actual footer collision']},actor),/gvs_browser_check, not a responsive-matrix.*gvs_visual action:states/);
+ await assert.rejects(f.call('gvs_responsive',{action:'review',taskId:work.task.id,checkId:browser.id,verdict:'pass',findings:[]},actor),/cannot supply matrix coverage/);
+ const read=await f.call('gvs_visual',{action:'states',taskId:work.task.id},actor);assert.ok(JSON.stringify(read).includes('actual-browser-pixels'),'Original pixels remain available through the specified readonly tool');
+ const after=JSON.parse([...f.files.values()][0]);assert.deepEqual(after.visualChecks,[browser]);assert.deepEqual(after.responsiveChecks,[]);assert.equal(after.tasks.find(t=>t.id===work.task.id).state,'running');assert.equal(after.goal.issues.length,0,'A refused mismatched API is not a saved product finding or pass');
+});
+
+test('responsive capture/inspection of an owned non-running task returns truthful refusal before probing engines and preserves evidence and pause',async()=>{
+ for(const state of ['waiting','blocked','done']){
+  const f=fixture(),start=await f.call('gvs_run',{task:'Preserve existing stopped review',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
+  const work=await f.call('gvs_task',{action:'create',title:'Existing User task',instructions:'Inspect real UI',kind:'user-review',scope:'increment',analysisIds:[],assignee:'user',resources:[]}),saved=JSON.parse([...f.files.values()][0]),task=saved.tasks.find(t=>t.id===work.task.id);task.state=state;task.result={verdict:'revise',summary:'Existing observed footer collision',findings:['Existing collision']};saved.responsiveChecks=[{id:'actual-saved-check',taskId:task.id,capturedBy:'user',revision:saved.revision,ok:false,views:[],images:[]}];saved.diagnostics=[];
+  for(const key of f.files.keys())f.files.set(key,JSON.stringify(saved));const fresh=await import(`../v3/runtime.js?inactive-responsive=${randomUUID()}`);fresh.apply(f.ctx,{requireCoordinatorPlan:false,responsiveTesting:true,projectInspection:false,browserModule:'unavailable-module-must-not-be-probed'});const actor=f.actor('user'),before=JSON.parse([...f.files.values()][0]);
+  for(const action of ['check','review']){const result=await f.call('gvs_responsive',{action,taskId:task.id,checkId:'actual-saved-check',verdict:'pass',caseIds:['invented']},actor);assert.equal(result.status,'not-running');assert.equal(result.accepted,false);assert.equal(result.executed,false);assert.equal(result.reviewed,false);assert.equal(result.taskState,state);assert.match(result.next,/let Lead schedule/);}
+  assert.deepEqual(JSON.parse([...f.files.values()][0]),before,'No capture, inspection, diagnostic resolution, prior-result mutation, engine probe or resume');
+  await assert.rejects(f.call('gvs_responsive',{action:'review',taskId:task.id,checkId:'actual-saved-check',verdict:'pass'}),/OWN matrix/,'Lead cannot gain authority via the non-running response');
+  if(state==='blocked'){await f.call('gvs_pause');const paused=JSON.parse([...f.files.values()][0]);await assert.rejects(f.call('gvs_responsive',{action:'check',taskId:task.id,caseIds:['invented']},actor),/paused/);assert.deepEqual(JSON.parse([...f.files.values()][0]),paused);}
+ }
+});
+
 test('coordinator can inspect teammate responsive failure images without acquiring the right to accept their evidence',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Inspect responsive feedback',kind:'ui'});await f.complete(start.briefTaskId,f.actor('user'));
  const work=await f.call('gvs_task',{action:'create',title:'Actual User review',instructions:'Observe actual pixels',kind:'user-review',scope:'increment',analysisIds:[],assignee:'user',resources:[]});
