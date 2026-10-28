@@ -1,6 +1,28 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {recordToolFailure,recordToolSuccess,diagnosticStatus,toolIdentity,toolFailureMessage,recoveryAdvice,failureFamily,checkFailureDetails} from '../v3/diagnostics.js';import {progressStatus} from '../v3/flow.js';
 
+const runnerReport=(attempt,target='source-system-notice',padding=0)=>'Command failed (exit 1): '+JSON.stringify({startedAt:`2026-10-28T00:0${attempt}:00Z`,attempt:`artifacts/rules/attempt-${attempt}`,cases:[{passed:true,actual:'visible desktop '+'.'.repeat(padding)}],failures:[{message:'runner exception',actual:`TimeoutError: locator.waitFor: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('[data-ui="${target}"]') to be visible\u001b[22m\n`,stack:`at generated-${attempt}.mjs:34:900`}]},null,2);
+test('JSON runner failures group by decoded failing target before log clipping while preserving original errors',()=>{
+ const run={tasks:[]},base={agent:'qa',taskId:'rules',tool:'pwsh',identity:'actual-command'},messages=[1,2,3].map(i=>runnerReport(i,'source-system-notice',1800));
+ for(let i=0;i<messages.length;i++)recordToolFailure(run,{...base,message:messages[i]},1000+i*1000);
+ assert.equal(run.diagnostics.length,1);assert.equal(run.diagnostics[0].count,3);assert.equal(run.diagnostics[0].message,messages[2].slice(0,1400));assert.equal(run.diagnostics[0].firstMessage,messages[0].slice(0,1400));assert.ok(!run.diagnostics[0].message.includes('TimeoutError'),'The cause was genuinely beyond the stored log bound');
+ assert.match(run.diagnostics[0].family,/TimeoutError/);assert.match(run.diagnostics[0].family,/source-system-notice/);assert.ok(!run.diagnostics[0].family.includes('attempt-'));assert.equal(diagnosticStatus(run,3000).repeatedFamilies[0].count,3);assert.equal(progressStatus(run,3000).needsIntervention,true);
+ recordToolFailure(run,{...base,message:runnerReport(4,'mobile-drawer',1800)},4000);assert.equal(run.diagnostics.length,2,'Different actual selectors must not merge');assert.equal(run.diagnostics.every(d=>d.status==='open'),true);
+ const serialized=JSON.stringify(run);assert.equal(diagnosticStatus(JSON.parse(serialized),4000).repeated,1,'Full-derived family survives persistence');
+});
+test('legacy clipped JSON failures aggregate read-only only when the complete actual exception remains',()=>{
+ const run={diagnostics:[1,2,3].map(i=>{const message=runnerReport(i);return {id:'old-json-'+i,agent:'qa',taskId:'rules',tool:'pwsh',identity:'actual-command',message:message.slice(0,message.indexOf('"stack"')+12),status:'open',firstAt:i*1000,lastAt:i*1000,count:1};})},before=structuredClone(run);
+ assert.equal(diagnosticStatus(run,4000).repeatedFamilies[0].count,3);assert.deepEqual(run,before,'Do not rewrite or delete old evidence');assert.equal(failureFamily(run.diagnostics[0].message),failureFamily(runnerReport(9)));
+ assert.notEqual(failureFamily(runnerReport(1).slice(0,120)),failureFamily(runnerReport(2).slice(0,120)),'Do not guess a missing cause from a truncated report header');
+ const passedOnly=i=>'Command failed (exit 1): '+JSON.stringify({startedAt:i,cases:[{passed:true,actual:'TimeoutError: unrelated passed text'}]});assert.notEqual(failureFamily(passedOnly(1)),failureFamily(passedOnly(2)));
+});
+test('structured failures retain differing criteria, actual values and failing viewports, and redact the stored family',()=>{
+ const report=(actual,expected=3,width=480)=>'Command failed (exit 1): '+JSON.stringify({startedAt:Date.now(),results:[{id:'layout',cases:[{name:'expected count',passed:false,actual,expected,viewport:{width,height:800}},{name:'irrelevant passing case',passed:true}]}]});
+ assert.notEqual(failureFamily(report(2)),failureFamily(report(3)));assert.notEqual(failureFamily(report(2,4)),failureFamily(report(2)));assert.notEqual(failureFamily(report(2,3,575)),failureFamily(report(2)));
+ const long=actual=>JSON.stringify({failures:[{message:'assertion',actual:'x'.repeat(1900)+actual,expected:2}]});assert.notEqual(failureFamily(long('A')),failureFamily(long('B')),'Different assertions beyond display bound retain distinct hashes');
+ const run={tasks:[]};recordToolFailure(run,{agent:'qa',taskId:'same',tool:'pwsh',identity:'cmd',message:runnerReport(1,'http://localhost/?token=private-test-value npm_fakecredentialvalue12345')},1000);const stored=JSON.stringify(run);assert.ok(!stored.includes('private-test-value'));assert.ok(!stored.includes('npm_fake'));assert.match(run.diagnostics[0].family,/redacted/);
+});
+
 test('repeated actual failures group across generated session IDs/event timings while preserving first/latest evidence and distinct assertions',()=>{
  const run={tasks:[]},base={agent:'qa',taskId:'runtime',tool:'pwsh',identity:'same-command'},messages=[1,2,3].map(i=>`Command failed (exit 1): Error: rotate-A timeout; events=[{"t":${i*107},"session":"00000000-0000-4000-8000-${String(i).padStart(12,'0')}"}]\nGVS_ANALYSIS_RESULT:{"port":${50000+i}}`);
  assert.equal(recordToolFailure(run,{...base,message:messages[0]},1000).notify,true);assert.equal(recordToolFailure(run,{...base,message:messages[1]},2000).notify,false);assert.equal(recordToolFailure(run,{...base,message:messages[2]},3000).notify,true);assert.equal(run.diagnostics.length,1);assert.equal(run.diagnostics[0].message,messages[2]);assert.equal(run.diagnostics[0].firstMessage,messages[0]);assert.equal(diagnosticStatus(run,3000).repeated,1);assert.equal(diagnosticStatus(run,3000).repeatedFamilies[0].count,3);
@@ -44,4 +66,6 @@ test('recovery instructions address real edit whitespace, stale tabs and missing
  assert.match(recoveryAdvice('BROWSER_TAB_NOT_FOUND: no open browser tab 1'),/list_windows/);
  assert.match(recoveryAdvice('Page.captureScreenshot: Unable to capture screenshot'),/no new image/);
  assert.match(recoveryAdvice('grep pattern rejected by ripgrep: regex parse error'),/fixed-string/);
+ for(const extension of ['png','jpg','jpeg','gif','webp'])assert.match(recoveryAdvice(`cannot read "C:\\work\\real capture.${extension}": binary file`),/read_image.*exact existing image path/);
+ assert.equal(recoveryAdvice('cannot read "C:\\work\\asset.uasset": binary file'),null);assert.equal(recoveryAdvice('cannot read "C:\\work\\missing.png": not found'),null);
 });
