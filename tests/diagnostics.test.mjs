@@ -3,6 +3,26 @@ import {recordToolFailure,recordToolSuccess,diagnosticStatus,toolIdentity,toolFa
 
 const runnerReport=(attempt,target='source-system-notice',padding=0)=>'Command failed (exit 1): '+JSON.stringify({startedAt:`2026-10-28T00:0${attempt}:00Z`,attempt:`artifacts/rules/attempt-${attempt}`,cases:[{passed:true,actual:'visible desktop '+'.'.repeat(padding)}],failures:[{message:'runner exception',actual:`TimeoutError: locator.waitFor: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('[data-ui="${target}"]') to be visible\u001b[22m\n`,stack:`at generated-${attempt}.mjs:34:900`}]},null,2);
 const panic=(pid,name='table::tests::bounded_input',actual='InvalidRange',line=30)=>`thread '${name}' (${pid}) panicked at src\\table.rs:${line}:142:\ncalled Result::unwrap() on an Err value: ${actual}\nnote: run with RUST_BACKTRACE=1 to display a backtrace\n`;
+const missingReport=i=>`Analysis runner finished without its required report (exit 0).\n${JSON.stringify({atMs:i*1.13,events:[{pid:i,kind:'tcp-data',bytes:i*20}],trace:'.'.repeat(1900)})}\nNo analysis evidence accepted. Runner must print final GVS_ANALYSIS_RESULT: followed by gvs.analysis/1 JSON.`;
+
+test('missing analysis envelope repetitions group by protocol verdict, preserving raw evidence and operation boundaries',()=>{
+ const run={tasks:[]},base={agent:'qa',taskId:'trace',tool:'gvs_analysis',identity:'same-real-command'},messages=[1,2,3].map(missingReport);
+ const first=recordToolFailure(run,{...base,message:messages[0]},1000);assert.equal(first.notify,true);assert.equal(recordToolFailure(run,{...base,message:messages[1]},2000).notify,false);assert.equal(recordToolFailure(run,{...base,message:messages[2]},3000).notify,true);
+ assert.equal(run.diagnostics.length,1);assert.equal(run.diagnostics[0].count,3);assert.equal(run.diagnostics[0].message,messages[2].slice(0,1400));assert.equal(run.diagnostics[0].firstMessage,messages[0].slice(0,1400));assert.equal(diagnosticStatus(run,3000).repeatedFamilies[0].count,3);assert.equal(progressStatus(run,3000).needsIntervention,true);
+ recordToolFailure(run,{...base,identity:'different-command',message:missingReport(4)},4000);assert.equal(run.diagnostics.length,2);recordToolSuccess(run,{...base,identity:'different-command'},5000);assert.equal(diagnosticStatus(run,5000).repeated,1);
+ recordToolSuccess(run,base,6000);assert.equal(diagnosticStatus(run,6000).repeated,0);
+ assert.match(recoveryAdvice(messages[0]),/exploratory raw traces.*foreground pwsh\/bash/);assert.match(recoveryAdvice(messages[0]),/real measured cases/);assert.match(recoveryAdvice(messages[0]),/independent adapter review/);
+ assert.notEqual(failureFamily('Analysis runner failed (exit 1).\nAssertionError: actual=1 expected=2'),failureFamily('Analysis runner failed (exit 1).\nAssertionError: actual=3 expected=2'));
+ assert.notEqual(failureFamily('Malformed final GVS_ANALYSIS_RESULT JSON: first error'),failureFamily('Malformed final GVS_ANALYSIS_RESULT JSON: second error'));
+});
+
+test('saved missing-envelope families reclassify read-only even with clipped trace digests, without guessing partial verdicts',()=>{
+ const base={agent:'qa',taskId:'trace',tool:'gvs_analysis',identity:'same'},run={tasks:[],diagnostics:[1,2,3].map(i=>({...base,id:'prior-'+i,message:missingReport(i).slice(0,1400),family:missingReport(i).slice(0,1300)+' [family sha256:'+String(i).repeat(64)+']',status:'open',count:1,firstAt:i*1000,lastAt:i*1000}))},before=structuredClone(run);
+ assert.equal(diagnosticStatus(run,4000).repeatedFamilies[0].count,3);assert.deepEqual(run,before);
+ const next=recordToolFailure(run,{...base,message:missingReport(4)},5000);assert.equal(next.item.id,'prior-1');assert.equal(run.diagnostics.length,3);assert.equal(next.item.firstMessage,before.diagnostics[0].message);assert.equal(diagnosticStatus(run,5000).repeatedFamilies[0].count,4);
+ const partial=structuredClone(before);for(const row of partial.diagnostics)row.family='Analysis runner finished without its required rep '+row.id;assert.equal(diagnosticStatus(partial,4000).repeated,0);
+ const secrets={tasks:[]};recordToolFailure(secrets,{...base,message:missingReport(5)+'\nhttp://localhost/?token=secret-test-value'},1000);assert.ok(!JSON.stringify(secrets).includes('secret-test-value'));
+});
 test('Rust panic repetitions retain the actual test/assertion while ignoring PIDs, stack positions and unrelated parallel output',()=>{
  const run={tasks:[]},base={agent:'qa',taskId:'ranges',tool:'pwsh',identity:'same-cargo-command'},messages=[1,2,3].map(i=>'Command failed (exit 1): '+('test unrelated_'+i+' ... ok\n').repeat(100)+panic(50000+i,undefined,undefined,30+i)+'\nrunning 20 tests\n');
  for(let i=0;i<messages.length;i++)recordToolFailure(run,{...base,message:messages[i]},1000+i*1000);assert.equal(run.diagnostics.length,1);assert.equal(run.diagnostics[0].count,3);assert.equal(run.diagnostics[0].message,messages[2].slice(0,1400));assert.equal(run.diagnostics[0].firstMessage,messages[0].slice(0,1400));assert.match(run.diagnostics[0].family,/bounded_input/);assert.match(run.diagnostics[0].family,/InvalidRange/);assert.ok(!run.diagnostics[0].family.includes('50001'));assert.equal(diagnosticStatus(run,3000).repeatedFamilies[0].count,3);assert.equal(run.diagnostics[0].status,'open');

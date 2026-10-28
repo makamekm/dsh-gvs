@@ -2,6 +2,12 @@ import {createHash} from 'node:crypto';
 const redactFull=value=>String(value??'').replace(/^Error:\s*/,'').replace(/\b(?:npm_[\w]+|github_pat_[\w]+|ghp_[\w]+|sk-[\w-]{12,})\b/g,'[redacted]').replace(/([?&](?:token|key|auth)=)[^\s&]+/gi,'$1[redacted]');
 const redact=value=>redactFull(value).slice(0,1400);
 const withoutAnsi=value=>String(value??'').replace(/\u001b\[[0-9;]*m/g,'');
+function missingReportEvidence(raw){
+ // This explicit protocol verdict already establishes the cause. Successful
+ // stdout can contain arbitrary changing traces, never accepted analysis.
+ // Nonzero exits, assertions and malformed JSON retain their actual details.
+ return /^Analysis runner finished without its required report \(exit 0\)\.(?:\r?\n|$)/.test(String(raw??'').replace(/^Error:\s*/,''))?'Analysis runner finished without its required report (exit 0). Expected final GVS_ANALYSIS_RESULT: gvs.analysis/1 JSON; no analysis evidence accepted.':null;
+}
 function rustPanicEvidence(raw){
  const lines=raw.replace(/^Command failed \([^\n]+\):\s*/,'').split(/\r?\n/),header=/^thread '([^']+)'(?: \(\d+\))? panicked at (.+):\d+:\d+:\s*$/,panics=[];
  for(let i=0;i<lines.length;i++){const match=lines[i].match(header);if(!match)continue;const message=[];let j=i+1;
@@ -38,12 +44,12 @@ function reportFailureEvidence(raw){
  }
 }
 export function failureFamily(message){
- const raw=withoutAnsi(message),evidence=reportFailureEvidence(raw)??rustPanicEvidence(raw)??exceptionEvidence(raw),text=redactFull(evidence).replace(/\b[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\b/gi,'[uuid]').replace(/https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d{5}(?=[/\s"\\]|$)/gi,'http://loopback:[port]').replace(/"(?:port|pid|processId)"\s*:\s*\d+/g,'"runtime-id":[number]').replace(/:(\d+):(\d+)(?=[)\s]|$)/g,':[line]:[column]');
+ const raw=withoutAnsi(message),evidence=missingReportEvidence(raw)??reportFailureEvidence(raw)??rustPanicEvidence(raw)??exceptionEvidence(raw),text=redactFull(evidence).replace(/\b[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\b/gi,'[uuid]').replace(/https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d{5}(?=[/\s"\\]|$)/gi,'http://loopback:[port]').replace(/"(?:port|pid|processId)"\s*:\s*\d+/g,'"runtime-id":[number]').replace(/:(\d+):(\d+)(?=[)\s]|$)/g,':[line]:[column]');
  // Derive from the full failure before clipping. A digest keeps differing
  // assertions beyond the display bound distinct without storing large logs.
  return text.length<=1400?text:text.slice(0,1300)+' [family sha256:'+createHash('sha256').update(text).digest('hex')+']';
 }
-const itemFamily=item=>item.family&&!item.family.includes('[family sha256:')&&rustPanicEvidence(item.family)?failureFamily(item.family):item.family??failureFamily(item.message);
+const itemFamily=item=>missingReportEvidence(item.family??item.message)??(item.family&&!item.family.includes('[family sha256:')&&rustPanicEvidence(item.family)?failureFamily(item.family):item.family??failureFamily(item.message));
 const familyId=item=>createHash('sha256').update(JSON.stringify([item.agent,item.taskId,item.tool,item.identity,itemFamily(item)])).digest('hex').slice(0,16);
 function diagnosticFamilies(run,now){
  const groups=new Map(),since=now-600000;
@@ -60,6 +66,7 @@ export function toolFailureMessage(result){
  return `Command failed (exit ${value.exitCode??'unknown'}${value.timedOut?', timed out':''}${value.aborted?', aborted':''}${value.signal?', signal '+value.signal:''}): ${output}`;
 }
 export function recoveryAdvice(message){
+ if(missingReportEvidence(withoutAnsi(message)))return 'This process exited successfully but did not produce the required analysis report. For exploratory raw traces use the actual foreground pwsh/bash tool within the SAME assignment and leases; exploratory output is not accepted analysis. For gvs_analysis, correct the actual runner to emit final GVS_ANALYSIS_RESULT: gvs.analysis/1 JSON from real measured cases, then register it and obtain independent adapter review. Do not just rerun the same report-less command, invent passing cases, change scopes or drop required checks.';
  if(/old_string was not found/i.test(message))return 'Re-read the exact affected lines and copy literal source including leading spaces and newlines. Use a short UNIQUE anchor that actually exists; do not repeat the same failed replacement or assume the file changed. Never rewrite an unread file or bypass the coordinator plan.';
  if(/old_string and new_string must differ/i.test(message))return 'The replacement is a no-op. Inspect current source; if the required change already exists, validate it instead of editing. Otherwise supply a genuinely different replacement.';
  if(/BROWSER_TAB_NOT_FOUND|No top-level window matched/i.test(message))return 'Enumerate current windows/tabs with list_windows, then use its actual current window/tab ID. Do not guess or reuse a stale ID such as 1.';
