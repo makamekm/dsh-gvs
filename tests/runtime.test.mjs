@@ -616,13 +616,13 @@ test('a passed increment still saves out-of-scope visual defects as mandatory go
  const goal=await f.call('gvs_goal',{action:'status'});assert.equal(goal.issues.length,1);assert.match(goal.issues[0].criterion,/visible overlap/);assert.equal(goal.ready,false);
  assert.equal((await f.call('gvs_task',{action:'list',taskId:work.task.id})).tasks[0].result.verdict,'pass');
 });
-test('a claimed agent turn ending without completion becomes a visible blocker',async()=>{
+test('a claimed read-only turn becomes a visible blocker after bounded normal continuations',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Task',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
  await f.call('gvs_agent',{action:'create',name:'helper',title:'Helper',purpose:'Read task',capability:'read'});
  const created=await f.call('gvs_task',{action:'create',title:'Inspect',instructions:'Inspect',kind:'work',assignee:'helper'});
- const actor=f.actor('helper');f.hooks['session/event']({id:actor.id},{type:'turn/start',data:{turn:1}});
+ const actor=f.actor('helper');for(const turn of [1,2,3]){f.hooks['session/event']({id:actor.id},{type:'turn/start',data:{turn}});
  f.hooks['session/event']({id:actor.id},{type:'user/message',data:{content:[{type:'text',text:`TASK NONCE: ${created.task.nonce}`}]}});
- f.hooks['session/event']({id:actor.id},{type:'turn/end',data:{turn:1,reason:{kind:'completed'}}});
+ f.hooks['session/event']({id:actor.id},{type:'turn/end',data:{turn,reason:{kind:'completed'}}});for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));}
  const status=await f.call('gvs_task',{action:'list'});assert.equal(status.tasks.find(task=>task.id===created.task.id).state,'blocked');
 });
 test('restart preserves the active goal and resume reuses its original actor',async()=>{
@@ -776,6 +776,33 @@ test('a rejected task explicitly escalates every finding and cannot disappear fr
  const status=await f.call('gvs_goal',{action:'status'});assert.equal(status.issues.length,2);
  const finish=await f.call('gvs_finish');assert.equal(finish.continue,true);assert.equal(finish.quality.goal,false);
 });
+async function incompleteTurnFixture(){
+ const f=fixture(),start=await f.call('gvs_run',{task:'Finish the existing exact task',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));await f.call('gvs_agent',{action:'create',name:'editor',title:'Editor',purpose:'Deliver actual work',capability:'edit'});const work=await f.call('gvs_task',{action:'create',title:'Actual slice',instructions:'Implement and report actual evidence',kind:'work',assignee:'editor',readScopes:['app.js'],writeScopes:['app.js'],resources:[]}),actor=f.actor('editor'),nonce=JSON.parse([...f.files.values()][0]).tasks.find(t=>t.id===work.task.id).nonce,session={id:actor.id};
+ const startTurn=turn=>{f.hooks['session/event'](session,{type:'turn/start',data:{turn}});f.hooks['session/event'](session,{type:'user/message',data:{content:[{type:'text',text:'Assigned task nonce '+JSON.parse([...f.files.values()][0]).tasks.find(t=>t.id===work.task.id).nonce}]}});},endTurn=(turn,kind='completed')=>f.hooks['session/event'](session,{type:'turn/end',data:{turn,reason:{kind,...(kind==='error'?{error:{message:'Actual provider failure'}}:{})}}}),settle=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));},continuations=()=>f.sent.filter(s=>s.content.some(c=>c.text?.startsWith('GVS TASK CONTINUATION ')));
+ return {...f,start,work,actor,session,nonce,startTurn,endTurn,settle,continuations};
+}
+
+test('normal teammate stops receive at most two same-task continuations with nonce, preserved leases and no fabricated completion',async()=>{
+ const f=await incompleteTurnFixture(),spawns=f.members.size;
+ for(const turn of [11,12]){f.startTurn(turn);f.endTurn(turn);f.endTurn(turn);await f.settle();assert.equal(f.continuations().length,turn-10);const saved=JSON.parse([...f.files.values()][0]),task=saved.tasks.find(t=>t.id===f.work.task.id),notice=f.continuations().at(-1);assert.equal(task.state,'running');assert.equal(task.result,undefined);assert.deepEqual(task.writeScopes,['app.js']);assert.equal(f.tasks.get(task.id).status,'in_progress');assert.match(notice.content[0].text,new RegExp(f.nonce));assert.match(notice.content[0].text,new RegExp('EXACT taskId:"'+task.id+'"'));assert.equal(notice.target,'editor');assert.equal(notice.model,undefined);assert.equal(notice.thinking,undefined);}
+ f.startTurn(13);f.endTurn(13);await f.settle();assert.equal(f.continuations().length,2);const blocked=JSON.parse([...f.files.values()][0]).tasks.find(t=>t.id===f.work.task.id);assert.equal(blocked.state,'blocked');assert.equal(blocked.result.verdict,'blocked');assert.equal(blocked.incompleteTurnRecoveries,2);assert.equal(f.members.size,spawns);
+ await f.call('gvs_task',{action:'retry',taskId:f.work.task.id});f.startTurn(14);f.endTurn(14);await f.settle();assert.equal(f.continuations().length,3,'Only explicit coordinator retry grants a new bounded continuation budget');assert.equal(f.tasks.get(f.work.task.id).status,'in_progress');
+});
+
+test('real task reports and provider/cancellation/block/fork outcomes are never replaced by normal-stop continuation',async()=>{
+ for(const kind of ['error','aborted','blocked','forked']){const f=await incompleteTurnFixture();f.startTurn(4);f.endTurn(4,kind);await f.settle();assert.equal(f.continuations().length,0);assert.equal(JSON.parse([...f.files.values()][0]).tasks.find(t=>t.id===f.work.task.id).state,'blocked');}
+ const f=await incompleteTurnFixture();f.hooks['session/event'](f.session,{type:'turn/end',data:{reason:{kind:'completed'}}});await f.settle();assert.equal(f.continuations().length,0,'A stale/unattributed turn must not wake an assignment');f.startTurn(9);await f.call('gvs_task',{action:'complete',taskId:f.work.task.id,verdict:'revise',summary:'Actual checkpoint with required remaining fixes',findings:['Actual unresolved behavior']},f.actor);f.endTurn(9);await f.settle();assert.equal(f.continuations().length,0);assert.equal(JSON.parse([...f.files.values()][0]).tasks.find(t=>t.id===f.work.task.id).result.summary,'Actual checkpoint with required remaining fixes');
+});
+
+test('human pause while a normal-stop continuation is queued prevents wake and preserves the same paused task',async()=>{
+ const f=await incompleteTurnFixture(),write=f.ctx.fs.writeText;let release;const gate=new Promise(resolve=>{release=resolve;});f.ctx.fs.writeText=async(...args)=>{await gate;return write(...args);};f.startTurn(5);f.endTurn(5);const pausing=f.call('gvs_pause');await Promise.resolve();release();await pausing;await f.settle();assert.equal(f.continuations().length,0);let saved=JSON.parse([...f.files.values()][0]);assert.equal(saved.status,'paused');assert.equal(saved.tasks.find(t=>t.id===f.work.task.id).state,'blocked');await f.call('gvs_recover');saved=JSON.parse([...f.files.values()][0]);assert.equal(saved.status,'paused');assert.equal(f.continuations().length,0);
+});
+
+test('failed continuation delivery leaves the original task blocked with diagnostics instead of a phantom running worker',async()=>{
+ const f=await incompleteTurnFixture();f.ctx.agentTeams.sendMessage=async()=>{throw new Error('Actual unavailable recipient');};f.startTurn(7);f.endTurn(7);await f.settle();const saved=JSON.parse([...f.files.values()][0]),task=saved.tasks.find(t=>t.id===f.work.task.id);assert.equal(task.state,'blocked');assert.match(task.result.summary,/continuation could not be delivered/);assert.ok(saved.diagnostics.some(d=>d.taskId===task.id&&d.tool==='agent-turn'));assert.equal(f.continuations().length,0);
+ const g=await incompleteTurnFixture(),send=g.ctx.agentTeams.sendMessage;let rejectOld;g.ctx.agentTeams.sendMessage=async(...args)=>args[1].content.some(c=>c.text?.startsWith('GVS TASK CONTINUATION '))?new Promise((_,reject)=>{rejectOld=reject;}):send(...args);g.startTurn(8);g.endTurn(8);await g.settle();assert.equal(typeof rejectOld,'function');await g.call('gvs_pause');await g.call('gvs_resume');const freshNonce=JSON.parse([...g.files.values()][0]).tasks.find(t=>t.id===g.work.task.id).nonce;assert.notEqual(freshNonce,g.nonce);rejectOld(new Error('Late failure for pre-pause delivery'));await g.settle();const fresh=JSON.parse([...g.files.values()][0]);assert.equal(fresh.status,'running');assert.equal(fresh.tasks.find(t=>t.id===g.work.task.id).state,'running','A late old continuation failure cannot block a newly authorized resumed assignment');
+});
+
 test('normal runtime disposal keeps the goal recoverable while explicit pause remains paused',async()=>{
  const f=fixture();await f.call('gvs_run',{task:'Long running goal',kind:'code'});
  const cleanup=f.effects.at(-1)();await cleanup();

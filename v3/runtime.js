@@ -429,7 +429,7 @@ export function apply(ctx,config={}){
     if(!['blocked','waiting'].includes(task.state))throw new Error('Retry/change dependencies only for blocked or waiting tasks.');
     if(args.instructions)task.instructions=args.instructions;
     if(args.dependsOn){assertDag(entry.run.tasks.map(item=>item.id===task.id?{...item,dependsOn:args.dependsOn}:item));const native=ctx.agentTeams.getTask(entry.root,task.id);await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'set_dependencies',blockedBy:args.dependsOn});task.dependsOn=args.dependsOn;}
-    if(args.action==='retry'){const native=ctx.agentTeams.getTask(entry.root,task.id);if(['in_progress','completed'].includes(native.status))await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:native.status==='completed'?'reopen':'release'});task.state='waiting';delete task.result;}
+    if(args.action==='retry'){const native=ctx.agentTeams.getTask(entry.root,task.id);if(['in_progress','completed'].includes(native.status))await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:native.status==='completed'?'reopen':'release'});task.state='waiting';delete task.result;delete task.incompleteTurnRecoveries;}
     await commit(entry);await schedule(entry,exec.signal);return {task};
    }
    const task=entry.run.tasks.find(task=>task.id===args.taskId);
@@ -858,6 +858,13 @@ export function apply(ctx,config={}){
   }
   entry.run.gameChecks.push(report);if(report.images.length)entry.run.visualChecks.push(report);await commit(entry);return report;
  },180000);
+ function blockEndedTask(entry,role,task,session,event,summary){
+  if(entry.run.status!=='running'||entry.suspending||entry.abort.signal.aborted||task.state!=='running')return;
+  task.failedModel=ctx.sessionProjections?.stateOf(session,'modelSelection')?.lastUsed??session.requestHeader?.()?.config??task.failedModel;task.state='blocked';task.result={verdict:'blocked',summary:summary??`Agent turn ended (${event.data.reason.kind}) without completing its assigned task. Inspect its chat and retry this task.`,findings:[],revision:entry.run.revision};
+  const {item,notify}=recordToolFailure(entry.run,{agent:role.name,taskId:task.id,tool:'agent-turn',identity:'teammate-turn',message:summary??event.data.reason.error?.message??task.result.summary});
+  if(notify)try{entry.root.steer?.({id:randomUUID(),role:'user',source:{kind:'gvs-tool-diagnostics',form:'notice',summary:'A teammate stopped before delivering its task'},content:[{type:'text',text:`GVS AGENT ERROR ${JSON.stringify(item)}. Inspect this agent and preserve the same task. Repair a concrete configuration/protocol issue or retry a transient failure; do not wait for the human to forward errors and do not claim delivery.`}]});}catch{}
+  commit(entry).catch(()=>{});
+ }
  ctx.on('session/event',(session,event)=>{
   const own=entries.get(session.id);
   if(own?.run.status==='running'&&event.type==='turn/end'&&event.data.reason.kind==='error'){
@@ -874,10 +881,16 @@ export function apply(ctx,config={}){
    if(event.type==='turn/start')role.executionTurn=event.data.turn;
    const task=entry.run.tasks.find(task=>task.assignee===role.name&&task.state==='running');if(!task)continue;
    if(event.type==='user/message'&&Number.isInteger(role.executionTurn)&&event.data.content.some(part=>part.type==='text'&&part.text.includes(task.nonce)))task.executionTurn=role.executionTurn;
-   if(event.type==='turn/end'&&task.executionTurn===event.data.turn){task.failedModel=ctx.sessionProjections?.stateOf(session,'modelSelection')?.lastUsed??session.requestHeader?.()?.config??task.failedModel;task.state='blocked';task.result={verdict:'blocked',summary:`Agent turn ended (${event.data.reason.kind}) without completing its assigned task. Inspect its chat and retry this task.`,findings:[],revision:entry.run.revision};
-    const {item,notify}=recordToolFailure(entry.run,{agent:role.name,taskId:task.id,tool:'agent-turn',identity:'teammate-turn',message:event.data.reason.error?.message??task.result.summary});
-    if(notify)try{entry.root.steer?.({id:randomUUID(),role:'user',source:{kind:'gvs-tool-diagnostics',form:'notice',summary:'A teammate stopped before delivering its task'},content:[{type:'text',text:`GVS AGENT ERROR ${JSON.stringify(item)}. Inspect this agent and preserve the same task. Repair a concrete configuration/protocol issue or retry a transient failure; do not wait for the human to forward errors and do not claim delivery.`}]});}catch{}
-    commit(entry).catch(()=>{});}
+   if(event.type==='turn/end'&&Number.isInteger(task.executionTurn)&&task.executionTurn===event.data.turn){
+    if(event.data.reason.kind==='completed'&&!entry.suspending&&!entry.abort.signal.aborted&&(task.incompleteTurnRecoveries??0)<2){
+     const attempt=(task.incompleteTurnRecoveries??0)+1,nonce=task.nonce,signal=entry.abort.signal;task.incompleteTurnRecoveries=attempt;delete task.executionTurn;
+     void(async()=>{await commit(entry);if(entry.run.status!=='running'||entry.suspending||signal.aborted||task.state!=='running'||task.nonce!==nonce||task.assignee!==role.name)return;
+      await ctx.agentTeams.sendMessage(entry.root,{target:role.name,content:[{type:'text',text:`GVS TASK CONTINUATION ${task.id} (${attempt}/2): Your model response ended normally, but this exact assigned task has no accepted result. Continue the SAME task, role, model policy and leases; no new task or permission was created. TASK NONCE: ${nonce}. Read gvs_task action:list taskId:${task.id} for current instructions/codePlan and inspect existing partial work/checks before any retry. Do not blindly repeat side effects or a denied pass. Finish the actual remaining work, then call gvs_task action:complete with EXACT taskId:"${task.id}" and top-level verdict, summary, findings plus real required evidence. If evidence is missing or a real blocker remains, preserve it with revise/blocked and concrete findings; never invent pass, drop requirements or change permissions. Human pause/cancellation and all original gates remain binding.`}],signal});
+     })().catch(()=>{if(!signal.aborted&&task.nonce===nonce&&task.assignee===role.name)blockEndedTask(entry,role,task,session,event,'Automatic continuation could not be delivered; preserve this same task and inspect its chat before coordinator retry.');});
+     continue;
+    }
+    blockEndedTask(entry,role,task,session,event);
+   }
   }
  });
  ctx.effect(()=>async()=>{for(const id of owned){const entry=entries.get(id);if(entry?.owner===ctx&&entry.run.status==='running')await suspend(entry).catch(()=>{});}});
