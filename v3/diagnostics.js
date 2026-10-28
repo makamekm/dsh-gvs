@@ -2,6 +2,16 @@ import {createHash} from 'node:crypto';
 const redactFull=value=>String(value??'').replace(/^Error:\s*/,'').replace(/\b(?:npm_[\w]+|github_pat_[\w]+|ghp_[\w]+|sk-[\w-]{12,})\b/g,'[redacted]').replace(/([?&](?:token|key|auth)=)[^\s&]+/gi,'$1[redacted]');
 const redact=value=>redactFull(value).slice(0,1400);
 const withoutAnsi=value=>String(value??'').replace(/\u001b\[[0-9;]*m/g,'');
+function rustPanicEvidence(raw){
+ const lines=raw.replace(/^Command failed \([^\n]+\):\s*/,'').split(/\r?\n/),header=/^thread '([^']+)'(?: \(\d+\))? panicked at (.+):\d+:\d+:\s*$/,panics=[];
+ for(let i=0;i<lines.length;i++){const match=lines[i].match(header);if(!match)continue;const message=[];let j=i+1;
+  for(;j<lines.length&&!/^\s*$|^note:|^stack backtrace:/.test(lines[j])&&!header.test(lines[j]);j++)message.push(lines[j]);
+  if(!message.length||j===lines.length)return null;panics.push({thread:match[1],source:match[2],message:message.join('\n')});i=j-1;
+ }
+ // Parallel test completion order and process/stack positions are not the
+ // failing assertion. Preserve every panic and all literal expected/actuals.
+ return panics.length?'Rust panics: '+JSON.stringify(panics.sort((a,b)=>JSON.stringify(a)<JSON.stringify(b)?-1:JSON.stringify(a)>JSON.stringify(b)?1:0)):null;
+}
 function exceptionEvidence(value){
  const text=withoutAnsi(value),lines=text.split(/\r?\n/),primary=lines.find(line=>/^(?:Command failed \([^\n]+\):\s*)?(?:[\w.]*Error|Exception):\s*\S/.test(line));
  // Keep the observed target: two different failed selectors are different
@@ -28,12 +38,12 @@ function reportFailureEvidence(raw){
  }
 }
 export function failureFamily(message){
- const raw=withoutAnsi(message),evidence=reportFailureEvidence(raw)??exceptionEvidence(raw),text=redactFull(evidence).replace(/\b[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\b/gi,'[uuid]').replace(/https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d{5}(?=[/\s"\\]|$)/gi,'http://loopback:[port]').replace(/"(?:port|pid|processId)"\s*:\s*\d+/g,'"runtime-id":[number]').replace(/:(\d+):(\d+)(?=[)\s]|$)/g,':[line]:[column]');
+ const raw=withoutAnsi(message),evidence=reportFailureEvidence(raw)??rustPanicEvidence(raw)??exceptionEvidence(raw),text=redactFull(evidence).replace(/\b[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\b/gi,'[uuid]').replace(/https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d{5}(?=[/\s"\\]|$)/gi,'http://loopback:[port]').replace(/"(?:port|pid|processId)"\s*:\s*\d+/g,'"runtime-id":[number]').replace(/:(\d+):(\d+)(?=[)\s]|$)/g,':[line]:[column]');
  // Derive from the full failure before clipping. A digest keeps differing
  // assertions beyond the display bound distinct without storing large logs.
  return text.length<=1400?text:text.slice(0,1300)+' [family sha256:'+createHash('sha256').update(text).digest('hex')+']';
 }
-const itemFamily=item=>item.family??failureFamily(item.message);
+const itemFamily=item=>item.family&&!item.family.includes('[family sha256:')&&rustPanicEvidence(item.family)?failureFamily(item.family):item.family??failureFamily(item.message);
 const familyId=item=>createHash('sha256').update(JSON.stringify([item.agent,item.taskId,item.tool,item.identity,itemFamily(item)])).digest('hex').slice(0,16);
 function diagnosticFamilies(run,now){
  const groups=new Map(),since=now-600000;
