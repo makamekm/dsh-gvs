@@ -12,6 +12,31 @@ test('requirements preserve real human sources and cannot be weakened or dropped
  assert.throws(()=>planGoal(r,{requirements:[{id:'feature',criterion:'Complete requested feature',sourceIds:['human']}],assessedMessages:['steer']}),/covered/);
  planGoal(r,{requirements:[{id:'mobile',criterion:'Deliver mobile version',sourceIds:['steer']}],assessedMessages:['steer'],expertise:[],staffingRationale:'Reuse existing roles'});assert.equal(r.goal.requirements.length,2);
 });
+
+test('goal planning identifies the exact malformed field without mutating earlier valid requirements',()=>{
+ for(const [item,field] of [[null,'item'],[{criterion:'A',sourceIds:['human']},'id'],[{id:'Uppercase',criterion:'A',sourceIds:['human']},'id'],[{id:'valid',criterion:42,sourceIds:['human']},'criterion'],[{id:'valid',criterion:'A',sourceIds:'human'},'sourceIds']]){
+  const r=run(),before=structuredClone(r);
+  assert.throws(()=>planGoal(r,{requirements:[{id:'new-valid',criterion:'Preserve concrete requirement',sourceIds:['human']},item],assessedMessages:[],expertise:[],staffingRationale:'Existing roles'}),error=>error.message.includes('GOAL_REQUIREMENT_INVALID')&&error.message.includes(`requirements[1].${field}`)&&error.message.includes('No changes applied'));
+  assert.deepEqual(r,before);
+ }
+});
+
+test('unknown human source points to the offending requirement and real unassessed IDs without substitution',()=>{
+ const r=run();syncGoal(r,[{id:'actual-device-message',text:'Keep my camera choice'},{id:'actual-camera-message',text:'Investigate repeated camera loss'}]);
+ const before=structuredClone(r),requirements=[{id:'device-choice',criterion:'Keep my camera choice',sourceIds:['actual-device-message']},{id:'camera-recovery',criterion:'Investigate repeated camera loss',sourceIds:['transcribed-camera-message']}],input={requirements,assessedMessages:['actual-device-message'],expertise:[],staffingRationale:'Existing roles'};
+ assert.throws(()=>planGoal(r,input),error=>error.message.includes('requirements[1].sourceIds')&&error.message.includes('transcribed-camera-message')&&error.message.includes('actual-camera-message')&&error.message.includes('humanMessages[].id')&&error.message.includes('No changes applied'));
+ assert.deepEqual(r,before);assert.deepEqual(requirements[1].sourceIds,['transcribed-camera-message']);
+ planGoal(r,{...input,requirements:[requirements[0]]});
+ assert.ok(goalStatus(r).unassessed.some(m=>m.id==='actual-camera-message'));assert.equal(goalStatus(r).ready,false);
+ planGoal(r,{...input,requirements:[{...requirements[1],sourceIds:['actual-camera-message']}],assessedMessages:['actual-camera-message']});
+ assert.deepEqual(r.goal.requirements.find(q=>q.id==='camera-recovery').sourceIds,['actual-camera-message']);assert.equal(goalStatus(r).ready,false);
+});
+
+test('unknown-source diagnostics stay bounded and do not expose unrelated human message text',()=>{
+ const r=run();syncGoal(r,Array.from({length:20},(_,i)=>({id:`message-${i}`,text:'UNRELATED_PRIVATE_TEXT'})));
+ const input={requirements:[{id:'new',criterion:'Concrete',sourceIds:Array.from({length:20},(_,i)=>`wrong-${i}`)}]};
+ assert.throws(()=>planGoal(r,input),error=>error.message.includes('"unknownSourceIdsTruncated":true')&&!error.message.includes('wrong-4')&&!error.message.includes('message-6')&&!error.message.includes('UNRELATED_PRIVATE_TEXT')&&error.message.length<1600);
+});
 test('a local pass cannot close the human goal without implementation and current independent review for every requirement',()=>{
  const r=run();r.tasks=[done('build','dev'),done('qa','qa','review')];assert.equal(goalStatus(r).ready,false);
  linkGoal(r,{id:'feature',workTasks:['build'],reviewTasks:['qa']});assert.equal(goalStatus(r).ready,true);

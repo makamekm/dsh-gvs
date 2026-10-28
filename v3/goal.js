@@ -18,8 +18,14 @@ export function planGoal(run,{requirements,assessedMessages,expertise,staffingRa
  const goal=run.goal;
  if(!Array.isArray(requirements)||!requirements.length)throw new Error('Record concrete requirements from the real human messages.');
  const proposed=structuredClone(goal.requirements),ids=new Set(goal.messages.map(item=>item.id));
- for(const item of requirements){
-  if(!/^[a-z][a-z0-9-]{0,59}$/.test(item.id)||!item.criterion?.trim()||!item.sourceIds?.length||item.sourceIds.some(id=>!ids.has(id)))throw new Error('Each requirement needs an id, a criterion and actual human sourceIds.');
+ for(const [index,item] of requirements.entries()){
+  const invalid=(field,reason,details={})=>{throw new Error(`Each requirement needs an id, a criterion and actual human sourceIds. ${JSON.stringify({code:'GOAL_REQUIREMENT_INVALID',path:`requirements[${index}].${field}`,reason,...details})} Read gvs_goal action:status and copy exact humanMessages[].id values (paginate with nextOffset). Task IDs, requirement IDs and guessed/transcribed message IDs are not human sources. No changes applied; correct this field, keeping valid criteria unchanged. You may submit the valid requirements separately; unresolved human messages remain unassessed and still block completion.`);};
+  if(!item||typeof item!=='object'||Array.isArray(item))invalid('item','Expected a requirement object.');
+  if(typeof item.id!=='string'||!/^[a-z][a-z0-9-]{0,59}$/.test(item.id))invalid('id','Use 1..60 lowercase letters/digits/hyphens, starting with a letter.');
+  if(typeof item.criterion!=='string'||!item.criterion.trim())invalid('criterion','Provide the concrete nonempty human requirement as text.');
+  if(!Array.isArray(item.sourceIds)||!item.sourceIds.length)invalid('sourceIds','Provide a nonempty array of exact human message IDs.');
+  const unknown=item.sourceIds.filter(id=>typeof id!=='string'||!ids.has(id));
+  if(unknown.length)invalid('sourceIds','Unknown human message IDs; do not guess or silently substitute another message.',{unknownSourceIds:unknown.slice(0,4),unknownSourceIdsTruncated:unknown.length>4,unassessedSourceIds:goal.messages.filter(m=>!(goal.assessed??[]).includes(m.id)).slice(0,6).map(m=>m.id)});
   const previous=proposed.find(req=>req.id===item.id);
   if(previous&&previous.criterion!==item.criterion)throw new Error('Existing requirements are immutable. Add the additional requirement; do not silently reduce the contract.');
   if(previous)previous.sourceIds=[...new Set([...previous.sourceIds,...item.sourceIds])];
