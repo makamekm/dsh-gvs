@@ -826,3 +826,22 @@ test('verbose roles obey the native description limit and a failed registration 
  assert.ok(role.sessionId);assert.equal(role.error,undefined);assert.equal(roles.roles.filter(role=>role.name==='reverse').length,1);const count=f.spawns;
  await f.call('gvs_agent',spec);assert.equal(f.spawns,count);
 });
+test('an editor ships its slice without a User consultation once a command passes after its last edit; wider gaps become tracked follow-ups',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Build the chat feature',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'editor',title:'Editor',purpose:'Implement features',capability:'edit'});
+ await f.call('gvs_agent',{action:'create',name:'qa',title:'QA',purpose:'Review the whole goal',capability:'verify'});
+ const work=await f.call('gvs_task',{action:'create',title:'Chat panel',instructions:'Implement the chat panel',kind:'work',assignee:'editor',readScopes:['app.js'],writeScopes:['app.js'],resources:[]}),editor=f.actor('editor');
+ const cwd=path.resolve('work/in-memory-fixture'),shell=process.platform==='win32'?'pwsh':'bash';
+ const run=(command,exitCode)=>f.hooks['tools/result']({agent:editor,name:shell,callId:randomUUID(),arguments:{command}},{isError:false,value:{kind:'foreground',exitCode,stdout:{text:''},stderr:{text:''}}});
+ f.hooks['tools/result']({agent:editor,name:'edit',arguments:{file_path:path.join(cwd,'app.js')}},{isError:false});
+ await assert.rejects(f.complete(work.task.id,editor),/no successful command after it/);
+ run('npm test',1);await assert.rejects(f.complete(work.task.id,editor),/no successful command after it/,'a failing command is not a green build');
+ run('npm test',0);
+ const done=await f.complete(work.task.id,editor,{followUps:['Chat history persistence is not implemented yet']});
+ assert.equal(done.task.state,'done');assert.equal(done.task.result.verdict,'pass');assert.deepEqual(done.task.result.checks,['npm test']);assert.deepEqual(done.task.consultations,[]);
+ const saved=JSON.parse([...f.files.values()][0]);assert.ok(saved.goal.issues.some(issue=>issue.taskId===work.task.id&&/history persistence/.test(issue.criterion)),'follow-up is a mandatory goal issue');
+ assert.match(f.sent.at(-1).content[0].text,/"followUpCount":1/);
+ const review=await f.call('gvs_task',{action:'create',title:'Full review',instructions:'Review the whole goal',kind:'review',assignee:'qa',readScopes:['app.js'],resources:[]});
+ const refused=await f.complete(review.task.id,f.actor('qa'),{followUps:['Moderation is missing']});
+ assert.equal(refused.status,'needs-verdict-correction','a full-scope review cannot pass while reporting missing goal work');assert.deepEqual(refused.findings,['Moderation is missing']);
+});

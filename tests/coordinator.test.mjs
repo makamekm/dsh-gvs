@@ -13,11 +13,18 @@ function fixture(config={}){
   agents:{get:id=>id==='main'?agent:{session:{}}}};
  apply(ctx,config);return {agent,hooks,sent,queued,steering,mutations,ctx,saved,projections};
 }
-test('code planning instructions apply to GVS and its children, preserving ordinary Harness presets',()=>{
- const f=fixture(),sections=new Map();f.ctx.systemPrompt={section:value=>sections.set(value.name,value)};f.ctx.agentTeams.tryMembership=agent=>agent.id==='child'?{root:f.agent}:undefined;apply(f.ctx);
- const section=sections.get('gvs-coordinator-code-planning');assert.match(section.text({scope:f.agent}),/COORDINATOR OWNS CODE PLANNING/);
- assert.match(section.text({scope:{id:'child',session:{header:{origin:'subagent'}}}}),/COORDINATOR OWNS CODE PLANNING/);
- assert.equal(section.text({scope:{id:'ordinary',session:{header:{agentPreset:'standard'}}}}),'');assert.equal(section.text({}),'');
+test('delivery doctrine and opt-in code planning reach GVS and its children, preserving ordinary Harness presets',()=>{
+ const child={id:'child',session:{header:{origin:'subagent'}}},ordinary={id:'ordinary',session:{header:{agentPreset:'standard'}}};
+ const sectionsFor=config=>{const f=fixture(),sections=new Map();f.ctx.systemPrompt={section:value=>sections.set(value.name,value)};f.ctx.agentTeams.tryMembership=agent=>agent.id==='child'?{root:f.agent}:undefined;apply(f.ctx,config);return {f,sections};};
+ const {f,sections}=sectionsFor({}),doctrine=sections.get('gvs-delivery-doctrine');
+ assert.ok(doctrine.order<0,'doctrine precedes the long persona prefix');
+ assert.match(doctrine.text({scope:f.agent}),/LEAD THROUGHPUT DOCTRINE[\s\S]*GVS DELIVERY DOCTRINE/);
+ assert.match(doctrine.text({scope:child}),/GVS DELIVERY DOCTRINE/);assert.doesNotMatch(doctrine.text({scope:child}),/LEAD THROUGHPUT/);
+ assert.equal(doctrine.text({scope:ordinary}),'');assert.equal(doctrine.text({}),'');
+ assert.equal(sections.get('gvs-coordinator-code-planning').text({scope:f.agent}),'','plans are opt-in');
+ const planned=sectionsFor({requireCoordinatorPlan:true}),section=planned.sections.get('gvs-coordinator-code-planning');
+ assert.match(section.text({scope:planned.f.agent}),/COORDINATOR OWNS CODE PLANNING/);assert.match(section.text({scope:child}),/COORDINATOR OWNS CODE PLANNING/);
+ assert.equal(section.text({scope:ordinary}),'');assert.equal(section.text({}),'');
 });
 
 test('active User testing instructions do not turn editing teammates into the User role',()=>{
