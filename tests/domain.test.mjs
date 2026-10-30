@@ -53,3 +53,7 @@ test('exposed tools satisfy the installed native output contract',()=>{
  for(const definition of definitions){assert.doesNotThrow(()=>native.assertSupportedJsonSchema(definition.output.schema),definition.name);assert.equal(definition.parameters.type,'object');for(const key of definition.parameters.required)assert.ok(definition.parameters.properties[key]);}
  assert.ok(definitions.some(tool=>tool.name==='gvs_game_check'));assert.ok(definitions.some(tool=>tool.name==='gvs_agent'));
 });
+test('a role without a title is named after itself, but still needs a purpose',()=>{
+ assert.equal(roleSpec({name:'backend-security',capability:'verify',purpose:'Audit the backend'}).title,'backend-security');
+ assert.throws(()=>roleSpec({name:'qa',capability:'verify',title:'QA'}),/specific purpose/);
+});

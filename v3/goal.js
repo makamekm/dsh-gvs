@@ -16,9 +16,11 @@ export function syncGoal(run,messages){
 }
 export function planGoal(run,{requirements,assessedMessages,expertise,staffingRationale,discoveryRequired}){
  const goal=run.goal;
- if(!Array.isArray(requirements)||!requirements.length)throw new Error('Record concrete requirements from the real human messages.');
+ // An expertise-only update keeps the existing requirements; assessed messages must still be covered by them.
+ if(!requirements?.length&&!(Array.isArray(expertise)&&goal.requirements.length))throw new Error('Record concrete requirements from the real human messages.');
+ if(requirements!==undefined&&!Array.isArray(requirements))throw new Error('requirements must be an array.');
  const proposed=structuredClone(goal.requirements),ids=new Set(goal.messages.map(item=>item.id));
- for(const [index,item] of requirements.entries()){
+ for(const [index,item] of (requirements??[]).entries()){
   const invalid=(field,reason,details={})=>{throw new Error(`Each requirement needs an id, a criterion and actual human sourceIds. ${JSON.stringify({code:'GOAL_REQUIREMENT_INVALID',path:`requirements[${index}].${field}`,reason,...details})} Read gvs_goal action:status and copy exact humanMessages[].id values (paginate with nextOffset). Task IDs, requirement IDs and guessed/transcribed message IDs are not human sources. No changes applied; correct this field, keeping valid criteria unchanged. You may submit the valid requirements separately; unresolved human messages remain unassessed and still block completion.`);};
   if(!item||typeof item!=='object'||Array.isArray(item))invalid('item','Expected a requirement object.');
   if(typeof item.id!=='string'||!/^[a-z][a-z0-9-]{0,59}$/.test(item.id))invalid('id','Use 1..60 lowercase letters/digits/hyphens, starting with a letter.');
@@ -61,9 +63,9 @@ export function linkGoal(run,{id,issueId,workTasks,reviewTasks,roleNeedId,reques
   need.agent=agentName;need.taskId=taskId;delete run.goal.handoff;return need;
  }
  const item=issueId?run.goal.issues.find(item=>item.id===issueId):run.goal.requirements.find(item=>item.id===id);
- if(!item)throw new Error('Unknown requirement or issue.');
+ if(!item)throw new Error(`Unknown ${issueId?'issue':'requirement'} ${JSON.stringify(issueId??id)}. Read gvs_goal status and copy the exact existing ID; no changes applied.`);
  for(const taskId of [...(workTasks??[]),...(reviewTasks??[])])if(!run.tasks.some(task=>task.id===taskId))throw new Error(`Unknown task ${taskId}`);
- for(const taskId of reviewTasks??[])if(!['review','design-review','game-review','user-review'].includes(run.tasks.find(task=>task.id===taskId).kind))throw new Error('Review links must name independent review tasks.');
+ for(const taskId of reviewTasks??[]){const kind=run.tasks.find(task=>task.id===taskId).kind;if(!['review','design-review','game-review','user-review'].includes(kind))throw new Error(`Review links must name independent review tasks: ${taskId} is kind ${kind}. Put work/discovery tasks in workTasks; no changes applied.`);}
  if(workTasks)item.workTasks=[...new Set(workTasks)];
  // Explicitly replace superseded review attempts; findings remain durable issues.
  if(reviewTasks)item.reviewTasks=[...new Set(reviewTasks)];

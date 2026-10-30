@@ -845,3 +845,30 @@ test('an editor ships its slice without a User consultation once a command passe
  const refused=await f.complete(review.task.id,f.actor('qa'),{followUps:['Moderation is missing']});
  assert.equal(refused.status,'needs-verdict-correction','a full-scope review cannot pass while reporting missing goal work');assert.deepEqual(refused.findings,['Moderation is missing']);
 });
+test('the coordinator wait stays inside its tool timeout even after slow scheduling',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Wait budget',kind:'code'});let waited;
+ f.ctx.agentTeams.waitForChange=async(_agent,ms)=>{waited=ms;return {timedOut:true};};
+ await f.call('gvs_wait',{seconds:30});
+ assert.ok(start.briefTaskId);assert.ok(waited<=f.definitions.get('gvs_wait').timeoutMs-10000,'wait leaves room for scheduling and the result view');assert.ok(waited>=1000);
+});
+test('bare task numbers, "coordinator" and wrong actions are understood or explained instead of failing obscurely',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Normalize references',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'editor',title:'Editor',purpose:'Implement',capability:'edit'});
+ const work=await f.call('gvs_task',{action:'create',title:'Slice',instructions:'Do it',kind:'work',assignee:'editor',readScopes:['app.js'],writeScopes:['app.js'],resources:[]}),editor=f.actor('editor');
+ const bare=work.task.id.replace('task-','');
+ const listed=await f.call('gvs_task',{action:'list',taskId:bare},editor);assert.equal(listed.tasks[0].id,work.task.id,'"313" means task-313');
+ const sent=await f.call('gvs_agent',{action:'message',name:'coordinator',message:'Slice is ready'},editor);assert.notEqual(sent.accepted,false);assert.equal(f.sent.at(-1).target,'lead');
+ await assert.rejects(f.call('gvs_task',{action:'message',taskId:work.task.id,message:'hi'},editor),/Unknown gvs_task action "message".*gvs_agent action:message/);
+ await assert.rejects(f.complete(work.task.id,editor,{coveredRequirements:['invented-req']}),/Unknown: .*invented-req/);
+});
+test('a refused handoff names the actual unfinished tasks instead of a generic refusal',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Handoff naming',kind:'code'});
+ await assert.rejects(f.call('gvs_goal',{action:'handoff',dependency:'unavailable-service',reason:'Service is down',evidence:'HTTP 503'}),new RegExp(`${start.briefTaskId} running`));
+});
+test('state writes survive a transient Windows replace failure but still surface real write errors',async()=>{
+ const f=fixture(),write=f.ctx.fs.writeText;let failures=2;
+ f.ctx.fs.writeText=async(...args)=>{if(failures-->0)throw Object.assign(new Error('ReplaceFileW EIO (Win32 1175): state.json'),{code:'EIO'});return write(...args);};
+ const start=await f.call('gvs_run',{task:'Transient write',kind:'code'});assert.ok(start.briefTaskId);assert.ok([...f.files.values()].some(value=>JSON.parse(value).runId));
+ f.ctx.fs.writeText=async()=>{throw Object.assign(new Error('no space left on device'),{code:'ENOSPC'});};
+ await assert.rejects(f.call('gvs_pause'),/no space left/);
+});

@@ -29,3 +29,25 @@ test('custom Cargo target directories are recognized by actual cache/compiler ma
   await fs.unlink(path.join(cache,'.rustc_info.json'));await assert.rejects(sourceFingerprint(observed,cwd),/Do not read compiler binaries/,'A marker without compiler metadata is not enough to silently omit a source directory');
  }finally{const resolved=path.resolve(cwd);assert.equal(path.dirname(resolved),path.resolve(os.tmpdir()));assert.ok(path.basename(resolved).startsWith('gvs-source-'));await fs.rm(resolved,{recursive:true,force:true});}
 });
+test('a source file above the whole-read cap is hashed by content in windows instead of failing the fingerprint',async()=>{
+ const cwd=await fs.mkdtemp(path.join(os.tmpdir(),'gvs-large-'));
+ try{
+  await fs.writeFile(path.join(cwd,'app.js'),'code');await fs.writeFile(path.join(cwd,'archive.tar.gz'),Buffer.alloc(40*1024*1024,7));
+  const ranged={...provider,readBytes:async(name,_signal,max)=>{if(name.endsWith('.tar.gz'))throw Object.assign(new Error('file too large'),{code:'FS_TOO_LARGE'});return provider.readBytes(name,_signal,max);},
+   readByteRange:async(name,{offset,length})=>{const handle=await fs.open(name);try{const buffer=Buffer.alloc(length);const {bytesRead}=await handle.read(buffer,0,length,offset);return buffer.subarray(0,bytesRead);}finally{await handle.close();}}};
+  const whole=await sourceFingerprint(provider,cwd),windowed=await sourceFingerprint(ranged,cwd);
+  assert.equal(windowed,whole,'windowed hashing digests the same bytes');
+  await fs.appendFile(path.join(cwd,'archive.tar.gz'),'x');assert.notEqual(await sourceFingerprint(ranged,cwd),whole,'content changes still invalidate evidence');
+  const huge={...ranged,lstat:async name=>({...await provider.lstat(name),...(name.endsWith('.tar.gz')?{size:600*1024*1024}:{})})};
+  await assert.rejects(sourceFingerprint(huge,cwd),/exceeds 512 MiB at archive\.tar\.gz/,'the total source budget still fails closed');
+ }finally{await fs.rm(cwd,{recursive:true,force:true});}
+});
+test('other agents\' .claude worktrees are not product source',async()=>{
+ const cwd=await fs.mkdtemp(path.join(os.tmpdir(),'gvs-claude-'));
+ try{
+  await fs.writeFile(path.join(cwd,'app.js'),'code');const first=await sourceFingerprint(provider,cwd);
+  await fs.mkdir(path.join(cwd,'.claude','worktrees','copy'),{recursive:true});await fs.writeFile(path.join(cwd,'.claude','worktrees','copy','app.js'),'other agent copy');
+  assert.equal(await sourceFingerprint(provider,cwd),first);
+  await fs.writeFile(path.join(cwd,'app.js'),'changed');assert.notEqual(await sourceFingerprint(provider,cwd),first);
+ }finally{await fs.rm(cwd,{recursive:true,force:true});}
+});

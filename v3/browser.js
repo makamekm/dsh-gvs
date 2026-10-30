@@ -71,7 +71,7 @@ export async function currentControlOutline(page){
 export function previewURL(value) {
   const url = new URL(value);
   if (url.protocol !== 'http:' || !localProjectHosts().has(url.hostname) || url.username || url.password || reservedPorts.has(url.port)) {
-    throw new Error('Use the project HTTP preview on loopback or a network-interface address of THIS computer, not Harness, the model server or another LAN/external host.');
+    throw new Error('Use the project HTTP preview on loopback or a network-interface address of THIS computer, not Harness, the model server or another LAN/external host. To inspect an original/reference website the human authorized, use the connected Chrome browser_* tools instead.');
   }
   return url;
 }

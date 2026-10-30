@@ -90,3 +90,14 @@ test('a registered verify specialist can satisfy independent read expertise with
  r.tasks[0].assignee='editor';assert.ok(goalStatus(r).expertise.every(n=>!n.assigned));
  r.goal.roleNeeds.push({id:'must-verify',capability:'verify'});r.roles.push({name:'reader',capability:'read',sessionId:'read-only'});r.tasks.push({id:'read-task',assignee:'reader'});assert.throws(()=>linkGoal(r,{roleNeedId:'must-verify',agentName:'reader',taskId:'read-task'}),/requires verify/);
 });
+test('User can add expertise needs without restating requirements, but a first plan still needs requirements',()=>{
+ const r=run();planGoal(r,{expertise:[{id:'security-review',purpose:'Independent security audit',capability:'verify'}],staffingRationale:'A new risk appeared'});
+ assert.equal(r.goal.requirements.length,1);assert.ok(r.goal.roleNeeds.some(need=>need.id==='security-review'));
+ const fresh={revision:1,tasks:[]};syncGoal(fresh,[{id:'human',text:'Do it'}]);
+ assert.throws(()=>planGoal(fresh,{expertise:[],staffingRationale:'none'}),/Record concrete requirements/);
+});
+test('link errors name the exact unknown ID or misfiled review task',()=>{
+ const r=run();r.tasks.push(done('task-1','dev'));
+ assert.throws(()=>linkGoal(r,{id:'featur',workTasks:['task-1']}),/Unknown requirement "featur"/);
+ assert.throws(()=>linkGoal(r,{id:'feature',reviewTasks:['task-1']}),/task-1 is kind work/);
+});

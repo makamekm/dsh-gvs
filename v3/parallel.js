@@ -10,7 +10,7 @@ export function normalizeScopes(scopes){
  return [...new Set(scopes.map(value=>{
   if(typeof value!=='string'||!value.trim())throw new Error('An empty scope is ambiguous. Use [] or ["*"].');
   let scope=value.trim().replaceAll('\\','/').replace(/\/\*\*$/,'').replace(/\/+$/,'');
-  if(['*','.'].includes(scope))return '*';
+  if(['*','.','**'].includes(scope))return '*';
   if(/^[a-z]:|^\/|[*?]/i.test(scope)||scope.split('/').some(part=>['..',''].includes(part)))throw new Error(`Invalid workspace scope ${JSON.stringify(value)}. Use a literal project path (optional /**), not a glob or traversal.`);
   scope=scope.replace(/^\.\//,'').toLowerCase();return scope||'*';
  }))];
@@ -19,10 +19,12 @@ const overlaps=(a,b)=>a==='*'||b==='*'||a===b||a.startsWith(b+'/')||b.startsWith
 const shared=(a,b)=>a.filter(left=>b.some(right=>overlaps(left,right)));
 const reportRoots=['artifacts','test-results','playwright-report'];
 const outputRoots=['dist','build','coverage','node_modules/.tmp','node_modules/.cache','node_modules/.vite','node_modules/.vite-temp'];
+// Cargo build output (target, or a custom target-* dir) may sit inside any crate, e.g. backend/target.
+const generatedOutput=scope=>outputRoots.some(root=>scope===root||scope.startsWith(root+'/'))||/(^|\/)target(-[\w-]+)?(\/|$)/.test(scope);
 export function validateWriteScopes(role,scopes=[]){
  if(role.capability==='edit')return;
  const writes=normalizeScopes(scopes);
- if(writes.length&&(role.capability!=='verify'||writes.some(scope=>!reportRoots.some(root=>scope.startsWith(root+'/'))&&!outputRoots.some(root=>scope===root||scope.startsWith(root+'/')))))throw new Error('Verify writeScopes may contain only specific report/evidence paths and generated build/cache outputs. Product source, scripts and whole-workspace writes require an edit role.');
+ if(writes.length&&(role.capability!=='verify'||writes.some(scope=>!reportRoots.some(root=>scope.startsWith(root+'/'))&&!generatedOutput(scope))))throw new Error(`Verify writeScopes may contain only specific report/evidence paths (${reportRoots.map(root=>root+'/...').join(', ')}) and generated build/cache outputs (${outputRoots.join(', ')}, Cargo target or target-* in any crate). Product source, scripts and whole-workspace writes require an edit role.`);
 }
 export function evidencePath(target,cwd){
  const relative=path.relative(cwd,path.resolve(cwd,target)).replaceAll('\\','/').toLowerCase();

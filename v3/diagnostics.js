@@ -76,6 +76,17 @@ export function recoveryAdvice(message){
  if(/strict mode violation/i.test(message))return 'The test locator is ambiguous. Inspect the current control outline and scope to the visible intended surface using an observed semantic target. Do not use force or an arbitrary first() to hide duplicate controls.';
  if(/Page.captureScreenshot|Unable to capture screenshot/i.test(message))return 'Capture failed; there is no new image to read or approve. Wait for actual visible app readiness and fonts, then retry a viewport capture once in the same page. Preserve failure output. Close only your own browser in finally; report a persistent capture failure to Lead. Never substitute a blank or invented screenshot.';
  if(/regex parse error|pattern rejected by ripgrep/i.test(message))return 'This is a search syntax error. Use fixed-string search for literal code, or escape regex metacharacters. Repeating the invalid pattern cannot produce evidence.';
+ if(/file has not been read/i.test(message))return 'Read the relevant range of this exact file first, then retry the same edit/write. Do not recreate the file to avoid reading it.';
+ if(/file changed since it was read/i.test(message))return 'Another edit changed this file. Re-read the affected lines and reapply your change to the CURRENT text; do not overwrite a colleague’s change.';
+ if(/old_string matched \d+ times/i.test(message))return 'Include more surrounding lines so old_string is unique, or set replace_all:true only if every occurrence must change.';
+ if(/offset must be a positive integer/i.test(message))return 'Line offsets start at 1. Use offset:1 for the start of the file.';
+ const range=message.match(/offset \d+ is out of range for .*\((\d+) lines?\)/i);
+ if(range)return `The file has only ${range[1]} line(s). Read from offset 1, or from a smaller offset inside that range.`;
+ if(/limit must be less than or equal to (\d+)/i.test(message))return `Use limit ≤ ${message.match(/limit must be less than or equal to (\d+)/i)[1]} (or omit it) and continue with offset = last returned line + 1.`;
+ if(/cannot read\s+["'][^"']+["']:\s*not a regular file/i.test(message))return 'This path is a directory. List it with glob (path set to the directory, pattern "*"), then read an actual file inside it.';
+ if(/cannot read\s+["'][^"']+["']:\s*not found|The system cannot find the file specified/i.test(message))return 'This path does not exist. Do not guess file names: glob the parent directory (or grep for the symbol) to find the real path, then read it.';
+ if(/no command execution capability/i.test(message))return 'Your role cannot run shell commands. Use read/grep/glob, or ask Lead to assign the command to a verify role.';
+ if(/tool call timed out/i.test(message))return 'The call exceeded its time budget. Narrow it: give glob/grep a specific subdirectory and pattern instead of the project root (large artifacts/, node_modules/ and target/ trees), or split the command.';
  if(/ERR_CONNECTION_REFUSED/i.test(message))return 'The preview was unavailable for this attempt. Tell Lead the exact URL, verify readiness and retry only after the managed preview is running. A refused connection is not proof of a product UI defect or a passed test.';
  return null;
 }

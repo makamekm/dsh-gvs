@@ -102,7 +102,19 @@ test('recovery instructions address real edit whitespace, stale tabs and missing
  assert.match(recoveryAdvice('Page.captureScreenshot: Unable to capture screenshot'),/no new image/);
  assert.match(recoveryAdvice('grep pattern rejected by ripgrep: regex parse error'),/fixed-string/);
  for(const extension of ['png','jpg','jpeg','gif','webp'])assert.match(recoveryAdvice(`cannot read "C:\\work\\real capture.${extension}": binary file`),/read_image.*exact existing image path/);
- assert.equal(recoveryAdvice('cannot read "C:\\work\\asset.uasset": binary file'),null);assert.equal(recoveryAdvice('cannot read "C:\\work\\missing.png": not found'),null);
+ assert.equal(recoveryAdvice('cannot read "C:\\work\\asset.uasset": binary file'),null);
+ const missing=recoveryAdvice('cannot read "C:\\work\\missing.png": not found');assert.match(missing,/does not exist.*glob the parent/);assert.doesNotMatch(missing,/read_image/,'a missing screenshot is never treated as viewable');
+});
+test('native read/edit/glob mistakes get a concrete next step',()=>{
+ assert.match(recoveryAdvice('cannot read "C:\\p\\artifacts\\task217": not a regular file'),/directory.*glob/);
+ assert.match(recoveryAdvice('offset must be a positive integer'),/start at 1/);
+ assert.match(recoveryAdvice('offset 424 is out of range for "C:\\p\\a.rs" (300 lines)'),/only 300 line/);
+ assert.match(recoveryAdvice('limit must be less than or equal to 180'),/limit ≤ 180/);
+ assert.match(recoveryAdvice('cannot modify "C:\\p\\a.ts": file has not been read — read the file, then retry'),/Read the relevant range/);
+ assert.match(recoveryAdvice('cannot edit "C:\\p\\a.rs": file changed since it was read — re-read the file, then retry'),/CURRENT text/);
+ assert.match(recoveryAdvice('old_string matched 2 times in "C:\\p\\a.rs"; provide a more specific old_string'),/unique/);
+ assert.match(recoveryAdvice('This role has no command execution capability.'),/verify role/);
+ assert.match(recoveryAdvice('tool call timed out after 30000ms'),/specific subdirectory/);
 });
 
 test('unsupported JSON/document image reads do not masquerade as SVG or prove an existing screenshot',()=>{

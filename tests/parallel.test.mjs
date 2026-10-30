@@ -46,3 +46,12 @@ test('QA evidence and generated outputs participate in leases without granting p
  const independent={...reader,readScopes:['backend']};assert.equal(taskConflict(r,qa,independent),null);
  const cwd=path.resolve('fixture');assert.equal(evidencePath(path.join(cwd,'artifacts/runtime-a/handoff.md'),cwd),true);assert.equal(evidencePath('../artifacts/outside',cwd),false);assert.equal(evidencePath('src/app.js',cwd),false);
 });
+test('a bare ** means the whole workspace, while real globs and traversal stay invalid',()=>{
+ assert.deepEqual(normalizeScopes(['**']),['*']);
+ assert.throws(()=>normalizeScopes(['src/*.ts']),/Invalid workspace scope/);assert.throws(()=>normalizeScopes(['../x']),/Invalid workspace scope/);
+});
+test('verify roles may lease Cargo build output in any crate, but not source that merely mentions target',()=>{
+ for(const scope of ['target','backend/target/**','backend/target-admin390','crates/core/target/debug'])validateWriteScopes({capability:'verify'},[scope]);
+ for(const scope of ['backend/src','src/target.rs','src/target-picker.tsx','backend/targets','.tools/cargo'])assert.throws(()=>validateWriteScopes({capability:'verify'},[scope]),/Verify writeScopes/);
+ assert.throws(()=>validateWriteScopes({capability:'read'},['backend/target']),/Verify writeScopes/,'read roles still cannot write');
+});

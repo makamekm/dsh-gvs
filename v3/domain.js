@@ -12,9 +12,9 @@ export const taskKinds=['work','discovery','review','design-review','game-review
 export function roleSpec(input){
  if(!ID.test(input.name)||input.name==='lead')throw new Error('Use a unique lowercase role name, up to 40 characters.');
  if(!['read','edit','verify','user'].includes(input.capability))throw new Error('Capability must be read, edit, verify or user.');
- if(!input.title?.trim()||!input.purpose?.trim())throw new Error('Give the role a specific title and purpose.');
+ if(!input.purpose?.trim())throw new Error('Give the role a specific purpose.');
  if(input.capability==='user'&&input.name!=='user')throw new Error('The central User role is named user.');
- return {name:input.name,title:clip(input.title,80),purpose:clip(input.purpose,1200),instructions:clip(input.instructions,5000),capability:input.capability};
+ return {name:input.name,title:clip(input.title?.trim()||input.name,80),purpose:clip(input.purpose,1200),instructions:clip(input.instructions,5000),capability:input.capability};
 }
 export function readyTasks(run){
  const done=new Set(run.tasks.filter(task=>task.state==='done').map(task=>task.id));
