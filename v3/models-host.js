@@ -28,6 +28,7 @@ export async function apply(ctx,config={}){
    }
   },
   members:root=>ctx.agentTeams.listMembers(root),install:sdk.installModelSelection,
+  capability:(root,name)=>ctx.sessionProjections.stateOf(root.session,'gvsTeam')?.value?.roles?.find(role=>role.name===name)?.capability,
   load:async id=>ctx.agents.get(id),
   lastUsed:agent=>ctx.sessionProjections.stateOf(agent.session,'modelSelection')?.lastUsed??null
  });

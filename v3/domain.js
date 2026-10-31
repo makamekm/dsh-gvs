@@ -1,5 +1,6 @@
 import {analysisReady,analysisAcceptance} from './analysis.js';
 import {goalStatus} from './goal.js';
+import {marathonView} from './marathon.js';
 import {sameEntry} from './browser.js';
 import {visualReviewAccepted,visualAuditStatus} from './visual.js';
 import {responsiveRunReady,responsiveStatus,needsResponsive} from './responsive.js';
@@ -35,19 +36,19 @@ export function view(run){
  const shownTasks=[...run.tasks.filter(task=>task.state!=='done').slice(-100),...run.tasks.filter(task=>task.state==='done').slice(-20)];
  return {schema:3,sessionId:run.sessionId,runId:run.runId,task:clip(run.task,900),kind:run.kind,engine:run.engine,status:run.status,revision:run.revision,quality:run.quality,analysis:run.analysis??null,
   taskCounts:{total:run.tasks.length,done:run.tasks.filter(task=>task.state==='done').length},parallel:{limit:run.parallelLimit??4,assigned:run.tasks.filter(task=>task.state==='running'&&task.assignee!=='user').length},
-  goal:{ready:goal.ready,unassessed:goal.unassessed.map(item=>item.id),requirements:goal.requirements.length,remainingCount:goal.requirements.filter(item=>!item.accepted).length,remaining:goal.requirements.filter(item=>!item.accepted).slice(0,20).map(({id,criterion})=>({id,criterion:clip(criterion,300)})),issueCount:goal.issues.filter(item=>!item.resolved).length,issues:goal.issues.filter(item=>!item.resolved).slice(0,10).map(({id,taskId,criterion})=>({id,taskId,criterion:clip(criterion,400)})),expertise:(goal.expertise??[]).filter(item=>!item.assigned).slice(0,20),staffingReady:goal.staffingReady??true,discoveryReady:goal.discoveryReady,handoff:goal.handoff??null},
+  goal:{ready:goal.ready,unassessed:goal.unassessed.map(item=>item.id),requirements:goal.requirements.length,remainingCount:goal.requirements.filter(item=>!item.accepted).length,remaining:goal.requirements.filter(item=>!item.accepted).slice(0,20).map(({id,criterion})=>({id,criterion:clip(criterion,300)})),issueCount:goal.blockingIssues??0,backlogCount:goal.backlog??0,issues:goal.issues.filter(item=>!item.resolved&&(!item.backlog||!!run.marathon)).slice(0,10).map(({id,taskId,criterion})=>({id,taskId,criterion:clip(criterion,400)})),expertise:(goal.expertise??[]).filter(item=>!item.assigned).slice(0,20),staffingReady:goal.staffingReady??true,discoveryReady:goal.discoveryReady,handoff:goal.handoff??null},
   roles:run.roles.map(role=>{
    const current=run.tasks.find(task=>task.assignee===role.name&&task.state==='running');
    const blocked=run.tasks.find(task=>task.assignee===role.name&&task.state==='blocked');
    const waiting=run.tasks.find(task=>task.assignee===role.name&&task.state==='waiting');
    const responsive=current&&needsResponsive(run,current)?responsiveStatus(run,current):null;
    const dependencies=waiting?.dependsOn.filter(id=>run.tasks.find(task=>task.id===id)?.state!=='done').map(id=>run.tasks.find(task=>task.id===id));
-   return {name:role.name,title:role.title,purpose:role.purpose,sessionId:role.sessionId??null,
+   return {name:role.name,title:role.title,purpose:role.purpose,capability:role.capability,sessionId:role.sessionId??null,
     waitingForUser:role.waitingForUser===true,scheduling:!current&&waiting?parallelBlocker(run,waiting):null,state:role.waitingForUser?'waiting':current?'running':blocked?'blocked':waiting?'waiting':role.error?'error':'idle',
     activity:clip(role.waitingForUser?'Ждёт ответа Пользователя':current?current.title+(responsive?` · матрица ${responsive.completed}/${responsive.total}`:''):blocked?.result?.summary??waiting?.title??'Ожидает новую задачу',280),
     waitingFor:(dependencies??[]).filter(Boolean).map(task=>({id:task.id,title:task.title,agent:run.roles.find(role=>role.name===task.assignee)?.title??task.assignee})),
     completed:run.tasks.filter(task=>task.assignee===role.name&&task.state==='done').length,error:role.error??null};
-  }),tasks:shownTasks.map(({id,title,assignee,kind,state,dependsOn,result})=>({id,title,assignee,kind,state,dependsOn,verdict:result?.verdict??null,findings:result?.findings?.map(item=>clip(item,400))??[],summary:clip(result?.summary,280)})),summary:run.summary??''};
+  }),marathon:marathonView(run.marathon),tasks:shownTasks.map(({id,title,assignee,kind,state,dependsOn,result})=>({id,title,assignee,kind,state,dependsOn,verdict:result?.verdict??null,findings:result?.findings?.map(item=>clip(item,400))??[],summary:clip(result?.summary,280)})),summary:run.summary??''};
 }
 export function imageAcceptance(run,task){
  if(!run.visualRequired)return true;

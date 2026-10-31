@@ -16,6 +16,7 @@ function fixture(config={}){
  const ctx={agentTeams:team,on:(name,fn)=>{hooks[name]=fn;},effect:fn=>effects.push(fn),jobs:{attachController:()=>()=>{}},tools:{register:definition=>definitions.set(definition.name,definition),guard:fn=>{guard=fn;}},
   workingDirectory:{ensure:async()=>path.resolve('work/in-memory-fixture')},sandboxPolicy:{resolve:()=>({mode:'workspace-write'})},
   fs:{resolve:async file=>({file}),contains:()=>true,listDir:async()=>[{name:'app.js',type:'file'}],lstat:async()=>({type:'file'}),readBytes:async()=>Buffer.from(source),readText:async target=>{if(!files.has(target.file))throw Object.assign(new Error('missing'),{code:'ENOENT'});return files.get(target.file);},writeText:async(target,value)=>{files.set(target.file,value);}}};
+ const sections=new Map();if(config.promptSections)ctx.systemPrompt={section:value=>sections.set(value.name,value)};
  apply(ctx,{requireCoordinatorPlan:false,responsiveTesting:false,projectInspection:false,...config});
  const actor=name=>{const member=[...members.values()].find(member=>member.name===name);return {id:member.id,session:{header:{parentSession:root.id}},ctx:{}};};
  async function call(name,args={},agent=root){const exec={agent,name,arguments:args,signal:new AbortController().signal};await hooks['tools/pre-execute'](exec,async()=>({kind:'allow'}));const denied=guard(exec);if(denied)throw new Error(denied);return definitions.get(name).execute(args,exec);}
@@ -24,7 +25,7 @@ function fixture(config={}){
   const goal=await call('gvs_goal',{action:'status'});await call('gvs_goal',{action:'plan',requirements:[{id:'human-goal',criterion:saved.task,sourceIds:goal.humanMessages.map(item=>item.id)}],assessedMessages:goal.humanMessages.map(item=>item.id),expertise:[],staffingRationale:'The fixture already has all needed capabilities.'},agent);
  }return call('gvs_task',{action:'complete',taskId:id,verdict:'pass',summary:'Observed result',findings:[],...extra},agent);};
  async function consult(agent){let cached;const pending=call('gvs_ask_user',{question:'Confirm the exact goal'},agent).then(value=>(cached=value,value));await new Promise(resolve=>setImmediate(resolve));if(cached)return cached;let list=await call('gvs_task',{action:'list'});const question=list.tasks.find(task=>task.kind==='consultation'&&task.state==='running');assert.ok(question);await complete(question.id,actor('user'));return pending;}
- return {root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,effects,nativeGuard:exec=>guard(exec),failNextSpawn:()=>{nextSpawnError=new Error('Temporary spawn failure');},changeSource:value=>{source=value;},get spawns(){return spawns;}};
+ return {sections,root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,effects,nativeGuard:exec=>guard(exec),failNextSpawn:()=>{nextSpawnError=new Error('Temporary spawn failure');},changeSource:value=>{source=value;},get spawns(){return spawns;}};
 }
 
 test('a real successful process keeps its output and side effects when a planned new file became a directory and source proof fails',async t=>{
@@ -59,7 +60,7 @@ test('long runtime analyses forward a bounded observation budget without complet
  actor.ctx.tools={execute:async request=>{requests.push(request);return {isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'GVS_ANALYSIS_RESULT: '+JSON.stringify(raw)},stderr:{text:''}}};}};
  const definition=f.definitions.get('gvs_analysis');assert.equal(definition.parameters.properties.timeoutMs.maximum,600000);assert.ok(definition.timeoutMs>600000);
  await assert.rejects(f.call('gvs_analysis',{action:'check',command:'node idle-check.mjs',timeoutMs:240000}),/independent verify agent/);
- for(const timeoutMs of [0,999,600001,Infinity,240000.5,'240000'])await assert.rejects(f.call('gvs_analysis',{action:'check',command:'node idle-check.mjs',timeoutMs},actor),/integer from 1000 to 600000/);
+ for(const timeoutMs of [0,999,600001,Infinity,240000.5,'240000.5','soon'])await assert.rejects(f.call('gvs_analysis',{action:'check',command:'node idle-check.mjs',timeoutMs},actor),/integer from 1000 to 600000/);
  assert.equal(requests.length,0);
  for(const timeoutMs of [240000,600000,1000,undefined]){const report=await f.call('gvs_analysis',{action:'check',command:'node idle-check.mjs',...(timeoutMs===undefined?{}:{timeoutMs})},actor),request=requests.at(-1);assert.equal(request.arguments.timeoutMs,timeoutMs??120000);assert.equal(report.timeoutMs,request.arguments.timeoutMs);assert.equal(request.arguments.command,'node idle-check.mjs');assert.equal(request.signal.aborted,false);assert.ok(request.callId);assert.equal(report.ok,true);assert.equal(report.taskId,work.task.id);}
  assert.equal(f.tasks.get(work.task.id).status,'in_progress');assert.equal((await f.call('gvs_analysis',{action:'status'})).ready,false);
@@ -384,6 +385,27 @@ test('wrong-tool edit/write arguments identify the real invocation error without
   const after=JSON.parse([...f.files.values()][0]);assert.equal(after.status,before.status);assert.equal(after.runId,before.runId);assert.deepEqual(after.tasks.find(t=>t.id===work.task.id).writeScopes,[root]);assert.equal(f.tasks.get(work.task.id).status,'in_progress');
  }
  assert.equal(mutations,2);
+});
+
+test('role policy arrives once in the system prompt and each teammate gets a role-scoped tool list',async()=>{
+ const f=fixture({promptSections:true}),start=await f.call('gvs_run',{task:'Scoped prompt project',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'auditor',title:'Auditor',purpose:'Read-only source audit',capability:'read',instructions:'Audit the backend trust boundaries.'});
+ await f.call('gvs_agent',{action:'create',name:'builder',title:'Builder',purpose:'Implement slices',capability:'edit'});
+ const work=await f.call('gvs_task',{action:'create',title:'Slice',instructions:'Implement the bounded slice',kind:'work',assignee:'builder',writeScopes:['src'],readScopes:['src'],resources:[]});
+ const assignment=f.sent.filter(m=>m.target==='builder').at(-1).content[0].text;
+ assert.match(assignment,/ROLE POLICY: your system prompt carries the full builder \(edit\) role policy/);
+ assert.doesNotMatch(assignment,/You are a named persistent GVS teammate/,'shared rules are not repeated per assignment');
+ assert.doesNotMatch(assignment,/CONDITIONAL ANALYSIS PLAN: null|SHARED USER DECISIONS: \[\]/,'empty context fields are omitted');
+ const policy=f.sections.get('gvs-role-policy');
+ assert.match(policy.text({scope:f.actor('auditor')}),/ROLE auditor: Auditor[\s\S]*Audit the backend trust boundaries/);
+ assert.equal(policy.text({scope:f.root}),'','the lead gets the coordinator policy, not a role policy');
+ const tools=['gvs_run','gvs_finish','gvs_task','gvs_agent','read','grep','write','edit','pwsh','gvs_responsive'].map(name=>({name,parameters:name==='gvs_task'?f.definitions.get('gvs_task').parameters:{type:'object',properties:{}}}));
+ const assemble=agent=>f.hooks['system-prompt/assemble']({},{agent},async()=>({sections:[],contexts:[],tools}));
+ assert.deepEqual((await assemble(f.actor('auditor'))).tools.map(t=>t.name),['gvs_task','gvs_agent','read','grep']);
+ const built=(await assemble(f.actor('builder'))).tools;assert.deepEqual(built.map(t=>t.name),['gvs_task','gvs_agent','read','grep','write','edit','pwsh']);
+ assert.deepEqual(built[0].parameters.properties.action.enum,['list','complete']);assert.equal('codePlan' in built[0].parameters.properties,false);
+ assert.deepEqual((await assemble(f.root)).tools.map(t=>t.name),tools.map(t=>t.name),'the lead of an unclassified project keeps its tools');
+ assert.equal(work.task.state,'running');
 });
 
 test('scheduler overlaps independent scoped branches, preserves conflict waits, and guards direct edits',async()=>{
@@ -871,4 +893,28 @@ test('state writes survive a transient Windows replace failure but still surface
  const start=await f.call('gvs_run',{task:'Transient write',kind:'code'});assert.ok(start.briefTaskId);assert.ok([...f.files.values()].some(value=>JSON.parse(value).runId));
  f.ctx.fs.writeText=async()=>{throw Object.assign(new Error('no space left on device'),{code:'ENOSPC'});};
  await assert.rejects(f.call('gvs_pause'),/no space left/);
+});
+
+test('a marathon run checkpoints, refuses to stop early and at the deadline restores the last green tree',{skip:spawnSync('git',['--version']).status!==0&&'git is not installed'},async t=>{
+ const cwd=await fs.mkdtemp(path.join(tmpdir(),'gvs-marathon-'));t.after(()=>fs.rm(cwd,{recursive:true,force:true}));
+ await fs.writeFile(path.join(cwd,'app.js'),'working');
+ t.mock.timers.enable({apis:['Date'],now:Date.now()});
+ const f=fixture({marathonTickMs:10});f.ctx.workingDirectory.ensure=async()=>cwd;f.ctx.fs.readBytes=target=>fs.readFile(target.file);
+ const commands=[];f.root.ctx.tools={execute:async request=>{commands.push(request.arguments.command);const ok=await fs.readFile(path.join(cwd,'app.js'),'utf8')==='working';return {isError:false,value:{kind:'foreground',exitCode:ok?0:1,stdout:{text:ok?'1 passed':'1 failed'},stderr:{text:''}}};}};
+ const saved=()=>JSON.parse(f.files.get(path.join(cwd,'.gvs',`team-${f.root.id}.json`)));
+ const until=async check=>{for(let i=0;i<300&&!check();i++)await new Promise(resolve=>setTimeout(resolve,10));assert.ok(check());};
+ const start=await f.call('gvs_run',{task:'Implement the library',kind:'code',marathon:{minutes:60,tests:['node test.js']}});
+ assert.equal(start.marathon.remainingMinutes,60);assert.equal(saved().marathon.checkpoints.length,1,'the starting tree is checkpointed');
+ const early=await f.call('gvs_finish');assert.equal(early.status,'needs-review');assert.equal(early.marathon.phase,'work');
+ t.mock.timers.tick(21*60000);await until(()=>saved().marathon.checkpoints.at(-1).green);
+ assert.equal(saved().marathon.checkpoints.at(-1).green,true,'a green periodic test run marks the checkpoint green');
+ await fs.writeFile(path.join(cwd,'app.js'),'broken');await fs.writeFile(path.join(cwd,'extra.js'),'new file');
+ t.mock.timers.tick(34*60000);await until(()=>saved().marathon.wrapUpSent);assert.ok(f.sent.some(message=>/MARATHON WRAP-UP/.test(message.content[0].text)),'the lead is told to stabilize before the deadline');
+ t.mock.timers.tick(6*60000);await until(()=>saved().marathon.final);
+ const final=saved();assert.equal(final.status,'time-limit');assert.ok(final.marathon.final.restoredGreen);assert.equal(final.marathon.final.testsGreen,true);
+ assert.equal(await fs.readFile(path.join(cwd,'app.js'),'utf8'),'working','the red final tree is replaced by the last green checkpoint');
+ await assert.rejects(fs.access(path.join(cwd,'extra.js')));
+ assert.ok(f.sent.some(message=>/MARATHON TIME LIMIT/.test(message.content[0].text)));
+ assert.ok(commands.every(command=>command==='node test.js'));
+ assert.equal((await f.call('gvs_finish')).status,'time-limit','finishing again reports the closed run');
 });

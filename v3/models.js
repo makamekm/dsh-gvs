@@ -16,9 +16,13 @@ export function validatePolicy(policy){
  for(const [name,choice] of Object.entries(policy.overrides)){if(!name||name.length>100||['__proto__','constructor','prototype'].includes(name))throw new Error('Invalid agent name');overrides[name]=validateChoice(choice);}
  return {schema:1,revision:policy.revision,defaults:validateChoice(policy.defaults),overrides};
 }
-export function inheritSelection(base,defaults={},override={}){
- const route=override.model?override:defaults.model?defaults:base;
- const effort=own(override,'reasoningEffort')?override.reasoningEffort:own(defaults,'reasoningEffort')?defaults.reasoningEffort:base?.reasoningEffort;
+// Role classes route every teammate of one capability (for example all editors on a local model);
+// a named agent override still wins over its class.
+export const CLASS_TARGETS=['@edit','@verify','@read','@user'];
+export const classKey=capability=>capability?`@${capability}`:null;
+export function inheritSelection(base,defaults={},override={},roleClass={}){
+ const route=override.model?override:roleClass.model?roleClass:defaults.model?defaults:base;
+ const effort=own(override,'reasoningEffort')?override.reasoningEffort:own(roleClass,'reasoningEffort')?roleClass.reasoningEffort:own(defaults,'reasoningEffort')?defaults.reasoningEffort:base?.reasoningEffort;
  if(!route?.provider||!route.model)throw new Error('Coordinator model is not configured');
  return {provider:route.provider,model:route.model,...(effort==null?{}:{reasoningEffort:effort})};
 }
@@ -38,7 +42,8 @@ export function providerRecoveryCandidates(run,policy,base,lastUsed){
  return run.tasks.filter(task=>{
   if(task.state!=='blocked'||task.modelRecovery?.revision===policy.revision||!/^Agent turn ended \(error\)/.test(task.result?.summary??''))return false;
   if(!providerFailureFor(run,task))return false;
-  const before=task.failedModel??lastUsed(task.assignee,task),after=inheritSelection(base,policy.defaults,policy.overrides[task.assignee]);
+  const capability=run.roles?.find(role=>role.name===task.assignee)?.capability;
+  const before=task.failedModel??lastUsed(task.assignee,task),after=inheritSelection(base,policy.defaults,policy.overrides[task.assignee],policy.overrides[classKey(capability)]);
   return !!before?.provider&&!!before.model&&(before.provider!==after.provider||before.model!==after.model);
  });
 }
@@ -72,7 +77,7 @@ export class ModelRouting {
  detach(id,agent){const worker=this.workers.get(id);if(worker&&(!agent||worker.agent===agent)){worker.dispose();this.workers.delete(id);}}
  async resolve(root,name,policy,catalog){
   if(!catalog){this.catalogPromise??=this.api.catalog().finally(()=>{this.catalogPromise=null;});catalog=await this.catalogPromise;this.catalog=catalog;}
-  const base=this.api.coordinator(root),choice=policy.overrides[name]??{},selected=inheritSelection(base,policy.defaults,choice);
+  const base=this.api.coordinator(root),choice=policy.overrides[name]??{},roleClass=policy.overrides[classKey(this.api.capability?.(root,name))]??{},selected=inheritSelection(base,policy.defaults,choice,roleClass);
   let warning;
   const model=catalog?.groups.find(group=>group.id===selected.provider)?.models.find(model=>model.id===selected.model);
   if(selected.reasoningEffort&&model&&!model.reasoning?.efforts?.some(item=>item.id===selected.reasoningEffort)){
@@ -120,11 +125,11 @@ export class ModelRouting {
   const operation=previous.catch(()=>{}).then(async()=>{
    const policy=this.policy(root);
    if(request.revision!==policy.revision)throw new Error('Settings changed in another window. Refresh and try again.');
-   if(request.target!=='team'&&!this.api.members(root).some(member=>member.role!=='lead'&&member.name===request.target))throw new Error('Agent is no longer in this team');
+   if(request.target!=='team'&&!CLASS_TARGETS.includes(request.target)&&!this.api.members(root).some(member=>member.role!=='lead'&&member.name===request.target))throw new Error('Agent is no longer in this team');
    const choice=validateChoice(request.choice),catalog=await this.api.catalog();this.catalog=catalog;
    const candidate=validatePolicy({...policy,revision:policy.revision+1,defaults:request.target==='team'?choice:policy.defaults,overrides:request.target==='team'?policy.overrides:{...policy.overrides,[request.target]:choice}});
    if(choice.model&&!catalog.groups.some(group=>group.id===choice.provider&&group.models.some(model=>model.id===choice.model)))throw new Error('Selected model is unavailable');
-   const effective=inheritSelection(this.api.coordinator(root),candidate.defaults,request.target==='team'?{}:choice);
+   const effective=inheritSelection(this.api.coordinator(root),candidate.defaults,CLASS_TARGETS.includes(request.target)||request.target==='team'?{}:choice,CLASS_TARGETS.includes(request.target)?choice:{});
    const model=catalog.groups.find(group=>group.id===effective.provider)?.models.find(model=>model.id===effective.model);
    if(choice.reasoningEffort&&!model?.reasoning?.efforts?.some(item=>item.id===choice.reasoningEffort))throw new Error('Selected reasoning effort is unavailable for this model');
    // Resolve before committing; a broken provider cannot overwrite saved preferences.

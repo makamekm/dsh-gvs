@@ -3,9 +3,9 @@ import {randomUUID,createHash} from 'node:crypto';
 import {clip,roleSpec,readyTasks,assertDag,view,quality,kinds,taskKinds,parseGameReport,imageAcceptance} from './domain.js';
 import {captureBrowser,captureGame,previewURL,BROWSER_ACTIONS,BROWSER_STATES,browserCapabilities} from './browser.js';
 import {RESPONSIVE_TESTING,responsiveMatrix,responsiveStatus,responsiveScenarios,mergeResponsiveHints,validateResponsiveAcceptance,inspectResponsiveCheck} from './responsive.js';
-import {COMMON,VERIFY_POLICY,USER,GAME} from './prompts.js';
+import {COMMON,VERIFY_POLICY,USER,GAME,VISUAL_ACCEPTANCE} from './prompts.js';
 import {motionHint,analysisPlan,parseAnalysisReport,analysisReady,analysisAcceptance,decodeAnalysisOutput,analysisReportReviewStatus} from './analysis.js';
-import {syncGoal,planGoal,linkGoal,recordFindings,goalStatus,resolvedBlocker} from './goal.js';
+import {syncGoal,planGoal,linkGoal,recordFindings,goalStatus,resolvedBlocker,autoLink} from './goal.js';
 import {refreshRevision} from './revision.js';
 import {decisionKey,reusableDecision,availableDecisions,consultationKey,progressStatus,modelResult} from './flow.js';
 import {previewState,needsPreview,restoreManagedPreview} from './preview.js';
@@ -18,8 +18,12 @@ import {assignmentDelivery} from './delivery.js';
 import {prepareCodePlan,stalePlanFiles,planSources,needsCodePlan,missingPlanOutputs,migrateCodePlan,CodePlanSourceError,successfulPlanChecks} from './planning.js';
 import {taskArtifacts} from './artifacts.js';
 import {classifyProjectQA,isInteractiveProject,requiresWebVerification} from './project-qa.js';
+import {scopeTools,scopeSections,rolePolicy,projectSurfaces} from './scoping.js';
+import {coerceArgs} from './args.js';
+import {MARATHON_INPUT,MARATHON_LEAD,MARATHON_TEAM,marathonSettings,detectTests,marathonPhase,remainingMinutes,testsGreen,hardeningDecision,marathonView} from './marathon.js';
+import {checkpointStore} from './checkpoint.js';
 
-export const inject=['tools','agentTeams','agents','sessionController','subagents','fs','workingDirectory','sandboxPolicy','attachments','llm','jobs','sessionProjections'];
+export const inject=['tools','agentTeams','agents','sessionController','subagents','fs','workingDirectory','sandboxPolicy','attachments','llm','jobs','sessionProjections','systemPrompt'];
 const entries=new Map(),instance=randomUUID(),WAIT_TIMEOUT_MS=45000;
 const object=properties=>({type:'object',additionalProperties:false,properties});
 const text=(maxLength=4000)=>({type:'string',maxLength});
@@ -61,6 +65,25 @@ export function apply(ctx,config={}){
  const planCheckCommands=new WeakMap();
  const maxParallel=config.maxParallel??4,maxTasks=!config.goalProtocol&&[64,160].includes(config.maxTasks)?10000:config.maxTasks??10000;
  ctx.effect(()=>ctx.jobs.attachController('gvs-team-preview'));
+ // Role, run and running task of a prompt/tool scope; null outside GVS teams.
+ function memberScope(agent){
+  const member=agent&&ctx.agentTeams.tryMembership?.(agent);
+  if(!member){const entry=agent&&entries.get(agent.id);return entry?{lead:true,run:entry.run}:null;}
+  const entry=entries.get(member.root.id);
+  if(member.role==='lead')return {lead:true,run:entry?.run??null};
+  const role=entry?roleOf(entry,member.name)??null:null;
+  return {lead:false,run:entry?.run??null,role,task:entry?.run.tasks.find(task=>task.assignee===member.name&&task.state==='running')??null};
+ }
+ ctx.systemPrompt?.section({name:'gvs-role-policy',order:-5,text:({scope})=>{const member=memberScope(scope);return member&&!member.lead&&member.role?`ROLE POLICY
+${rolePolicy(member.run,member.role)}`:'';}});
+ ctx.systemPrompt?.section({name:'gvs-marathon',order:95,text:({scope})=>{const member=memberScope(scope);return !member?.run?.marathon||member.run.marathon.final?'':member.lead?MARATHON_LEAD:member.role?MARATHON_TEAM:'';}});
+ ctx.systemPrompt?.section({name:'gvs-visual-acceptance',order:97,text:({scope})=>{const member=memberScope(scope);if(!member||!(member.lead||['verify','user'].includes(member.role?.capability)))return '';const surfaces=projectSurfaces(member.run);return !surfaces||surfaces.rendered?VISUAL_ACCEPTANCE:'';}});
+ ctx.on('system-prompt/assemble',async(_assembly,context,next)=>{
+  const assembly=await next(),member=memberScope(context?.agent??context?.scope);
+  if(!member)return assembly;
+  const tools=scopeTools(assembly.tools,member);
+  return {...assembly,tools,sections:scopeSections(assembly.sections??[],tools)};
+ });
  async function storage(root,signal){
   const cwd=await ctx.workingDirectory.ensure(root,signal),policy=ctx.sandboxPolicy.resolve({session:root.session});
   const target=relative=>ctx.fs.resolve(path.resolve(cwd,relative),{cwd,signal});
@@ -168,7 +191,7 @@ export function apply(ctx,config={}){
    const native=ctx.agentTeams.listMembers?.(entry.root).find(member=>member.name===spec.name);
    if(native){role.sessionId=native.id;delete role.error;return role;}
    const created=await ctx.agentTeams.spawnTeammate(entry.root,{name:spec.name,description:`${spec.title} — ${spec.purpose}`.slice(0,200),context:'fresh',provider:'spawn',signal,
-    prompt:[{type:'text',text:`${COMMON}\n${spec.capability==='edit'?'':VERIFY_POLICY+'\n'}\nROLE ${spec.name}: ${spec.title}\nPURPOSE: ${spec.purpose}\nCAPABILITY: ${spec.capability}\n${spec.capability==='user'?USER:spec.instructions}\n${entry.run.kind.startsWith('game')?GAME:''}\nHUMAN TASK: ${entry.run.task}\nThis is role registration, not an assigned task yet. Briefly acknowledge and become idle; a dependency-ready task will wake this same conversation.`}]});
+    prompt:[{type:'text',text:`${ctx.systemPrompt?`ROLE ${spec.name}: ${spec.title}. Your system prompt carries the full role policy.`:rolePolicy(entry.run,role)}\nHUMAN TASK: ${entry.run.task}\nThis is role registration, not an assigned task yet. Briefly acknowledge and become idle; a dependency-ready task will wake this same conversation.`}]});
    role.sessionId=created.member.id;delete role.error;
   }catch(error){role.error=clip(error.message);throw error;}finally{await commit(entry);}
   return role;
@@ -227,11 +250,12 @@ export function apply(ctx,config={}){
     task.receivedAnalysisReports=(entry.run.analysisChecks??[]).filter(check=>check.ok&&check.revision===entry.run.revision&&check.planVersion===entry.run.analysis?.version).map(check=>check.id);
     const deps=entry.run.tasks.filter(previous=>task.dependsOn.includes(previous.id)).map(({id,title,result})=>({id,title,result:result?{verdict:result.verdict,summary:clip(result.summary,1200),findings:result.findings?.map(item=>clip(item,400)),inventoryItems:result.inventory?.length??0,artifacts:(result.artifacts??[]).slice(0,12)}:null}));
     const observations=entry.run.visualChecks.filter(check=>check.revision===entry.run.revision).slice(-2).map(({ok,scenario,views})=>({ok,scenario,views}));
-    const prompt=`${COMMON}\n${role.capability==='edit'?'':VERIFY_POLICY+'\n'}${role.capability==='user'?USER:role.instructions}\n${entry.run.kind.startsWith('game')?GAME:''}\n\nCURRENT HUMAN TASK: ${entry.run.task}\nROLE: ${role.title}\nASSIGNED TASK ID: ${task.id}\nTASK NONCE: ${task.nonce}\nKIND: ${task.kind}\nWORK: ${task.instructions}\n${needsCodePlan(entry.run,task)?'COORDINATOR CODE PLAN (binding exact changes/checks; ask Lead about source drift)':'COORDINATOR NOTES (guidance; you own the file-level design)'}: ${JSON.stringify(task.codePlan??null)}\nCONDITIONAL ANALYSIS PLAN: ${JSON.stringify(entry.run.analysis??null)}\nANALYSIS REPORTS: ${JSON.stringify((entry.run.analysisChecks??[]).filter(check=>task.receivedAnalysisReports.includes(check.id)).map(({id,engine,analyzer,results,frameSummary})=>({id,engine,analyzer,results:results.map(({frames,samples,...result})=>result),frameSummary})))}\nDEPENDENCY RESULTS: ${JSON.stringify(deps)}\nSHARED USER DECISIONS: ${JSON.stringify(availableDecisions(entry.run).slice(-6))}\nRECORDED BROWSER EVIDENCE: ${JSON.stringify(observations)}\nPREVIEW: ${JSON.stringify(entry.run.preview)}\nACTUAL ATTACHED IMAGES: ${JSON.stringify(images.map(image=>({viewport:image.viewport,id:image.attachment.attachmentId,atMs:image.atMs})))}\nFinish with gvs_task complete for this exact task. Include actual image IDs, analysisReports IDs and exact commands when reviewing. Other members wake automatically; do not poll them.`;
+    const policy=ctx.systemPrompt?`ROLE POLICY: your system prompt carries the full ${role.name} (${role.capability}) role policy.`:rolePolicy(entry.run,role);
+    const prompt=`${policy}\n\nCURRENT HUMAN TASK: ${entry.run.task}\nROLE: ${role.title}\nASSIGNED TASK ID: ${task.id}\nTASK NONCE: ${task.nonce}\nKIND: ${task.kind}\nWORK: ${task.instructions}\n${needsCodePlan(entry.run,task)?'COORDINATOR CODE PLAN (binding exact changes/checks; ask Lead about source drift)':'COORDINATOR NOTES (guidance; you own the file-level design)'}: ${JSON.stringify(task.codePlan??null)}\n${[['CONDITIONAL ANALYSIS PLAN',entry.run.analysis],['ANALYSIS REPORTS',(entry.run.analysisChecks??[]).filter(check=>task.receivedAnalysisReports.includes(check.id)).map(({id,engine,analyzer,results,frameSummary})=>({id,engine,analyzer,results:results.map(({frames,samples,...result})=>result),frameSummary}))],['DEPENDENCY RESULTS',deps],['SHARED USER DECISIONS',availableDecisions(entry.run).slice(-6)],['RECORDED BROWSER EVIDENCE',observations],['PREVIEW',entry.run.preview],['ACTUAL ATTACHED IMAGES',images.map(image=>({viewport:image.viewport,id:image.attachment.attachmentId,atMs:image.atMs}))]].filter(([,value])=>value!=null&&!(Array.isArray(value)&&!value.length)).map(([label,value])=>`${label}: ${JSON.stringify(value)}\n`).join('')}Finish with gvs_task complete for this exact task. Include actual image IDs, analysisReports IDs and exact commands when reviewing. Other members wake automatically; do not poll them.`;
     const messages=entry.run.goal?.messages??[],selected=messages.filter((_,i)=>i<2||i>=messages.length-8);
-    const contract=`REAL HUMAN CONTRACT (unaltered excerpts; ${messages.length} messages stored, paginate gvs_goal status for all): ${JSON.stringify(selected)}\nGOAL COVERAGE: ${JSON.stringify(view(entry.run).goal)}\nUser brief MUST first call gvs_goal status then gvs_goal plan with sourceIds/assessedMessages and expertise/staffingRationale. Infer needed roles; the human need not name them. Discovery inventories must map to requirements. Reviews MUST attest coveredRequirements IDs and scopeReviewed=true after independent completeness analysis; repairs attest addressedIssues IDs. Every required mismatch is recorded, never only in summary: slice defects in findings, wider-goal gaps in followUps (full-scope reviews: all in findings). Simulated User decisions cannot waive the human goal.`;
+    const contract=`REAL HUMAN CONTRACT (unaltered excerpts; ${messages.length} messages stored, paginate gvs_goal status for all): ${JSON.stringify(selected)}\nGOAL COVERAGE: ${JSON.stringify(view(entry.run).goal)}${task.kind==='brief'?'\nUser brief MUST first call gvs_goal status then gvs_goal plan with sourceIds/assessedMessages and expertise/staffingRationale. Infer needed roles; the human need not name them.':''} Discovery inventories must map to requirements. Reviews MUST attest coveredRequirements IDs and scopeReviewed=true after independent completeness analysis; repairs attest addressedIssues IDs. Every required mismatch is recorded, never only in summary: slice defects in findings, wider-goal gaps in followUps (full-scope reviews: all in findings). Simulated User decisions cannot waive the human goal.`;
     const flow=`PARALLEL ACCESS CONTRACT: ${JSON.stringify(taskAccess(entry.run,task))}. Edit only leased write paths. Shell commands must obey the same contract; leases coordinate agents and are not OS isolation. Do not mutate shared servers/databases, run dependency installs/shared builds or overwrite another task's artifacts without the named exclusive resource (project-runtime for the common preview/build/test environment). Reuse the project's shared build output and existing test/check scripts; write a report under artifacts/ only when one is genuinely needed. Ask Lead to update a queued task's scopes/resources before an undeclared operation. Full final reviews read the whole frozen source; scoped increment results never replace integration acceptance.\nDELIVER AN INCREMENT, NOT A PLANNING LOOP. Review scope: ${task.scope??'full'}, analysisIds: ${JSON.stringify(task.analysisIds??'ALL')}. An increment pass attests only this slice/selected criteria and NEVER full-goal acceptance. [] allows only a static slice, not a motion acceptance claim. Established User decisions for this role: ${JSON.stringify(task.consultations)}. Reuse a current decision with gvs_ask_user reuseTaskId; consult only for an actual consequential unknown, never to approve the same scope again. Read a dependency's exact assignment/result with gvs_task list taskId when needed; summaries above are not a claim that you read the whole evidence. For implementation, produce a coherent runnable slice with a real build/render check, normally within 20 minutes. If this assignment is too broad, message Lead with the completed slice and remaining work so it can be split without dropping requirements. Do not expand an in-progress mobile fix into every backend/product feature or postpone all product work until universal readiness. Independent final acceptance remains mandatory.`;
-    const fallback=`${COMMON}\n${role.capability==='edit'?'':VERIFY_POLICY+'\n'}${role.capability==='user'?USER:role.instructions}\n${entry.run.kind.startsWith('game')?GAME:''}\nASSIGNED TASK ID: ${task.id}\nTASK NONCE: ${task.nonce}\nROLE: ${role.title}\nKIND: ${task.kind}\nWORK: ${task.instructions}\n${flow}\nThe complete human goal is unchanged. First read gvs_goal status, then gvs_task list taskId=${task.id}; inspect dependency IDs ${JSON.stringify(task.dependsOn)} and relevant evidence via their paged tools. Finish only with gvs_task complete for this exact ID/nonce. PREVIEW: ${JSON.stringify(entry.run.preview)}`;
+    const fallback=`${policy}\nASSIGNED TASK ID: ${task.id}\nTASK NONCE: ${task.nonce}\nROLE: ${role.title}\nKIND: ${task.kind}\nWORK: ${task.instructions}\n${flow}\nThe complete human goal is unchanged. First read gvs_goal status, then gvs_task list taskId=${task.id}; inspect dependency IDs ${JSON.stringify(task.dependsOn)} and relevant evidence via their paged tools. Finish only with gvs_task complete for this exact ID/nonce. PREVIEW: ${JSON.stringify(entry.run.preview)}`;
     const focusPrompt=task.reviewFocus==='source'?'COORDINATOR-ASSIGNED SOURCE-ONLY INCREMENT: inspect actual source/native ABI/security policy and run exact appropriate successful checks. No visualReview/screenshots are required for THIS source task; do not fabricate them. This pass does not attest UI, runtime-only behavior, design/User acceptance or the full human goal. Any such unresolved obligations remain open.':'';
     const reportPrompt=role.capability==='verify'?(entry.run.kind==='ui'&&task.kind==='review'&&task.scope!=='increment'?`INDEPENDENT FULL UI QA: plan and execute your own scenarios with gvs_user_testing and gvs_browser_check; the User's checks do not substitute for yours. ${USER_TESTING}\n`:'')+'VERIFY OUTPUTS: direct write/edit is allowed only for reports/evidence in your explicitly leased artifacts/, test-results/ or playwright-report/ paths. Keep production sources and analyzer scripts read-only. Generated build/cache leases are for actual checks, never fabricated product output. If no report path is leased, return structured findings via gvs_task complete or ask Lead for a precise report task; do not bypass scope restrictions with shell writes. Analysis failures report the real exit/stderr cause; never weaken tests or invent a success report.':'';
     const resumePrompt=continuation?'CONTINUING AN INTERRUPTED ASSIGNMENT: partial edits already exist. Inspect the current planned files before editing, preserve completed work, finish the same plan and rerun every planned check. The original implementation baseline and independent acceptance remain binding.':'';
@@ -245,7 +269,7 @@ export function apply(ctx,config={}){
  function register(name,description,properties,required,execute,timeoutMs=120000){
   ctx.tools.register({name,description,parameters:{...object(properties),required},timeoutMs,
    output:{schema:{},presentationMeta:(_args,value)=>({gvsTeam:value.gvsTeam??null}),render:(_args,value)=>[{type:'text',text:JSON.stringify(modelResult(value))},...imageParts(value.images??[])]},
-   async execute(args,exec){args=normalizeTaskRefs(args);try{const value=await execute(args,exec);const info=await current(exec,false);if(info.entry){if(value.ok===false)await noteFailure(info.entry,exec,`Check ${value.id??exec.name} ${value.scenarioId??''} failed: ${JSON.stringify(checkFailureDetails(value))}`);else if(value.accepted!==false&&value.updated!==false&&value.retried!==false&&recordToolSuccess(info.entry.run,operation(info.entry,exec)))await commit(info.entry);}return JSON.parse(JSON.stringify({...value,...(info.entry?{gvsTeam:view(info.entry.run)}:{})}));}catch(error){const member=exec.agent&&ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);if(error instanceof CodePlanSourceError&&entry){await noteFailure(entry,exec,error.message);return JSON.parse(JSON.stringify({status:'needs-current-source',accepted:false,updated:false,created:false,taskId:args.taskId??null,recovery:error.recovery,next:'No task/plan/assignment changes were applied. Coordinator reads the actual current source at nextRead, corrects the anchor/edit and resubmits this SAME task. Missing file: inspect its actual producer/path; null anchor is only for genuinely new source. Never bypass validation or fabricate the file.',gvsTeam:view(entry.run)}));}if(entry)try{await noteFailure(entry,exec,error.message);}catch{}throw error;}}});
+   async execute(args,exec){args=normalizeTaskRefs(coerceArgs(args,{properties}));try{const value=await execute(args,exec);const info=await current(exec,false);if(info.entry){if(value.ok===false)await noteFailure(info.entry,exec,`Check ${value.id??exec.name} ${value.scenarioId??''} failed: ${JSON.stringify(checkFailureDetails(value))}`);else if(value.accepted!==false&&value.updated!==false&&value.retried!==false&&recordToolSuccess(info.entry.run,operation(info.entry,exec)))await commit(info.entry);}return JSON.parse(JSON.stringify({...value,...(info.entry?{gvsTeam:view(info.entry.run)}:{})}));}catch(error){const member=exec.agent&&ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);if(error instanceof CodePlanSourceError&&entry){await noteFailure(entry,exec,error.message);return JSON.parse(JSON.stringify({status:'needs-current-source',accepted:false,updated:false,created:false,taskId:args.taskId??null,recovery:error.recovery,next:'No task/plan/assignment changes were applied. Coordinator reads the actual current source at nextRead, corrects the anchor/edit and resubmits this SAME task. Missing file: inspect its actual producer/path; null anchor is only for genuinely new source. Never bypass validation or fabricate the file.',gvsTeam:view(entry.run)}));}if(entry)try{await noteFailure(entry,exec,error.message);}catch{}throw error;}}});
  }
  function writeDenial(entry,name,role,exec){
   if(!['write','edit'].includes(exec.name))return;
@@ -273,7 +297,7 @@ export function apply(ctx,config={}){
   const entry=await load(membership.root,exec.signal),role=entry&&roleOf(entry,membership.name);
   const alwaysRead=['read','read_image','glob','grep','working_directory','gvs_status','gvs_artifacts','gvs_diagnostics','gvs_browser_capabilities','gvs_wait'];
   if(!role)return alwaysRead.includes(exec.name)?next():{kind:'deny',reason:'This teammate has no GVS role assignment.'};
-  if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause'].includes(exec.name))return {kind:'deny',reason:'This is a coordinator-only operation.'};
+  if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause','gvs_checkpoint'].includes(exec.name))return {kind:'deny',reason:'This is a coordinator-only operation.'};
   const writing=writeDenial(entry,membership.name,role,exec);if(writing)return {kind:'deny',reason:writing};
   if(['pwsh','bash','gvs_native_game_check'].includes(exec.name)&&!['edit','verify'].includes(role.capability))return {kind:'deny',reason:'This role has no command execution capability.'};
   if(entry.run.status!=='running'&&!alwaysRead.includes(exec.name))return {kind:'deny',reason:'The run is paused or finished. Ask the coordinator to resume or assign new work.'};
@@ -285,7 +309,7 @@ export function apply(ctx,config={}){
   const entry=entries.get(member.root.id),role=entry&&roleOf(entry,member.name);
   const basic=['read','read_image','glob','grep','working_directory','gvs_status','gvs_artifacts','gvs_diagnostics','gvs_browser_capabilities','gvs_wait'];
   if(!role)return basic.includes(exec.name)?undefined:'No GVS role is assigned to this teammate.';
-  if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause'].includes(exec.name))return 'Only the coordinator may control the run.';
+  if(['gvs_run','gvs_finish','gvs_resume','gvs_recover','gvs_pause','gvs_checkpoint'].includes(exec.name))return 'Only the coordinator may control the run.';
   const writing=writeDenial(entry,member.name,role,exec);if(writing)return writing;
   if(['pwsh','bash','gvs_native_game_check'].includes(exec.name)&&!['edit','verify'].includes(role.capability))return 'This role has no command execution capability.';
   if(!entry.run.tasks.some(task=>task.assignee===member.name&&task.state==='running')&&['write','edit','pwsh','bash','gvs_native_game_check','gvs_browser_check','gvs_game_check'].includes(exec.name)){const own=entry.run.tasks.filter(task=>task.assignee===member.name&&task.state!=='done').map(task=>`${task.id} ${task.state}`),last=entry.run.tasks.findLast(task=>task.assignee===member.name&&task.state==='done');return `No dependency-ready task is assigned. Wait for the scheduler; do not start this work early. Your open tasks: ${own.join(', ')||'none'}${last?`; ${last.id} is already completed, so further changes need a new assignment from Lead`:''}. End this turn instead of retrying.`;}
@@ -306,6 +330,8 @@ export function apply(ctx,config={}){
   return next();
  });
  ctx.on('tools/execute',async(exec,next)=>{
+  // Native tools validate strictly; repair a teammate's unambiguous JSON-text/alias mismatches first.
+  if(exec.agent&&!exec.name.startsWith('gvs_')&&ctx.agentTeams.tryMembership?.(exec.agent)){const fixed=coerceArgs(exec.arguments,ctx.tools.get?.(exec.name,exec.agent)?.parameters);if(fixed!==exec.arguments)exec.arguments=fixed;}
   const result=await next();
   const member=exec.agent&&ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);
   if(!entry||entry.run.status!=='running')return result;
@@ -341,7 +367,7 @@ export function apply(ctx,config={}){
   entry.run.checks=entry.run.checks.slice(-120);
   if(task&&check.finished&&!check.error&&check.exitCode===0)task.lastGreenCheck={at:check.at,command:check.command};
  });
- register('gvs_run','Start an adaptive GVS team run. Returns immediately; then create only needed specialists and dependency tasks, coordinate results, and call gvs_finish. Named teammates persist and wake for later tasks.',{task:text(16000),kind:{type:'string',enum:kinds},engine:text(100),viewports:{type:'array',items:{type:'string',enum:['desktop','mobile']},minItems:1,maxItems:2}},['task','kind'],async(args,exec)=>{
+ register('gvs_run','Start an adaptive GVS team run. Returns immediately; then create only needed specialists and dependency tasks, coordinate results, and call gvs_finish. Named teammates persist and wake for later tasks.',{task:text(16000),kind:{type:'string',enum:kinds},engine:text(100),viewports:{type:'array',items:{type:'string',enum:['desktop','mobile']},minItems:1,maxItems:2},marathon:MARATHON_INPUT},['task','kind'],async(args,exec)=>{
   const {member,root,entry:previous}=await current(exec,false);lead(member);
   if(previous?.run.status==='running')throw new Error('A run is active; coordinate it or pause it first.');
   const io=await storage(root,exec.signal);if(io.policy.mode==='read-only')throw new Error('GVS work requires Workspace Write.');
@@ -354,9 +380,14 @@ export function apply(ctx,config={}){
   syncGoal(run,human?.length?human:[{id:'initial-request',text:args.task}]);
   if(config.projectInspection!==false){run.qaTarget=await inspectProject(root,exec.signal,run.engine);if(run.viewportsAuto&&run.qaTarget.sourceConfirmed&&!requiresWebVerification(run))run.viewports=['desktop'];}
   await refreshRevision(entry,ctx.fs,exec.signal);
+  const marathon=run.marathon=marathonSettings(args.marathon,config.marathon);
+  if(marathon){
+   if(!marathon.tests){marathon.tests=await detectTests(file=>io.read(file));marathon.testsDetected=true;}
+   await marathonCheckpoint(entry,'start',{signal:exec.signal});
+  }
   await createRole(entry,{name:'user',title:'Пользователь',purpose:'Цели, UX и независимая пользовательская приёмка',instructions:USER,capability:'user'},exec.signal);
   const brief=await createTask(entry,{assignee:'user',title:'Определить цель и критерии приёмки',kind:'brief',instructions:`Inspect the actual task/project. Define audience/player, primary journey, meaningful acceptance criteria and visual ambition. Keep it concise. Do not prescribe a composition before exploration. For a game identify actual engine and key mechanics to verify. Do not run a full regression yet.\n${args.task}`,dependsOn:[]},exec.signal);
-  return {status:'running',briefTaskId:brief.id,next:'Wait for the User brief, create suitable named specialists and dependency tasks. Coordinate until gvs_finish accepts all gates.'};
+  return {status:'running',briefTaskId:brief.id,...(marathon?{marathon:marathonView(marathon)}:{}),next:'Wait for the User brief, create suitable named specialists and dependency tasks. Coordinate until gvs_finish accepts all gates.'+(marathon&&!marathon.tests.length?' MARATHON: no visible test command was found; have an editor create a runnable test suite from the requirements early.':'')};
  });
  register('gvs_browser_capabilities','Read the ACTUAL GVS browser runtime/module/version/executable and isolated engine launch/input/media capabilities. Available to discovery/read roles before any review task or run; no product URL, shell or installation needed. Do not guess product node_modules/default caches or equate an executable file with a successful launch. This is diagnostics, not product/device acceptance.',{},[],async(_args,exec)=>{
   const {entry}=await current(exec,false);return {status:'browser-capabilities',acceptanceEvidence:false,target:entry?.run.qaTarget?.surfaces??null,engines:await browserCapabilities(config),next:'Use these actual runtime/executable paths when diagnosing the GVS adapter. Unavailable engines and unsupported settings remain limitations. Do not install another runtime from guessed paths, waive review, or claim a physical device was tested. Non-web products still require their own actual engine/process/native-window drivers.'};
@@ -391,7 +422,7 @@ export function apply(ctx,config={}){
  });
  register('gvs_task','Create tasks with real dependencies; waiting tasks wake automatically. For complete, REQUIRED top-level fields are taskId, verdict (pass/revise/blocked), summary and findings (explicit [] for pass); do not nest them inside result. Increment create/update requires explicit analysisIds ([] for an actual static slice). Reviews report real checks/images/findings; blocked tasks keep dependants waiting.',
   {action:{type:'string',enum:['create','list','complete','retry','dependencies','update']},taskId:text(40),offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:60},title:text(180),instructions:text(15000),assignee:text(40),kind:{type:'string',enum:taskKinds},dependsOn:strings,writeScopes:strings,readScopes:strings,externalReadScopes:{...strings,description:"Absolute external environment read leases; scheduling metadata only, not a permission grant."},externalWriteScopes:{...strings,description:"Absolute external environment write leases; outside-workspace Native write/edit remain disallowed."},resources:{...strings,description:'Exclusive resource names. Omit for conservative project-runtime locking on edit/verify tasks; [] only for isolated work. Literal workspace read/write paths may end in /**.'},priority:{type:'integer',minimum:-100,maximum:100},reason:{...text(1000),description:"Optional audit rationale for update. If omitted, an exact description is derived from changed fields."},codePlan:codePlanInput,scope:{type:'string',enum:['increment','full']},reviewFocus:{type:'string',enum:['visual','source'],description:'Lead-assigned source only for static/native/ABI source reviews: kind review, scope increment, analysisIds []. No visual/full-goal waiver.'},analysisIds:strings,
-   verdict:{type:'string',enum:['pass','revise','blocked']},summary:text(4000),findings:{...strings,description:'ALL actionable required fixes, missing functionality, visual mismatches, untested required coverage or blockers of the assigned slice (full-scope reviews: of the whole goal). For pass use []. Neutral/positive evidence belongs in observations, never hide an unresolved obligation there.'},followUps:{...strings,items:text(1600),description:'Remaining wider-goal work outside this work/increment slice. Saved as mandatory goal issues for Lead; does not fail the slice. Full-scope reviews treat these as findings.'},observations:{...strings,items:text(1600),description:'Non-actionable facts, positive inspections or corrected tool-debug notes. These are saved evidence notes, not repair obligations or acceptance proof. Every unresolved required defect, coverage gap and blocker MUST still be in findings.'},scopeReviewed:{type:'boolean',description:'Independently compared the entire human goal and feature inventory against implementation; accepting the recent repair alone is insufficient.'},coveredRequirements:{...strings,maxItems:1000},addressedIssues:{...strings,maxItems:1000},inventory:{type:'array',maxItems:100,items:{...object({feature:text(500),evidence:text(1500),status:{type:'string',enum:['confirmed','unknown']},requirementIds:strings}),required:['feature','evidence','status','requirementIds']}},checks:{...strings,description:'ONLY exact verbatim foreground command strings, e.g. node test.mjs. No commentary, prefixes, read tools or annotations.'},images:{...strings,maxItems:1000},analysisReports:{...strings,description:'Only successful CURRENT reports by another capture agent; these may contribute to current analysis acceptance after independent review.'},historicalAnalysisReports:{...strings,description:'Source-only increment review of recorded successful reports from an older revision/plan by another capture agent. Requires adapterReviewed:true. Preserves exact original provenance; NEVER current runtime/visual/full-goal acceptance.'},simple:{type:'boolean'},scopePreserved:{type:'boolean'},adapterReviewed:{type:'boolean'},visualReview:{...object({manualCoverage:text(2000),checked:{type:'array',items:{type:'string',enum:VISUAL_CHECKS},maxItems:7},assessments:{type:'array',maxItems:1000,items:{...object({warningId:text(60),imageId:text(150),disposition:{type:'string',enum:['intentional','defect','outside-scope']},reason:text(1000)}),required:['warningId','imageId','disposition','reason']}}}),required:['checked','assessments']}},['action'],async(args,exec)=>{
+   verdict:{type:'string',enum:['pass','revise','blocked']},summary:text(4000),findings:{...strings,description:'ALL actionable required fixes, missing functionality, visual mismatches, untested required coverage or blockers of the assigned slice (full-scope reviews: of the whole goal). For pass use []. Neutral/positive evidence belongs in observations, never hide an unresolved obligation there.'},minorFindings:{...strings,items:text(1600),description:'Optional cosmetic polish that breaks no requirement. Saved as non-blocking backlog and allowed with pass. Never put a broken requirement, missing function, crash, data loss, security, accessibility or layout-breaking defect here.'},followUps:{...strings,items:text(1600),description:'Remaining wider-goal work outside this work/increment slice. Saved as mandatory goal issues for Lead; does not fail the slice. Full-scope reviews treat these as findings.'},observations:{...strings,items:text(1600),description:'Non-actionable facts, positive inspections or corrected tool-debug notes. These are saved evidence notes, not repair obligations or acceptance proof. Every unresolved required defect, coverage gap and blocker MUST still be in findings.'},scopeReviewed:{type:'boolean',description:'Independently compared the entire human goal and feature inventory against implementation; accepting the recent repair alone is insufficient.'},coveredRequirements:{...strings,maxItems:1000},addressedIssues:{...strings,maxItems:1000},inventory:{type:'array',maxItems:100,items:{...object({feature:text(500),evidence:text(1500),status:{type:'string',enum:['confirmed','unknown']},requirementIds:strings}),required:['feature','evidence','status','requirementIds']}},checks:{...strings,description:'ONLY exact verbatim foreground command strings, e.g. node test.mjs. No commentary, prefixes, read tools or annotations.'},images:{...strings,maxItems:1000},analysisReports:{...strings,description:'Only successful CURRENT reports by another capture agent; these may contribute to current analysis acceptance after independent review.'},historicalAnalysisReports:{...strings,description:'Source-only increment review of recorded successful reports from an older revision/plan by another capture agent. Requires adapterReviewed:true. Preserves exact original provenance; NEVER current runtime/visual/full-goal acceptance.'},simple:{type:'boolean'},scopePreserved:{type:'boolean'},adapterReviewed:{type:'boolean'},visualReview:{...object({manualCoverage:text(2000),checked:{type:'array',items:{type:'string',enum:VISUAL_CHECKS},maxItems:7},assessments:{type:'array',maxItems:1000,items:{...object({warningId:text(60),imageId:text(150),disposition:{type:'string',enum:['intentional','defect','outside-scope']},reason:text(1000)}),required:['warningId','imageId','disposition','reason']}}}),required:['checked','assessments']}},['action'],async(args,exec)=>{
    const {member,entry,name}=await current(exec);
    if(!['create','list','complete','retry','dependencies','update'].includes(args.action))throw new Error(`Unknown gvs_task action ${JSON.stringify(args.action)}. Use create, list, complete, retry, dependencies or update. To message a teammate or Lead use gvs_agent action:message; nothing was changed.`);
    if(member.role!=='lead'&&['create','update','retry','dependencies'].includes(args.action)){
@@ -508,12 +539,14 @@ export function apply(ctx,config={}){
    task.result={verdict:args.verdict,summary:args.summary,findings:args.findings,observations:(args.observations??[]).map(item=>clip(item,1600)),inventory:args.inventory??[],scopeReviewed:args.scopeReviewed===true,coveredRequirements:args.coveredRequirements??[],addressedIssues:args.addressedIssues??[],checks,images:args.images??[],analysisReports:args.analysisReports??[],historicalAnalysisReports:historicalIds,historicalReportAttestations,analysisVersion:entry.run.analysis?.version??0,simple:args.simple===true,scopePreserved:args.scopePreserved===true,reviewFocus:task.reviewFocus??'visual',adapterReviewed:args.adapterReviewed===true,visualReview:args.visualReview??null,revision:entry.run.revision};
    if(name==='user'&&['brief','consultation'].includes(task.kind))task.result.decisionKey=decisionKey(entry.run);
    task.result.followUps=followUps;
+   const minorFindings=(args.minorFindings??[]).map(item=>clip(item,1600)).filter(Boolean);if(minorFindings.length)task.result.minorFindings=minorFindings;
    task.result.artifacts=artifacts.files.slice(0,40);task.result.artifactManifest={total:artifacts.files.length,truncated:artifacts.truncated||artifacts.files.length>40,warnings:artifacts.warnings};
    if(['brief','consultation','discovery'].includes(task.kind))entry.run.progress.metadataSinceWrite++;
    task.state=args.verdict==='blocked'?'blocked':'done';
    if(task.state==='done'){const native=ctx.agentTeams.getTask(entry.root,task.id);await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'complete'});}
    entry.waiters.get(task.id)?.(task.result);entry.waiters.delete(task.id);
-   const issues=[...recordFindings(entry.run,task),...(externalVisualFindings.length?recordFindings(entry.run,{...task,result:{verdict:'revise',summary:'Visual defects outside this increment remain mandatory',findings:externalVisualFindings}}):[]),...(followUps.length?recordFindings(entry.run,{...task,result:{verdict:'revise',summary:'Remaining goal work reported by this slice',findings:followUps}}):[])];
+   const issues=[...recordFindings(entry.run,task),...(externalVisualFindings.length?recordFindings(entry.run,{...task,result:{verdict:'revise',summary:'Visual defects outside this increment remain mandatory',findings:externalVisualFindings}}):[]),...(followUps.length?recordFindings(entry.run,{...task,result:{verdict:'revise',summary:'Remaining goal work reported by this slice',findings:followUps}}):[]),...(minorFindings.length?recordFindings(entry.run,task,{backlog:true,findings:minorFindings}):[])];
+   const autoLinked=autoLink(entry.run,task);if(autoLinked.length)task.result.autoLinked=autoLinked;
    await commit(entry);
    try{await ctx.agentTeams.sendMessage(exec.agent,{target:'lead',content:[{type:'text',text:`GVS TASK RESULT ${JSON.stringify({taskId:task.id,assignee:name,kind:task.kind,verdict:task.result.verdict,summary:clip(task.result.summary,1000),findings:task.result.findings.map(item=>clip(item,600)),observations:task.result.observations.slice(0,3).map(item=>clip(item,400)),observationCount:task.result.observations.length,followUps:followUps.slice(0,8).map(item=>clip(item,400)),followUpCount:followUps.length,issueIds:issues.map(item=>item.id),historicalReportAttestations,inventoryItems:task.result.inventory.length,artifacts:task.result.artifacts?.slice(0,12)})}\nCoordinator: every finding and follow-up is now a tracked goal issue. Fold related ones into the next feature/repair slice for an editor and link them with batch gvs_goal link; the next integration review rechecks them. Keep editing slots busy and continue the complete human goal; this is not permission to narrow scope or end the run.`}],signal:exec.signal});}
    catch(error){task.notificationError=clip(error.message,500);await commit(entry);}
@@ -654,7 +687,7 @@ export function apply(ctx,config={}){
  const expertise={...object({id:text(60),purpose:text(1200),capability:{type:'string',enum:['read','edit','verify']}}),required:['id','purpose','capability']};
  function goalPage(run,args={}){
   const status=goalStatus(run),offset=args.offset??0,limit=args.limit??8;
-  const requirements=[...status.requirements.filter(item=>!item.accepted),...status.requirements.filter(item=>item.accepted)],issues=[...status.issues.filter(item=>!item.resolved),...status.issues.filter(item=>item.resolved)],messages=run.goal.messages;
+  const requirements=[...status.requirements.filter(item=>!item.accepted),...status.requirements.filter(item=>item.accepted)],issues=[...status.issues.filter(item=>!item.resolved&&!item.backlog),...status.issues.filter(item=>!item.resolved&&item.backlog),...status.issues.filter(item=>item.resolved)],messages=run.goal.messages;
   return {...status,requirements:args.id?requirements.filter(item=>item.id===args.id):requirements.slice(offset,offset+limit),issues:args.issueId?issues.filter(item=>item.id===args.issueId):issues.slice(offset,offset+limit),humanMessages:messages.slice(offset,offset+limit),unassessed:status.unassessed.slice(offset,offset+limit),totals:{requirements:requirements.length,issues:issues.length,humanMessages:messages.length,unassessed:status.unassessed.length},nextOffset:offset+limit<Math.max(requirements.length,issues.length,messages.length)?offset+limit:null};
  }
  register('gvs_goal','Track the full REAL human goal. User appends immutable requirements covering actual sourceIds; Lead links each requirement/issue to implementation and independent rechecks. Open requirements, unmapped discovery and unresolved findings prevent finish. Never waive scope through simulated User decisions.',
@@ -688,11 +721,120 @@ export function apply(ctx,config={}){
    await commit(entry);return {goal:view(entry.run).goal};
   });
  register('gvs_finish','Accept a run only when independent code, User and applicable visual/game gates have real current evidence. Pending/blocked tasks and missing runtime evidence prevent verified.',{},[],async(_args,exec)=>{
-  const {member,entry}=await current(exec);lead(member);entry.run.quality=quality(entry.run);
+  const {member,entry}=await current(exec);lead(member);
+  const marathon=entry.run.marathon;
+  if(marathon&&['over','final'].includes(marathonPhase(marathon))){if(entry.run.status==='running')await marathonFinal(entry);return {status:entry.run.status,marathon:marathonView(marathon)};}
+  entry.run.quality=quality(entry.run);
   const open=entry.run.tasks.filter(task=>['waiting','running','blocked'].includes(task.state)&&!resolvedBlocker(entry.run,task));
-  if(open.length||!Object.values(entry.run.quality).every(Boolean)){await commit(entry);return {status:'needs-review',continue:true,quality:entry.run.quality,goal:view(entry.run).goal,sourceError:entry.run.sourceError??null,outstanding:open.slice(0,40).map(task=>({id:task.id,state:task.state,title:task.title})),outstandingCount:open.length,reason:!open.length&&entry.run.sourceError&&Object.entries(entry.run.quality).every(([key,ok])=>ok||key==='source')?`Everything passes except the source fingerprint: ${entry.run.sourceError} This is an environment limitation the team cannot repair by more reviews. Do not create re-audit tasks for it; record it with gvs_goal action:handoff (dependency, reason, evidence). The run stays unverified.`:'The goal is not achieved. Continue the SAME run: inspect all findings, link repair/recheck tasks, complete uncovered requirements and discovery. Only a documented external dependency can justify a handoff; partial success is not final.'};}
-  entry.run.status='verified';entry.run.summary='Independent code, User and required visual/game evidence accepted.';await commit(entry);return {status:'verified',quality:entry.run.quality};
- });
+  if(open.length||!Object.values(entry.run.quality).every(Boolean)){await commit(entry);return {status:'needs-review',continue:true,quality:entry.run.quality,goal:view(entry.run).goal,sourceError:entry.run.sourceError??null,outstanding:open.slice(0,40).map(task=>({id:task.id,state:task.state,title:task.title})),outstandingCount:open.length,reason:!open.length&&entry.run.sourceError&&Object.entries(entry.run.quality).every(([key,ok])=>ok||key==='source')?`Everything passes except the source fingerprint: ${entry.run.sourceError} This is an environment limitation the team cannot repair by more reviews. Do not create re-audit tasks for it; record it with gvs_goal action:handoff (dependency, reason, evidence). The run stays unverified.`:'The goal is not achieved. Continue the SAME run: inspect all findings, link repair/recheck tasks, complete uncovered requirements and discovery. Only a documented external dependency can justify a handoff; partial success is not final.',...(marathon?{marathon:marathonView(marathon)}:{})};}
+  if(marathon){
+   const tests=await marathonTests(entry,exec.signal);
+   if(tests&&!greenAt(entry,tests)){await commit(entry);return {status:'needs-review',continue:true,marathon:marathonView(marathon),failingTests:tests.results.filter(item=>!item.passed).map(({command,exitCode,timedOut,tail})=>({command,exitCode,timedOut,tail:tail.slice(-1500)})),reason:'Visible tests fail on the current tree. Assign an editor to repair the actual failures (never weaken, skip or special-case tests), then an independent recheck, and call gvs_finish again.'};}
+   if(tests)await marathonCheckpoint(entry,'green',{green:true,signal:exec.signal});
+   const decision=hardeningDecision(marathon,{reviews:entry.run.tasks.filter(task=>task.state==='done'&&['review','design-review','game-review','user-review'].includes(task.kind)).length,issues:entry.run.goal?.issues.length??0});
+   if(!decision.finish){await commit(entry);return {status:'marathon-continue',continue:true,marathon:marathonView(marathon),reason:decision.round?`All gates${tests?' and visible tests':''} are green with ${remainingMinutes(marathon)} minutes left (hardening rounds without new findings: ${decision.idle}${marathon.idleRounds?'/'+marathon.idleRounds:''}). Use the time: first implement any still-missing functionality of the task; otherwise assign an independent verify role to derive additional edge-case tests from the requirements (inputs, errors, limits, performance, parity with reference behavior), run them and report every defect as a finding; then repair and recheck. Call gvs_finish after that review completes.`:'No new review completed since the last hardening request. Assign an independent hardening review and wait for its result before calling gvs_finish again.'};}
+   await marathonCheckpoint(entry,'final',{green:!!tests,signal:exec.signal});marathon.final={at:Date.now(),outcome:'verified',early:!!marathon.deadline&&Date.now()<marathon.deadline,testsGreen:tests?true:null};
+  }
+  entry.run.status='verified';entry.run.summary='Independent code, User and required visual/game evidence accepted.';await commit(entry);return {status:'verified',quality:entry.run.quality,...(marathon?{marathon:marathonView(marathon)}:{})};
+ },1800000);
+ const checkpointStores=new Map();
+ const storeOf=entry=>{let store=checkpointStores.get(entry.run.runId);if(!store){store=checkpointStore(entry.io.cwd,entry.run.runId);checkpointStores.set(entry.run.runId,store);}return store;};
+ const greenAt=(entry,tests)=>!!tests&&testsGreen(tests.results)&&tests.revision===entry.run.revision&&!tests.changedDuringRun;
+ // Saves the working tree; a failure is recorded and never stops the run.
+ async function marathonCheckpoint(entry,label,{green=false,signal}={}){
+  const marathon=entry.run.marathon;marathon.lastCheckpointAt=Date.now();
+  try{
+   const saved=await storeOf(entry).save(`${label} revision ${entry.run.revision}`,signal),last=marathon.checkpoints.at(-1);delete marathon.checkpointError;
+   if(last?.id===saved.id){if(green)last.green=true;}
+   else marathon.checkpoints.push({id:saved.id,at:Date.now(),label,revision:entry.run.revision,green});
+   const lastGreen=marathon.checkpoints.filter(item=>item.green).at(-1);marathon.checkpoints=marathon.checkpoints.slice(-60);
+   if(lastGreen&&!marathon.checkpoints.includes(lastGreen))marathon.checkpoints.unshift(lastGreen);
+   return saved;
+  }catch(error){marathon.checkpointError=clip(error.message,500);return null;}
+ }
+ // Runs the visible test commands on the current tree; results are reused while the revision is unchanged.
+ async function marathonTests(entry,signal){
+  if(!entry.run.marathon.tests?.length)return null;
+  // The periodic checkpoint and gvs_finish never run the suite concurrently.
+  while(entry.marathonTestRun)await entry.marathonTestRun.catch(()=>{});
+  const pending=entry.marathonTestRun=runMarathonTests(entry,signal);
+  try{return await pending;}finally{if(entry.marathonTestRun===pending)entry.marathonTestRun=null;}
+ }
+ async function runMarathonTests(entry,signal){
+  const marathon=entry.run.marathon;
+  await refreshRevision(entry,ctx.fs,signal);const revision=entry.run.revision;
+  if(marathon.lastTests?.revision===revision&&!marathon.lastTests.changedDuringRun)return marathon.lastTests;
+  const results=[];
+  for(const command of marathon.tests){
+   const result=await entry.root.ctx.tools.execute({callId:randomUUID(),agent:entry.root,signal,name:process.platform==='win32'?'pwsh':'bash',arguments:{description:'Run visible tests (GVS marathon)',command,workdir:entry.io.cwd,timeoutMs:marathon.testTimeoutMs}}).catch(error=>({isError:true,content:[{type:'text',text:error.message}]}));
+   const value=result.value,output=[value?.stdout?.text,value?.stderr?.text].filter(Boolean).join('\n')||(result.content??[]).filter(part=>part.type==='text').map(part=>part.text).join('\n');
+   results.push({command,passed:!result.isError&&value?.kind==='foreground'&&value.exitCode===0&&!value.timedOut,exitCode:value?.exitCode??null,timedOut:value?.timedOut===true,tail:String(output).slice(-3000)});
+  }
+  await refreshRevision(entry,ctx.fs,signal);
+  marathon.lastTests={revision,at:Date.now(),results,...(entry.run.revision!==revision?{changedDuringRun:true}:{})};await commit(entry);
+  return marathon.lastTests;
+ }
+ // Deadline: stop the team, keep the best tree (the last green checkpoint when the final tree is red) and close the run.
+ async function marathonFinal(entry){
+  const marathon=entry.run.marathon;if(marathon.final||entry.finalizing)return marathon.final;entry.finalizing=true;
+  try{
+   const signal=AbortSignal.timeout(marathon.testTimeoutMs*Math.max(1,marathon.tests?.length??0)*2+300000);
+   entry.abort.abort(new Error('GVS marathon time limit'));
+   for(const task of entry.run.tasks.filter(task=>task.state==='running')){try{ctx.agentTeams.interrupt(entry.root,task.assignee);}catch{}task.state='blocked';task.result={verdict:'blocked',summary:'Marathon time limit reached; the task was stopped.',findings:[],interrupted:true,revision:entry.run.revision};}
+   if(entry.run.preview?.jobId){try{ctx.jobs.kill(entry.run.preview.jobId,entry.root.id,'GVS marathon time limit');}catch{}}
+   let tests=await marathonTests(entry,signal),restored=null;
+   const saved=await marathonCheckpoint(entry,'final',{green:greenAt(entry,tests),signal}),green=marathon.checkpoints.filter(item=>item.green).at(-1);
+   if(tests&&!greenAt(entry,tests)&&marathon.restoreGreen&&green&&saved&&green.id!==saved.id){
+    try{restored=await storeOf(entry).restore(green.id,signal);delete marathon.lastTests;tests=await marathonTests(entry,signal);}
+    catch(error){restored={error:clip(error.message,500)};}
+   }
+   entry.run.quality=quality(entry.run);
+   const verified=Object.values(entry.run.quality).every(Boolean)&&(!tests||greenAt(entry,tests));
+   marathon.final={at:Date.now(),outcome:verified?'verified':'time-limit',testsGreen:tests?greenAt(entry,tests):null,checkpoint:saved?.id??null,restoredGreen:restored?.restored??null,restoreError:restored?.error??null};
+   entry.run.status=verified?'verified':'time-limit';
+   entry.run.summary=verified?'Marathon time limit reached with all gates and visible tests green.':`Marathon time limit reached. Visible tests: ${tests?(greenAt(entry,tests)?'green':'red'):'none'}${restored?.restored?'; the last green checkpoint was restored':''}.`;
+   await commit(entry);
+   try{await ctx.agentTeams.sendMessage(entry.root,{target:'lead',content:[{type:'text',text:`GVS MARATHON TIME LIMIT ${JSON.stringify({...marathon.final,goal:view(entry.run).goal,failingTests:tests?.results.filter(item=>!item.passed).map(item=>item.command)??[]})}. The team was stopped and the run is closed. Report the outcome to the human in their language: what works, what the visible tests show and what remains unresolved. Do not start new work.`}]});}catch{}
+   return marathon.final;
+  }finally{entry.finalizing=false;}
+ }
+ async function marathonTick(){
+  for(const entry of entries.values()){
+   const marathon=entry.run.marathon;
+   if(!marathon||marathon.final||entry.owner!==ctx||entry.run.status!=='running'||entry.suspending||entry.run.suspended||entry.marathonBusy)continue;
+   entry.marathonBusy=true;
+   try{
+    const phase=marathonPhase(marathon);
+    if(phase==='over'){await marathonFinal(entry);continue;}
+    if(phase==='wrap-up'&&!marathon.wrapUpSent){
+     marathon.wrapUpSent=true;await commit(entry);
+     try{await ctx.agentTeams.sendMessage(entry.root,{target:'lead',content:[{type:'text',text:`GVS MARATHON WRAP-UP: ${remainingMinutes(marathon)} minutes left. Start no new features or refactors. Make the visible tests green and stable, finish integrating work in progress and call gvs_finish. At the deadline GVS stops the team and restores the last green checkpoint if the tree is red. ${JSON.stringify(marathonView(marathon))}`}]});}catch{}
+    }
+    if(Date.now()-marathon.lastCheckpointAt>=marathon.checkpointMinutes*60000){
+     const tests=await marathonTests(entry,entry.abort.signal).catch(()=>null);
+     await marathonCheckpoint(entry,'periodic',{green:greenAt(entry,tests),signal:entry.abort.signal});await commit(entry);
+    }
+   }catch{}finally{entry.marathonBusy=false;}
+  }
+ }
+ const marathonTimer=setInterval(()=>void marathonTick(),config.marathonTickMs??60000);marathonTimer.unref?.();ctx.effect(()=>()=>clearInterval(marathonTimer));
+ register('gvs_checkpoint','Marathon working-tree checkpoints: list them, save one now, or restore one. A restore first saves the current tree, so it can be undone. GVS also checkpoints automatically and after every green test run.',{action:{type:'string',enum:['list','save','restore']},id:text(64)},['action'],async(args,exec)=>{
+  const {member,entry}=await current(exec);lead(member);const marathon=entry.run.marathon;
+  if(!marathon)throw new Error('Checkpoints exist only in marathon mode (gvs_run marathon).');
+  const shown=()=>marathon.checkpoints.slice(-20).map(({id,at,label,revision,green})=>({id:id.slice(0,12),at:new Date(at).toISOString(),label,revision,green}));
+  if(args.action==='save'){const saved=await marathonCheckpoint(entry,'manual',{signal:exec.signal});await commit(entry);if(!saved)throw new Error(`Checkpoint failed: ${marathon.checkpointError}`);return {saved:saved.id.slice(0,12),created:saved.created,checkpoints:shown()};}
+  if(args.action==='restore'){
+   const running=entry.run.tasks.filter(task=>task.state==='running');
+   if(running.length)throw new Error(`Wait until running tasks finish before restoring: ${running.map(task=>task.id).join(', ')}.`);
+   const target=String(args.id??'').length>=7&&marathon.checkpoints.find(item=>item.id.startsWith(args.id));
+   if(!target)throw new Error('Name a checkpoint id from gvs_checkpoint action:list.');
+   const restored=await storeOf(entry).restore(target.id,exec.signal);
+   marathon.checkpoints.push({id:restored.before,at:Date.now(),label:'before restore',revision:entry.run.revision,green:false});delete marathon.lastTests;
+   await refreshRevision(entry,ctx.fs,exec.signal);await commit(entry);
+   return {restored:target.id.slice(0,12),undo:restored.before.slice(0,12),removedFiles:restored.removed,revision:entry.run.revision,next:'The tree changed, so reviews of the replaced files are no longer current. Run the visible tests and recheck before gvs_finish.'};
+  }
+  return {checkpoints:shown(),marathon:marathonView(marathon)};
+ },300000);
  async function pause(entry){
   entry.run.status='paused';entry.abort.abort(new Error('GVS paused'));
   for(const task of entry.run.tasks.filter(task=>task.state==='running')){ctx.agentTeams.interrupt(entry.root,task.assignee);await checkpointPlan(entry.io,task);task.state='blocked';task.result={verdict:'blocked',summary:'Paused; inspect partial work before resuming.',findings:[],interrupted:true,revision:entry.run.revision};}
@@ -759,6 +901,8 @@ export function apply(ctx,config={}){
  });
  register('gvs_resume','Resume saved GVS tasks after the user requests continuation; the same named agents keep their conversations.',{},[],async(_args,exec)=>{
   const {member,entry}=await current(exec);lead(member);entry.abort=new AbortController();entry.run.status='running';entry.suspending=false;delete entry.run.suspended;
+  // A human resume after the time limit continues without a deadline.
+  if(entry.run.marathon?.final)Object.assign(entry.run.marathon,{final:null,deadline:null,wrapUpMinutes:0,rounds:[]});
   const previewRecovery=await recoverPreview(entry,exec.signal),recovered=await restoreTasks(entry,exec.signal);return {status:entry.run.status,recovered,previewRecovery};
  });
  async function recoverPreview(entry,signal){

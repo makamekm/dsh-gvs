@@ -1,5 +1,5 @@
 import path from 'node:path';
-import {goalStatus} from './goal.js';
+import {goalStatus,setReviewReads} from './goal.js';
 import {needsPreview} from './preview.js';
 import {needsCodePlan} from './planning.js';
 
@@ -59,6 +59,7 @@ export function parallelFields(input,cwd){
  if(notices.length)result.scopeNotices=notices;
  return result;
 }
+setReviewReads((run,task)=>{try{return taskAccess(run,task).reads;}catch{return null;}});
 export function taskAccess(run,task){
  const capability=run.roles.find(role=>role.name===task.assignee)?.capability;
  const decision=['brief','consultation'].includes(task.kind);

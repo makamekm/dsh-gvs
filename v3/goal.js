@@ -45,12 +45,28 @@ export function planGoal(run,{requirements,assessedMessages,expertise,staffingRa
  delete goal.handoff;
 }
 const passed=task=>task?.state==='done'&&task.result?.verdict==='pass'&&!task.result.findings?.length;
+// A scoped recheck stays current while later revisions change only files outside the scopes it read.
+// Full reviews read the whole workspace, so any change still requires fresh full acceptance.
+const within=(file,scope)=>scope==='*'||file===scope||file.startsWith(scope+'/');
+export function reviewCurrent(run,task,reads){
+ const at=task?.result?.revision;
+ if(at===run.revision)return true;
+ if(!Number.isInteger(at)||at>run.revision||!reads?.length||reads.includes('*'))return false;
+ for(let revision=at+1;revision<=run.revision;revision++){
+  const change=run.revisionLog?.find(item=>item.revision===revision);
+  if(!change?.complete||change.files.some(file=>reads.some(scope=>within(file,scope))))return false;
+ }
+ return true;
+}
 export function expertiseRoleSuitable(need,role){return !!role?.sessionId&&!role.retired&&!role.error&&(!need.capability||role.capability===need.capability||need.capability==='read'&&role.capability==='verify');}
+let reviewReads=()=>null;
+// Injected by parallel.js (which imports this module) to avoid a module cycle.
+export function setReviewReads(fn){reviewReads=fn;}
 function proof(run,item){
  const work=item.workTasks.map(id=>run.tasks.find(task=>task.id===id));
  const issue=!!item.taskId;
  const reviews=item.reviewTasks.map(id=>run.tasks.find(task=>task.id===id)).filter(task=>issue||task?.scope!=='increment');
- return work.length>0&&work.every(passed)&&reviews.length>0&&reviews.every(task=>passed(task)&&task.result.revision===run.revision&&['review','design-review','game-review','user-review'].includes(task.kind)&&!work.some(implementation=>implementation.assignee===task.assignee)&&
+ return work.length>0&&work.every(passed)&&reviews.length>0&&reviews.every(task=>passed(task)&&reviewCurrent(run,task,reviewReads(run,task))&&['review','design-review','game-review','user-review'].includes(task.kind)&&!work.some(implementation=>implementation.assignee===task.assignee)&&
   (issue?task.result.addressedIssues:task.result.coveredRequirements)?.includes(item.id))&&(issue||reviews.some(task=>task.result.scopeReviewed===true));
 }
 export function linkGoal(run,{id,issueId,workTasks,reviewTasks,roleNeedId,requestId,agentName,taskId}){
@@ -72,23 +88,60 @@ export function linkGoal(run,{id,issueId,workTasks,reviewTasks,roleNeedId,reques
  delete run.goal.handoff;
  return item;
 }
-export function recordFindings(run,task){
- if(!run.goal||!['revise','blocked'].includes(task.result?.verdict))return [];
+// Words and paths that identify what a finding is about; used to merge restated duplicates.
+const terms=text=>new Set(String(text).toLowerCase().match(/[\p{L}\p{N}_./-]{4,}/gu)??[]);
+function duplicateOf(run,finding){
+ const own=terms(finding);if(own.size<5)return null;
+ return run.goal.issues.find(item=>{
+  if(item.backlog)return false;
+  const other=terms(item.criterion);if(other.size<5)return false;
+  let shared=0;for(const term of own)if(other.has(term))shared++;
+  return shared/Math.min(own.size,other.size)>=0.8&&!proof(run,item);
+ })??null;
+}
+// backlog:true records optional polish that is tracked but does not block the goal.
+export function recordFindings(run,task,{backlog=false,findings}={}){
+ if(!run.goal||!backlog&&!['revise','blocked'].includes(task.result?.verdict))return [];
  const created=[];
- for(const finding of task.result.findings.length?task.result.findings:[task.result.summary]){
+ for(const finding of findings??(task.result.findings.length?task.result.findings:[task.result.summary])){
   const id='issue-'+createHash('sha256').update(task.id+'\0'+finding).digest('hex').slice(0,14);
   if(run.goal.issues.some(item=>item.id===id))continue;
-  const issue={id,taskId:task.id,criterion:finding,workTasks:[],reviewTasks:[]};
+  const duplicate=!backlog&&duplicateOf(run,finding);
+  if(duplicate){duplicate.reportedBy=[...new Set([...(duplicate.reportedBy??[]),task.id])].slice(-20);continue;}
+  const issue={id,taskId:task.id,criterion:finding,workTasks:[],reviewTasks:[],...(backlog?{backlog:true}:{})};
   run.goal.issues.push(issue);created.push(issue);
  }
- delete run.goal.handoff;
+ if(!backlog)delete run.goal.handoff;
  return created;
+}
+// A passing result that names the requirements/issues it covers is linked to them automatically, so the
+// coordinator does not hand-maintain the ledger. proof() still demands independent current attestation.
+export function autoLink(run,task){
+ if(!run.goal||task.state!=='done'||task.result?.verdict!=='pass')return [];
+ const review=['review','design-review','game-review','user-review'].includes(task.kind),work=task.kind==='work';
+ if(!review&&!work)return [];
+ const linked=[],field=review?'reviewTasks':'workTasks';
+ for(const [list,ids] of [[run.goal.requirements,task.result.coveredRequirements??[]],[run.goal.issues,task.result.addressedIssues??[]]])
+  for(const item of list)if(ids.includes(item.id)&&!item[field].includes(task.id)){item[field]=[...item[field],task.id];linked.push(item.id);}
+ return linked;
+}
+// Open blocking issues grouped by the source area they name, so repairs can be batched per area.
+function issueGroups(issues){
+ const groups=new Map();
+ for(const issue of issues){
+  const file=String(issue.criterion).match(/[\w.-]+(?:[\/][\w.-]+)*\.(?:tsx?|jsx?|mjs|cjs|rs|css|scss|html|json|py|go|java|kt|swift|cs|cpp|c|h|vue|svelte|toml|ya?ml|md)\b/i)?.[0];
+  const area=file?file.replaceAll('\\','/').split('/').slice(0,-1).join('/')||file:`task:${issue.taskId}`;
+  const group=groups.get(area)??{area,count:0,ids:[]};group.count++;if(group.ids.length<20)group.ids.push(issue.id);groups.set(area,group);
+ }
+ return [...groups.values()].sort((a,b)=>b.count-a.count).slice(0,12);
 }
 export function goalStatus(run){
  if(!run.goal)return {ready:true,legacy:true,requirements:[],issues:[],unassessed:[],discoveryReady:true};
  const goal=run.goal;
  const requirements=goal.requirements.map(item=>({...item,accepted:proof(run,item)}));
  const issues=goal.issues.map(item=>({...item,resolved:proof(run,item)}));
+ // Marathon runs are judged by binary hidden tests, so optional polish blocks like any other issue.
+ const blocking=issues.filter(item=>!item.resolved&&(!item.backlog||!!run.marathon));
  const unassessed=goal.messages.filter(message=>!goal.assessed.includes(message.id));
  // A later focused investigation must not revoke already established knowledge
  // and stop unrelated implementation. Its real consumers wait through task DAG
@@ -97,8 +150,9 @@ export function goalStatus(run){
  const discoveryReady=!goal.discoveryRequired||discoveries.some(task=>task.result.inventory?.length>0&&task.result.inventory.every(item=>item.requirementIds?.length&&item.requirementIds.every(id=>requirements.some(req=>req.id===id))));
  const expertise=[...(goal.roleNeeds??[]),...(goal.roleRequests??[])].map(need=>({...need,assigned:!!need.agent&&run.roles?.some(role=>role.name===need.agent&&expertiseRoleSuitable(need,role))&&run.tasks.some(task=>task.id===need.taskId&&task.assignee===need.agent)}));
  const staffingReady=!!goal.staffingRationale&&expertise.every(item=>item.assigned);
- return {ready:requirements.length>0&&!unassessed.length&&requirements.every(item=>item.accepted)&&issues.every(item=>item.resolved)&&discoveryReady&&staffingReady,
-  requirements,issues,unassessed,expertise,staffingReady,discoveryRequired:goal.discoveryRequired,discoveryReady,handoff:goal.handoff??null};
+ return {ready:requirements.length>0&&!unassessed.length&&requirements.every(item=>item.accepted)&&!blocking.length&&discoveryReady&&staffingReady,
+  requirements,issues,unassessed,expertise,staffingReady,discoveryRequired:goal.discoveryRequired,discoveryReady,handoff:goal.handoff??null,
+  blockingIssues:blocking.length,backlog:run.marathon?0:issues.filter(item=>!item.resolved&&item.backlog).length,issueGroups:issueGroups(blocking)};
 }
 export function resolvedBlocker(run,task){
  const issues=goalStatus(run).issues.filter(item=>item.taskId===task.id);

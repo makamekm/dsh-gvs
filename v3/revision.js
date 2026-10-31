@@ -5,6 +5,9 @@ import {createHash} from 'node:crypto';
 // outputs and other agents' state (.claude worktrees are full repository copies) do not
 // invalidate the source evidence that produced those outputs.
 const generated=new Set(['.git','.gvs','.claude','.tools','.godot','.venv','node_modules','target','dist','build','.next','.cache','coverage','artifacts','test-results','playwright-report']);
+// Compiled binaries and objects are build products of the hashed sources, wherever a build copies them.
+const compiled=/\.(?:exe|dll|pdb|ilk|exp|so|dylib|o|obj|lib|a|pyc|class)$/i;
+const MAX_CHANGED_FILES=200;
 async function cargoOutput(fs,cwd,directory,signal){
  const marker=path.join(directory,'CACHEDIR.TAG'),compiler=path.join(directory,'.rustc_info.json');
  try{
@@ -27,7 +30,7 @@ async function digestFile(fs,target,signal,budget){
   if(part.length<WINDOW)return {size,digest:hash.digest()};
  }
 }
-export async function sourceFingerprint(fs,cwd,signal,cache=new Map()){
+export async function sourceFingerprint(fs,cwd,signal,cache=new Map(),files){
  const root=await fs.resolve(cwd,{cwd,signal}),hash=createHash('sha256');let count=0,bytes=0;
  async function walk(target,relative=''){
   const children=await fs.listDir(target,signal);
@@ -43,6 +46,7 @@ export async function sourceFingerprint(fs,cwd,signal,cache=new Map()){
    if(info.type==='symlink')throw new Error(`Source symlink requires an explicit in-workspace copy for verification: ${name}`);
    if(info.type==='directory'){if(!await cargoOutput(fs,cwd,absolute,signal))await walk(resolved,name);continue;}
    if(info.type!=='file')throw new Error(`Unsupported source input: ${name}`);
+   if(compiled.test(child.name))continue;
    let cached=cache.get(name);
    const tooLarge=()=>new Error(`Source fingerprint exceeds 512 MiB at ${name}; inspect whether this is a generated output or select a smaller project workspace.`);
    if(bytes+(info.size??0)>MAX_SOURCE_BYTES)throw tooLarge();
@@ -53,16 +57,23 @@ export async function sourceFingerprint(fs,cwd,signal,cache=new Map()){
    }
    bytes+=cached.size;if(bytes>MAX_SOURCE_BYTES)throw tooLarge();
    hash.update(JSON.stringify(name)).update('\0').update(cached.digest);
+   files?.set(name.replaceAll('\\','/').toLowerCase(),cached.digest.toString('hex'));
   }
  }
  await walk(root);return hash.digest('hex');
 }
+// Which files one revision changed; complete:false (unknown after a restart or too many) affects every scope.
+export function changedFiles(before,after,revision){
+ if(!before)return {revision,files:[],complete:false};
+ const files=[...new Set([...before.keys(),...after.keys()])].filter(name=>before.get(name)!==after.get(name)).sort();
+ return files.length>MAX_CHANGED_FILES?{revision,files:files.slice(0,MAX_CHANGED_FILES),complete:false}:{revision,files,complete:true};
+}
 export async function refreshRevision(entry,fs,signal){
  const run=entry.run;
  try{
-  entry.sourceCache??=new Map();const fingerprint=await sourceFingerprint(fs,entry.io.cwd,signal,entry.sourceCache);
-  if(run.sourceFingerprint&&run.sourceFingerprint!==fingerprint){run.revision++;if(run.goal)delete run.goal.handoff;}
-  run.sourceFingerprint=fingerprint;delete run.sourceError;
+  entry.sourceCache??=new Map();const files=new Map(),fingerprint=await sourceFingerprint(fs,entry.io.cwd,signal,entry.sourceCache,files);
+  if(run.sourceFingerprint&&run.sourceFingerprint!==fingerprint){run.revision++;if(run.goal)delete run.goal.handoff;run.revisionLog=[...(run.revisionLog??[]),changedFiles(entry.sourceFiles,files,run.revision)].slice(-400);}
+  entry.sourceFiles=files;run.sourceFingerprint=fingerprint;delete run.sourceError;
  }catch(error){
   signal?.throwIfAborted();run.sourceError=error.message;
  }
