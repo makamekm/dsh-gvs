@@ -285,7 +285,12 @@ ${rolePolicy(member.run,member.role)}`:'';}});
    return 'Verification may write/edit only reports or evidence inside explicitly assigned artifacts/, test-results/ or playwright-report/ scopes. Product sources remain read-only; ask Lead for a precise report lease.';
   }
   if(role.capability!=='edit')return 'This read-only role may not write files. Return findings/inventory through gvs_task complete; a report file needs a verify role with a leased artifacts/ path, and source changes need an edit role.';
-  if(!writeAllowed(task,target,entry.io.cwd))return 'The file is outside this task writeScopes. Ask Lead to schedule a separate scoped task; do not modify another parallel branch.';
+  if(!writeAllowed(task,target,entry.io.cwd)){
+   // Name the task that owns the file: after a restart an agent often resumes its own queued task instead of the assigned one.
+   const owner=entry.run.tasks.find(other=>other.id!==task.id&&other.state!=='done'&&writeAllowed(other,target,entry.io.cwd));
+   const where=owner?(owner.assignee===name?` It belongs to your queued ${owner.id} (${clip(owner.title,80)}), which starts after ${task.id}; finish ${task.id} (${clip(task.title,80)}) first.`:` It belongs to ${owner.id} of ${owner.assignee}.`):' Ask Lead to schedule a separate scoped task.';
+   return `The file is outside this task writeScopes: ${target} is not in ${task.id} ${JSON.stringify(task.writeScopes??[])}.${where} Do not modify another parallel branch.`;
+  }
   if(task.codePlan&&!evidencePath(target,entry.io.cwd)&&!task.codePlan.changes.some(change=>path.resolve(entry.io.cwd,change.path).toLowerCase()===path.resolve(entry.io.cwd,target).toLowerCase()))return 'This product file is outside the coordinator codePlan. Report the concrete missing change to Lead and obtain a corrected plan before editing it.';
  }
  ctx.on('tools/pre-execute',async(exec,next)=>{
