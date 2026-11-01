@@ -1028,3 +1028,13 @@ test('across teams a broad read lease does not block the other team, overlapping
  assert.equal(free.task.state,'running','reading src in another team does not hold src');assert.equal(clash.task.state,'waiting','the same written file still queues');
  await a.call('gvs_pause');await b.call('gvs_pause');
 });
+
+test('a running task may release part of its exclusive lease but not take more',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Release lease',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'driver',title:'Driver',purpose:'Driver',capability:'edit'});
+ const work=await f.call('gvs_task',{action:'create',title:'Telemetry',instructions:'Edit',kind:'work',assignee:'driver',readScopes:['src'],writeScopes:['src/debug.rs','target'],resources:['project-runtime']});
+ await assert.rejects(f.call('gvs_task',{action:'update',taskId:work.task.id,writeScopes:['src/debug.rs','src/other.rs','target']}),/exclusive-lease-change/);
+ const released=await f.call('gvs_task',{action:'update',taskId:work.task.id,writeScopes:['src/debug.rs'],resources:[],reason:'Source-only now'});
+ assert.equal(released.updated,true);assert.deepEqual(released.task.resources,[]);assert.match(released.update.reason,/Released from this running task/);
+ assert.ok(f.sent.some(message=>message.target==='driver'&&/Released from this running task/.test(JSON.stringify(message.content))));
+});

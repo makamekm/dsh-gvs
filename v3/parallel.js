@@ -92,10 +92,12 @@ export function accessConflict(a,b,{writesOnly=false}={}){
 export function runningAccessChange(run,task,patch){
  const next={...task,...patch},before=taskAccess(run,task),after=taskAccess(run,next);
  const same=(a=[],b=[])=>JSON.stringify([...a].sort())===JSON.stringify([...b].sort());
- if(next.assignee!==task.assignee||!['writes','resources','externalWrites'].every(key=>same(before[key],after[key])))return {kind:'exclusive-lease-change'};
+ // Releasing part of an exclusive lease only frees work for others; taking more on mid-task is what stays refused.
+ const released=['writes','resources','externalWrites'].every(key=>(after[key]??[]).every(item=>(before[key]??[]).includes(item)));
+ if(next.assignee!==task.assignee||!released&&!['writes','resources','externalWrites'].every(key=>same(before[key],after[key])))return {kind:'exclusive-lease-change'};
  if(same(before.reads,after.reads)&&same(before.externalReads,after.externalReads))return null;
  // Expand read access only: never drop the scope that protects an in-flight read.
- if(!before.reads.every(file=>after.reads.some(scope=>scope==='*'||file===scope||file.startsWith(scope+'/')))||!(before.externalReads??[]).every(file=>(after.externalReads??[]).some(scope=>file===scope||file.startsWith(scope+'/'))))return {kind:'read-lease-contraction'};
+ if(!before.reads.filter(file=>!before.writes.includes(file)||after.writes.includes(file)).every(file=>after.reads.some(scope=>scope==='*'||file===scope||file.startsWith(scope+'/')))||!(before.externalReads??[]).every(file=>(after.externalReads??[]).some(scope=>file===scope||file.startsWith(scope+'/'))))return {kind:'read-lease-contraction'};
  const conflicts=run.tasks.filter(other=>other.id!==task.id&&other.state==='running').map(other=>taskConflict(run,next,other)).filter(Boolean);
  return conflicts.length?{kind:'resources',conflicts}:null;
 }

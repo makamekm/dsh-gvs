@@ -584,7 +584,9 @@ ${rolePolicy(member.run,member.role)}`:'';}});
     const changes={...scope,...access,...(plan?{codePlan:plan,planStale:false,stalePlanFiles:[]}:{}),...(reassign?{assignee:args.assignee}:{}),...(args.instructions?{instructions:args.instructions}:{}),...(args.title?{title:args.title}:{}),...(args.priority!==undefined?{priority:args.priority}:{})};
     const fields=Object.keys(changes).filter(key=>JSON.stringify(task[key])!==JSON.stringify(changes[key]));
     if(!fields.length)return {status:'unchanged',updated:false,task:taskSummaries([task],true)[0],next:'The requested values already match. The task, assignment and remaining requirements are unchanged.'};
-    const reason=args.reason?.trim()||`Updated ${fields.join(', ')} on existing ${task.id}. Remaining human requirements and owned follow-ups stay binding.`;
+    const leaseBefore=task.state==='running'?taskAccess(entry.run,task):null,leaseAfter=leaseBefore&&taskAccess(entry.run,{...task,...changes});
+    const freed=leaseBefore?{writes:leaseBefore.writes.filter(item=>!leaseAfter.writes.includes(item)),resources:leaseBefore.resources.filter(item=>!leaseAfter.resources.includes(item))}:null;
+    const reason=(args.reason?.trim()||`Updated ${fields.join(', ')} on existing ${task.id}. Remaining human requirements and owned follow-ups stay binding.`)+(freed&&(freed.writes.length||freed.resources.length)?` Released from this running task: ${JSON.stringify(freed)}. Do not write, build, run tests or launch with them any more in this task; the scheduler may give them to other work now.`:'');
     if(fields.includes('writeScopes')){const native=ctx.agentTeams.getTask(entry.root,task.id);await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'edit',writeScopes:access.writeScopes});}
     Object.assign(task,changes);if(fields.includes('codePlan')||reassign){delete task.planContinuation;delete task.planCheckpointError;}if(reassign)task.consultations=[];
     task.lastUpdate={at:new Date().toISOString(),reason,reasonSource:args.reason?.trim()?'provided':'derived',fields};
@@ -594,7 +596,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
      const delivery=assignmentDelivery(message,[],`UPDATED EXISTING ${task.id}: ${reason}. Read gvs_task action:list taskId:${task.id} for the full current instructions and coordinator codePlan before implementing. Preserve the same task/identity and every remaining human requirement.`);
      await ctx.agentTeams.sendMessage(entry.root,{target:task.assignee,content:delivery.content,signal:exec.signal});
     }
-    await schedule(entry,exec.signal);return {updated:true,update:task.lastUpdate,task:taskSummaries([task],true)[0]};
+    await schedule(entry,exec.signal);if(freed&&(freed.writes.length||freed.resources.length))wakeNeighbours(entry,true);return {updated:true,update:task.lastUpdate,task:taskSummaries([task],true)[0]};
    }
    if(['retry','dependencies'].includes(args.action)){
     lead(member);const task=entry.run.tasks.find(task=>task.id===args.taskId);
