@@ -4,6 +4,8 @@ import {fileURLToPath} from 'node:url';
 import {createServer} from 'node:http';
 import fs from 'node:fs/promises';import {tmpdir} from 'node:os';import {spawnSync} from 'node:child_process';
 function fixture(config={}){
+ // Each fixture is its own folder: GVS treats running teams sharing a folder as neighbours.
+ const cwd=path.resolve('work/in-memory-fixture-'+randomUUID().slice(0,8));
  const files=new Map(),members=new Map(),tasks=new Map(),sent=[];let serial=0,spawns=0,source='initial source',nextSpawnError=null;
  const root={id:`mock-${randomUUID()}`,session:{header:{}},ctx:{}};const hooks={},definitions=new Map(),effects=[];let guard;
  const team={membership(agent){return {root,name:agent===root?'lead':members.get(agent.id).name,role:agent===root?'lead':'teammate'};},tryMembership(agent){return team.membership(agent);},
@@ -14,7 +16,7 @@ function fixture(config={}){
    if(request.action==='complete')task.status='completed';if(['reopen','release'].includes(request.action))task.status='pending';if(request.action==='set_dependencies')task.blockedBy=request.blockedBy;task.revision++;return {...task};},
   async sendMessage(_agent,request){sent.push(request);return {messageId:randomUUID()};},async waitForChange(){return {timedOut:false};},interrupt(){return {previousStatus:'inactive'};}};
  const ctx={agentTeams:team,on:(name,fn)=>{hooks[name]=fn;},effect:fn=>effects.push(fn),jobs:{attachController:()=>()=>{}},tools:{register:definition=>definitions.set(definition.name,definition),guard:fn=>{guard=fn;}},
-  workingDirectory:{ensure:async()=>path.resolve('work/in-memory-fixture')},sandboxPolicy:{resolve:()=>({mode:'workspace-write'})},
+  workingDirectory:{ensure:async()=>cwd},sandboxPolicy:{resolve:()=>({mode:'workspace-write'})},
   fs:{resolve:async file=>({file}),contains:()=>true,listDir:async()=>[{name:'app.js',type:'file'}],lstat:async()=>({type:'file'}),readBytes:async()=>Buffer.from(source),readText:async target=>{if(!files.has(target.file))throw Object.assign(new Error('missing'),{code:'ENOENT'});return files.get(target.file);},writeText:async(target,value)=>{files.set(target.file,value);}}};
  const sections=new Map();if(config.promptSections)ctx.systemPrompt={section:value=>sections.set(value.name,value)};
  apply(ctx,{requireCoordinatorPlan:false,responsiveTesting:false,projectInspection:false,...config});
@@ -25,7 +27,7 @@ function fixture(config={}){
   const goal=await call('gvs_goal',{action:'status'});await call('gvs_goal',{action:'plan',requirements:[{id:'human-goal',criterion:saved.task,sourceIds:goal.humanMessages.map(item=>item.id)}],assessedMessages:goal.humanMessages.map(item=>item.id),expertise:[],staffingRationale:'The fixture already has all needed capabilities.'},agent);
  }return call('gvs_task',{action:'complete',taskId:id,verdict:'pass',summary:'Observed result',findings:[],...extra},agent);};
  async function consult(agent){let cached;const pending=call('gvs_ask_user',{question:'Confirm the exact goal'},agent).then(value=>(cached=value,value));await new Promise(resolve=>setImmediate(resolve));if(cached)return cached;let list=await call('gvs_task',{action:'list'});const question=list.tasks.find(task=>task.kind==='consultation'&&task.state==='running');assert.ok(question);await complete(question.id,actor('user'));return pending;}
- return {sections,root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,effects,nativeGuard:exec=>guard(exec),failNextSpawn:()=>{nextSpawnError=new Error('Temporary spawn failure');},changeSource:value=>{source=value;},get spawns(){return spawns;}};
+ return {cwd,sections,root,ctx,hooks,definitions,files,members,tasks,sent,call,actor,complete,consult,effects,nativeGuard:exec=>guard(exec),failNextSpawn:()=>{nextSpawnError=new Error('Temporary spawn failure');},changeSource:value=>{source=value;},get spawns(){return spawns;}};
 }
 
 test('a real successful process keeps its output and side effects when a planned new file became a directory and source proof fails',async t=>{
@@ -271,7 +273,7 @@ test('coordinator plans gate editing, source drift stops dispatch, and completio
  const plan={summary:'Correct actual source',changes:[{path:'app.js',anchor:'initial source',edit:'Replace initial source with the required implemented behavior.'}],checks:['node check.mjs'],acceptance:['Required behavior works in the actual app.']};
  const updated=await f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan});assert.equal(updated.task.state,'running');assert.equal(updated.task.codePlan.authoredBy,f.root.id);
  const agent=f.actor('developer'),count=f.sent.length;const proposal=await f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan},agent);assert.equal(proposal.status,'forwarded-to-coordinator');assert.equal(proposal.applied,false);assert.equal(f.sent.length,count+1);const duplicate=await f.call('gvs_task',{action:'update',taskId:work.task.id,codePlan:plan},agent);assert.equal(duplicate.duplicate,true);assert.equal(f.sent.length,count+1);
- const denial=await f.hooks['tools/pre-execute']({agent:f.root,name:'write',arguments:{file_path:path.resolve('work/in-memory-fixture/app.js')},signal:new AbortController().signal},async()=>({kind:'allow'}));assert.equal(denial.kind,'deny');
+ const denial=await f.hooks['tools/pre-execute']({agent:f.root,name:'write',arguments:{file_path:path.join(f.cwd,'app.js')},signal:new AbortController().signal},async()=>({kind:'allow'}));assert.equal(denial.kind,'deny');
  await f.consult(agent);
  const exec={agent,name:'pwsh',arguments:{command:'node check.mjs'}},result={isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'passed'}},content:[]};
  await f.hooks['tools/post-execute'](exec,result,async()=>({kind:'accept'}));f.hooks['tools/result'](exec,result);
@@ -310,7 +312,7 @@ test('a promised report must actually exist and be nonempty; writing that report
 test('task admission separates absolute environment leases before calling the Native task API',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Native fixture work',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
  await f.call('gvs_agent',{action:'create',name:'developer',title:'Developer',purpose:'Implement',capability:'edit'});
- const cwd=path.resolve('work/in-memory-fixture'),outside=path.resolve(cwd,'../external-fixture');let admitted;
+ const cwd=f.cwd,outside=path.resolve(cwd,'../external-fixture');let admitted;
  const original=f.ctx.agentTeams.createTask;f.ctx.agentTeams.createTask=async(...args)=>{admitted=args[1];return original(...args);};
  const task=await f.call('gvs_task',{action:'create',title:'Precise code and isolated fixture',instructions:'Use only the already permitted fixture',kind:'work',assignee:'developer',writeScopes:[path.join(cwd,'src'),outside],readScopes:[],resources:[]});
  assert.deepEqual(admitted.writeScopes,['src']);assert.equal(task.task.externalWriteScopes.length,1);assert.equal(task.task.scopeNotices[1].kind,'external-environment-lease');
@@ -416,7 +418,7 @@ test('scheduler overlaps independent scoped branches, preserves conflict waits, 
  assert.equal(ui.task.state,'running');assert.equal(server.task.state,'running');assert.equal(qa.task.state,'running');assert.equal((await f.call('gvs_parallel',{action:'status'})).parallel.active.length,3);
  const overlap=await create('spare',['ui/dialog']);assert.equal(overlap.task.state,'waiting');
  assert.equal((await f.call('gvs_parallel',{action:'status'})).parallel.waiting.find(t=>t.id===overlap.task.id).reason.kind,'resources');
- f.definitions.set('write',{execute:async()=>({ok:true})});const cwd=path.resolve('work/in-memory-fixture');
+ f.definitions.set('write',{execute:async()=>({ok:true})});const cwd=f.cwd;
  assert.equal((await f.call('write',{file_path:path.join(cwd,'ui/dialog.js')},f.actor('ui'))).ok,true);
  await assert.rejects(f.call('write',{file_path:path.join(cwd,'backend/main.rs')},f.actor('ui')),/outside this task writeScopes/);
  await assert.rejects(f.call('gvs_task',{action:'update',taskId:ui.task.id,writeScopes:['backend'],reason:'Attempt live scope change'}),/running task/);
@@ -442,7 +444,7 @@ test('verify can write its leased evidence in both native guards, but cannot edi
  await f.call('gvs_agent',{action:'create',name:'qa',title:'QA',purpose:'Independent verification',capability:'verify'});
  await assert.rejects(f.call('gvs_task',{action:'create',title:'Illegal QA edit',instructions:'Check',kind:'work',assignee:'qa',writeScopes:['src']}),/Verify writeScopes/);
  await f.call('gvs_task',{action:'create',title:'Evidence',instructions:'Write exact findings',kind:'work',assignee:'qa',readScopes:['src'],writeScopes:['artifacts/qa-report','dist'],resources:[]});
- f.definitions.set('write',{execute:async()=>({ok:true})});const actor=f.actor('qa'),cwd=path.resolve('work/in-memory-fixture'),target=path.join(cwd,'artifacts/qa-report/handoff.md');
+ f.definitions.set('write',{execute:async()=>({ok:true})});const actor=f.actor('qa'),cwd=f.cwd,target=path.join(cwd,'artifacts/qa-report/handoff.md');
  const exec={agent:actor,name:'write',arguments:{file_path:target},signal:new AbortController().signal};
  assert.equal((await f.hooks['tools/pre-execute'](exec,async()=>({kind:'allow'}))).kind,'allow');assert.equal((await f.call('write',exec.arguments,actor)).ok,true);
  for(const file of ['src/app.js','scripts/analyzer.mjs','dist/forged.html','artifacts/other/handoff.md','../outside.md']){
@@ -853,7 +855,7 @@ test('an editor ships its slice without a User consultation once a command passe
  await f.call('gvs_agent',{action:'create',name:'editor',title:'Editor',purpose:'Implement features',capability:'edit'});
  await f.call('gvs_agent',{action:'create',name:'qa',title:'QA',purpose:'Review the whole goal',capability:'verify'});
  const work=await f.call('gvs_task',{action:'create',title:'Chat panel',instructions:'Implement the chat panel',kind:'work',assignee:'editor',readScopes:['app.js'],writeScopes:['app.js'],resources:[]}),editor=f.actor('editor');
- const cwd=path.resolve('work/in-memory-fixture'),shell=process.platform==='win32'?'pwsh':'bash';
+ const cwd=f.cwd,shell=process.platform==='win32'?'pwsh':'bash';
  const run=(command,exitCode)=>f.hooks['tools/result']({agent:editor,name:shell,callId:randomUUID(),arguments:{command}},{isError:false,value:{kind:'foreground',exitCode,stdout:{text:''},stderr:{text:''}}});
  f.hooks['tools/result']({agent:editor,name:'edit',arguments:{file_path:path.join(cwd,'app.js')}},{isError:false});
  await assert.rejects(f.complete(work.task.id,editor),/no successful command after it/);
@@ -920,7 +922,7 @@ test('a marathon run checkpoints, refuses to stop early and at the deadline rest
 });
 
 test('read-only status before gvs_run is not an error and names another team working in the same folder',async()=>{
- const f=fixture(),cwd=path.resolve('work/in-memory-fixture'),list=f.ctx.fs.listDir;
+ const f=fixture(),cwd=f.cwd,list=f.ctx.fs.listDir;
  const other={schema:3,sessionId:'session-other',status:'running',updatedAt:new Date().toISOString(),task:'Repaint castle walls',tasks:[{id:'task-2',state:'running',writeScopes:['src/building.rs']}]};
  f.files.set(path.join(cwd,'.gvs','team-session-other.json'),JSON.stringify(other));
  f.ctx.fs.listDir=async target=>target.file===path.join(cwd,'.gvs')?[{name:'team-session-other.json',type:'file'}]:list(target);
@@ -954,4 +956,36 @@ test('reviews drop product write scopes instead of failing; work tasks for non-e
  const review=await f.call('gvs_task',{action:'create',title:'Review',instructions:'Check',kind:'review',assignee:'qa',writeScopes:['src','artifacts/qa/report.md'],readScopes:['src']});
  assert.deepEqual(review.task.writeScopes,['artifacts/qa/report.md']);
  await assert.rejects(f.call('gvs_task',{action:'create',title:'Illegal QA edit',instructions:'Check',kind:'work',assignee:'qa',writeScopes:['src']}),/Verify writeScopes/);
+});
+
+test('two teams in one folder queue conflicting work across teams and the lead hears about it once',async()=>{
+ const a=fixture(),b=fixture();b.ctx.workingDirectory.ensure=async()=>a.cwd;
+ const startA=await a.call('gvs_run',{task:'Water work',kind:'code'});await a.complete(startA.briefTaskId,a.actor('user'));
+ await a.call('gvs_agent',{action:'create',name:'water',title:'Water',purpose:'Water',capability:'edit'});
+ const workA=await a.call('gvs_task',{action:'create',title:'Water build',instructions:'Edit and build',kind:'work',assignee:'water',readScopes:['src/water'],writeScopes:['src/water','target'],resources:['project-runtime']});
+ assert.equal(workA.task.state,'running');
+ const startB=await b.call('gvs_run',{task:'House work',kind:'code'});await b.complete(startB.briefTaskId,b.actor('user'));
+ await b.call('gvs_agent',{action:'create',name:'houses',title:'Houses',purpose:'Houses',capability:'edit'});
+ const workB=await b.call('gvs_task',{action:'create',title:'House build',instructions:'Edit and build',kind:'work',assignee:'houses',readScopes:['src/houses'],writeScopes:['src/houses','target'],resources:['project-runtime']});
+ assert.equal(workB.task.state,'waiting','the other team holds the build target and project runtime');
+ const saved=()=>JSON.parse([...b.files.entries()].find(([key])=>key.endsWith(`team-${b.root.id}.json`))[1]);
+ assert.deepEqual(saved().tasks.find(task=>task.id===workB.task.id).otherTeamWait.resources,['project-runtime']);
+ const notice=await b.hooks['tools/execute']({agent:b.root,name:'gvs_status',arguments:{},callId:randomUUID(),signal:new AbortController().signal},async()=>({isError:false,value:{},content:[]}));
+ assert.match(notice.additionalContexts.at(-1).content[0].text,/queues conflicting work across both teams/);
+ const again=await b.hooks['tools/execute']({agent:b.root,name:'gvs_status',arguments:{},callId:randomUUID(),signal:new AbortController().signal},async()=>({isError:false,value:{},content:[]}));
+ assert.equal(again.additionalContexts,undefined,'the notice is sent once');
+ await a.call('gvs_task',{action:'complete',taskId:workA.task.id,verdict:'pass',summary:'Built',findings:[]},a.actor('water'));
+ for(let i=0;i<50&&saved().tasks.find(task=>task.id===workB.task.id).state!=='running';i++)await new Promise(resolve=>setTimeout(resolve,10));
+ assert.equal(saved().tasks.find(task=>task.id===workB.task.id).state,'running','finishing the other team task starts the queued one');
+ await a.call('gvs_pause');await b.call('gvs_pause');
+});
+
+test('an edit whose old_string equals new_string reports no change instead of failing',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'No-op edit',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'editor',title:'Editor',purpose:'Edits',capability:'edit'});
+ f.files.set(path.join(f.cwd,'src/a.rs'),'fn a(){}\n');let dispatched=false;
+ const run=args=>f.hooks['tools/execute']({agent:f.actor('editor'),name:'edit',arguments:args,callId:randomUUID(),signal:new AbortController().signal},async()=>{dispatched=true;return {isError:true,content:[{type:'text',text:'Error: old_string and new_string must differ'}]};});
+ const same=await run({file_path:'src/a.rs',old_string:'fn a(){}',new_string:'fn a(){}'});
+ assert.equal(same.isError,false);assert.equal(same.value.before,same.value.after);assert.equal(dispatched,false);assert.match(same.additionalContexts[0].content[0].text,/left unchanged/);
+ const missing=await run({file_path:'src/a.rs',old_string:'fn b(){}',new_string:'fn b(){}'});assert.equal(missing.isError,true,'text that is not in the file stays an error');
 });

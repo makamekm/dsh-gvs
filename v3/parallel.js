@@ -77,11 +77,15 @@ export function taskAccess(run,task){
  return {reads,writes,resources,...(externalReads.length||externalWrites.length?{externalReads,externalWrites}:{})};
 }
 export function taskConflict(run,task,other){
- const a=taskAccess(run,task),b=taskAccess(run,other);
+ const conflict=accessConflict(taskAccess(run,task),taskAccess(run,other));
+ return conflict?{taskId:other.id,assignee:other.assignee,...conflict}:null;
+}
+// Overlapping files/resources of two access contracts; also used across teams sharing one folder.
+export function accessConflict(a,b){
  const external=[...shared(a.externalWrites??[],b.externalReads??[]),...shared(b.externalWrites??[],a.externalReads??[])];
  const files=[...new Set([...shared(a.writes,[...b.writes,...b.reads]),...shared(b.writes,a.reads),...external.map(file=>'external:'+file)])];
  const resources=a.resources.filter(name=>b.resources.includes(name));
- return files.length||resources.length?{taskId:other.id,assignee:other.assignee,files,resources}:null;
+ return files.length||resources.length?{files,resources}:null;
 }
 export function runningAccessChange(run,task,patch){
  const next={...task,...patch},before=taskAccess(run,task),after=taskAccess(run,next);
