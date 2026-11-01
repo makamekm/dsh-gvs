@@ -16,7 +16,9 @@ export function classifyProjectQA({files=[],documents={},engineHint=''}={}){
  const python=doc('pyproject.toml')+'\n'+doc('requirements.txt');
  if(/aiogram|python-telegram-bot|discord\.py|disnake|py-cord|slack-bolt/i.test(python))mark('bot-service','python-bot',has('pyproject.toml')?'pyproject.toml':'requirements.txt',['src']);
  if(/pyside|pyqt|kivy|wxpython/i.test(python))mark('native-ui','python-native-ui','pyproject.toml',['src']);
- const cargo=doc('Cargo.toml');if(/teloxide|serenity|poise/i.test(cargo))mark('bot-service','rust-bot','Cargo.toml',['src']);
+ const cargo=doc('Cargo.toml'),rustEngine=cargo.match(/^\s*(bevy|macroquad|ggez|fyrox|piston|amethyst)\s*=|^\s*\[dependencies\.(bevy|macroquad|ggez|fyrox|piston|amethyst)\]/m);
+ if(rustEngine)mark('native-game',rustEngine[1]??rustEngine[2],'Cargo.toml',['src','assets']);
+ if(/teloxide|serenity|poise/i.test(cargo))mark('bot-service','rust-bot','Cargo.toml',['src']);
  if(/axum|actix-web|rocket/i.test(cargo)||names.some(n=>['express','fastify','koa','hono'].includes(n))||/fastapi|flask|django/i.test(python))mark('service','http-service',cargo?'Cargo.toml':'package.json',['src']);
  for(const file of files.filter(f=>/\.csproj$/i.test(f)))if(/UseWPF|UseWindowsForms|Avalonia|Microsoft\.Maui/i.test(doc(file)))mark('native-ui','dotnet-native-ui',file,['src']);
  if(/^\s*\[\[bin\]\]/m.test(cargo)&&!surfaces.size)mark('cli','rust-cli','Cargo.toml',['src']);

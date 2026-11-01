@@ -30,8 +30,21 @@ async function digestFile(fs,target,signal,budget){
   if(part.length<WINDOW)return {size,digest:hash.digest()};
  }
 }
+// Paths the project's root .gitignore excludes (recordings, extra build directories, local captures) are not
+// source. A negation can re-include anything, so a .gitignore with one is not used at all.
+async function rootIgnore(fs,cwd,signal){
+ let text;try{text=new TextDecoder().decode(await fs.readBytes(await fs.resolve(path.join(cwd,'.gitignore'),{cwd,signal}),signal,1024*1024));}catch{return ()=>false;}
+ const lines=text.split(/\r?\n/).map(line=>line.trim()).filter(line=>line&&!line.startsWith('#'));
+ if(lines.some(line=>line.startsWith('!')))return ()=>false;
+ const glob=pattern=>new RegExp('^'+pattern.replace(/[.+^${}()|[\]\\]/g,'\\$&').replace(/\*\*\//g,'\0').replace(/\*\*/g,'\x01').replace(/\*/g,'[^/]*').replace(/\?/g,'[^/]').replace(/\0/g,'(?:.*/)?').replace(/\x01/g,'.*')+'$',process.platform==='win32'?'i':'');
+ const rules=lines.map(line=>{
+  const directory=line.endsWith('/'),body=line.replace(/\/+$/,'');
+  return {directory,anchored:body.includes('/'),pattern:glob(body.replace(/^\//,'').replace(/^\*\*\//,''))};
+ });
+ return (relative,name,isDirectory)=>rules.some(rule=>(!rule.directory||isDirectory)&&rule.pattern.test(rule.anchored?relative:name));
+}
 export async function sourceFingerprint(fs,cwd,signal,cache=new Map(),files){
- const root=await fs.resolve(cwd,{cwd,signal}),hash=createHash('sha256');let count=0,bytes=0;
+ const root=await fs.resolve(cwd,{cwd,signal}),hash=createHash('sha256'),ignored=await rootIgnore(fs,cwd,signal);let count=0,bytes=0;
  async function walk(target,relative=''){
   const children=await fs.listDir(target,signal);
   for(const child of children.sort((a,b)=>a.name.localeCompare(b.name))){
@@ -41,6 +54,7 @@ export async function sourceFingerprint(fs,cwd,signal,cache=new Map(),files){
    const name=path.join(relative,child.name),absolute=path.join(cwd,name);
    const info=await fs.lstat(absolute,{cwd},signal);
    if(!info)throw new Error(`Source changed during fingerprint: ${name}`);
+   if(ignored(name.replaceAll('\\','/'),child.name,info.type==='directory'))continue;
    const resolved=await fs.resolve(absolute,{cwd,signal});
    if(!fs.contains(root,resolved))throw new Error(`Source input outside workspace: ${name}`);
    if(info.type==='symlink')throw new Error(`Source symlink requires an explicit in-workspace copy for verification: ${name}`);

@@ -3,6 +3,17 @@ import {sourceFingerprint,refreshRevision} from '../v3/revision.js';
 const provider={resolve:async name=>name,contains:(root,child)=>child===root||child.startsWith(root+path.sep),
  listDir:async directory=>(await fs.readdir(directory,{withFileTypes:true})).map(entry=>({name:entry.name})),
  lstat:async name=>{const s=await fs.lstat(name);return {type:s.isSymbolicLink()?'symlink':s.isDirectory()?'directory':s.isFile()?'file':'other'};},readBytes:async name=>fs.readFile(name)};
+test('paths excluded by the root .gitignore are not source, unless a negation makes the rules ambiguous',async t=>{
+ const cwd=await fs.mkdtemp(path.join(os.tmpdir(),'gvs-ignore-'));t.after(()=>fs.rm(cwd,{recursive:true,force:true}));
+ const write=async(file,text)=>{await fs.mkdir(path.dirname(path.join(cwd,file)),{recursive:true});await fs.writeFile(path.join(cwd,file),text);};
+ await write('.gitignore','# build output\n/target-*\n/*.png\n/recordings\n__pycache__/\nlogs/**\n');await write('src/main.rs','fn main(){}');await write('assets/tex.png','asset');
+ const first=await sourceFingerprint(provider,cwd);
+ for(const [file,text] of [['recordings/run.mp4','video'],['target-rec/out.bin','build'],['shot.png','capture'],['tools/__pycache__/x.pyc','cache'],['logs/a/b.txt','log']])await write(file,text);
+ assert.equal(await sourceFingerprint(provider,cwd),first,'ignored outputs do not change the revision');
+ await write('assets/tex.png','new asset');const second=await sourceFingerprint(provider,cwd);assert.notEqual(second,first,'a tracked nested png is still source');
+ await write('src/recordings/data.rs','x');assert.notEqual(await sourceFingerprint(provider,cwd),second,'an anchored rule only matches at the root');
+ await write('.gitignore','/recordings\n!/recordings/keep.txt\n');const strict=await sourceFingerprint(provider,cwd);await write('recordings/run.mp4','other video');assert.notEqual(await sourceFingerprint(provider,cwd),strict,'a negation disables the ignore rules');
+});
 test('source fingerprints ignore generated results, detect assets/config/code changes and deletions, and fail closed on unreadable inputs',async()=>{
  const cwd=await fs.mkdtemp(path.join(os.tmpdir(),'gvs-source-'));
  try{
