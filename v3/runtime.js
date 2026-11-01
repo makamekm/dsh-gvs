@@ -142,7 +142,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
    entry.run.progress??={startedAt:Date.now(),metadataSinceWrite:0,writes:0};
    if(member.role==='lead'){
     if(entry.owner!==ctx&&entry.suspending){entry.abort=new AbortController();entry.suspending=false;}
-    entry.owner=ctx;entry.wake=()=>schedule(entry,entry.abort.signal);owned.add(member.root.id);
+    entry.owner=ctx;entry.wake=()=>schedule(entry,entry.abort.signal);entry.notifyLead=text=>ctx.agentTeams.sendMessage(entry.root,{target:'lead',content:[{type:'text',text}]});owned.add(member.root.id);
    }
    const messages=ctx.sessionProjections?.stateOf(member.root.session,'gvsHumanGoal')?.messages;
    const migrating=!entry.run.goal;
@@ -241,6 +241,20 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   }
   return null;
  }
+ // A shared build breaks on whichever team's file is wrong: a failed result naming files another team changed is
+ // relayed to that team's Lead as a fact, since no team sees another team's results.
+ function relayToNeighbours(entry,task){
+  const text=[task.result.summary,...(task.result.findings??[])].join('\n'),own=task.writeScopes??[];
+  const files=[...new Set(text.match(/[\w.-]+(?:[\\/][\w.-]+)+\.(?:rs|toml|wesl|wgsl|tsx?|jsx?|mjs|py|go|cs|cpp|c|h|ps1|glsl)\b/gi)??[])].map(file=>file.replaceAll('\\','/')).filter(file=>!own.some(scope=>file===scope||file.startsWith(scope.replace(/\/$/,'')+'/'))).slice(0,12);
+  if(!files.length)return;
+  entry.relayed??=new Set();
+  for(const other of neighbours(entry)){
+   const owned=files.filter(file=>!entry.relayed.has(other.run.sessionId+'|'+task.id+'|'+file)&&[...other.run.tasks].reverse().some(item=>writeAllowed(item,file,other.io.cwd)));
+   if(!owned.length||!other.notifyLead)continue;
+   for(const file of owned)entry.relayed.add(other.run.sessionId+'|'+task.id+'|'+file);
+   void other.notifyLead(`GVS NEIGHBOUR REPORT from the other GVS team in this folder (task ${task.id} "${clip(task.title,100)}", verdict ${task.result.verdict}). Its result names files your team changed: ${owned.join(', ')}. Excerpt: ${clip(text,1500)}. This is a fact from the shared build, not a human requirement. If your change to these files breaks compilation or tests, repair it in a task of your team and rerun the build; the other team waits for that build.`)?.catch?.(()=>{});
+  }
+ }
  // A finished task can unblock another team's waiting work; a periodic pass catches the rest.
  // Each entry is scheduled by its owning plugin instance, whose agent-team service holds its tasks.
  const wakeNeighbours=entry=>{for(const other of neighbours(entry))if(other.run.tasks.some(task=>task.otherTeamWait))void other.wake?.()?.catch?.(()=>{});};
@@ -259,7 +273,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
     const role=roleOf(entry,task.assignee);
     if(role.capability==='edit'&&!goalStatus(entry.run).discoveryReady)continue;
     if(role.capability!=='user'&&entry.run.analysis&&(entry.run.analysis.state!=='ready'||entry.run.tasks.some(task=>task.kind==='brief'&&task.state!=='done')))continue;
-    if(role.retired||parallelBlocker(entry.run,task,entry.run.parallelLimit??maxParallel))continue;
+    if(role.retired||parallelBlocker(entry.run,task,entry.run.parallelLimit??maxParallel)){if(task.otherTeamWait){delete task.otherTeamWait;waitsChanged=true;}continue;}
     const otherTeam=crossTeamConflict(entry,task);
     if(JSON.stringify(otherTeam??null)!==JSON.stringify(task.otherTeamWait??null)){waitsChanged=true;if(otherTeam)task.otherTeamWait=otherTeam;else delete task.otherTeamWait;}
     if(otherTeam)continue;
@@ -457,7 +471,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   }
   return found;
  }
- const TEAMS_NOTE='Another GVS team is working in this folder. GVS queues conflicting work across both teams automatically: a task whose files or resources (project-runtime, the build target, interactive-desktop) overlap a running task of the other team waits until that task ends. Keep writeScopes disjoint, give build/test/launch tasks their real resources and target scope, and do not forbid builds or wait for a manual handshake with the other session. Never message another session through the Harness RPC or shared notes: its text would land in that team’s human goal. Re-read files before editing, since the other team may have changed them.';
+ const TEAMS_NOTE='Another GVS team is working in this folder. GVS queues conflicting work across both teams automatically: a task whose files or resources (project-runtime, the build target, interactive-desktop) overlap a running task of the other team waits until that task ends. Keep writeScopes disjoint, give build/test/launch tasks their real resources and target scope, close any game or app process a task launched when its check ends (a running executable locks the build output for every team), and do not forbid builds or wait for a manual handshake with the other session. Never message another session through the Harness RPC or shared notes: its text would land in that team’s human goal. Re-read files before editing, since the other team may have changed them.';
  async function noRun(exec){
   const {root}=await current(exec,false),teams=await otherTeams(await storage(root,exec.signal),root.id,exec.signal);
   return {status:'no-run',tasks:[],...(teams.length?{otherTeams:teams,note:TEAMS_NOTE}:{}),next:'No GVS run exists in this session yet. Call gvs_run with the task and kind to start one; nothing else is needed first.'};
@@ -470,7 +484,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   const run={schema:3,sessionId:root.id,runId:`${new Date().toISOString().replace(/[:.]/g,'-')}-${randomUUID().slice(0,8)}`,task:args.task,kind:args.kind,engine:args.engine??'',status:'running',revision:0,
    visualRequired,visualPolicy:visualRequired?1:0,viewports:args.viewports??(args.kind==='ui'?['desktop','mobile']:['desktop']),viewportsAuto:args.viewports===undefined,roles:previous?.run.roles??[],tasks:[],checks:[],visualChecks:[],gameChecks:[],analysis:{state:'pending',version:0,requirements:[],rationale:'',motionHint:motionHint(args.task)},analysisChecks:[],preview:null,quality:null,summary:'',progress:{startedAt:Date.now(),metadataSinceWrite:0,writes:0}};
   const entry={run,root,io,write:Promise.resolve(),abort:new AbortController(),waiters:new Map(),scheduling:null};entries.set(root.id,entry);
-  entry.owner=ctx;entry.wake=()=>schedule(entry,entry.abort.signal);owned.add(root.id);
+  entry.owner=ctx;entry.wake=()=>schedule(entry,entry.abort.signal);entry.notifyLead=text=>ctx.agentTeams.sendMessage(entry.root,{target:'lead',content:[{type:'text',text}]});owned.add(root.id);
   const human=ctx.sessionProjections?.stateOf(root.session,'gvsHumanGoal')?.messages;
   syncGoal(run,human?.length?human:[{id:'initial-request',text:args.task}]);
   if(config.projectInspection!==false){run.qaTarget=await inspectProject(root,exec.signal,run.engine);if(run.viewportsAuto&&run.qaTarget.sourceConfirmed&&!requiresWebVerification(run))run.viewports=['desktop'];}
@@ -650,7 +664,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
    await commit(entry);
    try{await ctx.agentTeams.sendMessage(exec.agent,{target:'lead',content:[{type:'text',text:`GVS TASK RESULT ${JSON.stringify({taskId:task.id,assignee:name,kind:task.kind,verdict:task.result.verdict,summary:clip(task.result.summary,1000),findings:task.result.findings.map(item=>clip(item,600)),observations:task.result.observations.slice(0,3).map(item=>clip(item,400)),observationCount:task.result.observations.length,followUps:followUps.slice(0,8).map(item=>clip(item,400)),followUpCount:followUps.length,issueIds:issues.map(item=>item.id),historicalReportAttestations,inventoryItems:task.result.inventory.length,artifacts:task.result.artifacts?.slice(0,12)})}\nCoordinator: every finding and follow-up is now a tracked goal issue. Fold related ones into the next feature/repair slice for an editor and link them with batch gvs_goal link; the next integration review rechecks them. Keep editing slots busy and continue the complete human goal; this is not permission to narrow scope or end the run.`}],signal:exec.signal});}
    catch(error){task.notificationError=clip(error.message,500);await commit(entry);}
-   await schedule(entry,exec.signal);wakeNeighbours(entry);return {task};
+   await schedule(entry,exec.signal);wakeNeighbours(entry);if(['revise','blocked'].includes(task.result.verdict))relayToNeighbours(entry,task);return {task};
   });
  register('gvs_plan_check','Run ONE exact coordinator-planned command through the Native foreground executor. Default: first check lacking current evidence. Actual failures, stale source hashes and pause/owner restrictions remain binding. Never completes a task.',{taskId:text(40),index:{type:'integer',minimum:0,maximum:11},timeoutMs:{type:'integer',minimum:1000,maximum:1800000}},[],async(args,exec)=>{
   const {entry,member,name}=await current(exec),task=args.taskId?entry.run.tasks.find(t=>t.id===args.taskId):entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');

@@ -996,3 +996,19 @@ test('GVS agents cannot drive the Harness RPC to post into another session',asyn
  for(const command of ["& node.exe 'C:/work/dsh-rpc.mjs' session/prompt","Get-Content C:/x/work/status.json","Invoke-RestMethod http://host:3080/api/session/prompt"])assert.equal((await pre(f.root,command)).kind,'deny',command);
  assert.equal((await pre(f.root,'cargo test --bin bastion')).kind,'allow');
 });
+
+test('a failed build naming another team files is relayed to that team lead once',async()=>{
+ const a=fixture(),b=fixture();b.ctx.workingDirectory.ensure=async()=>a.cwd;
+ const startB=await b.call('gvs_run',{task:'HUD work',kind:'code'});await b.complete(startB.briefTaskId,b.actor('user'));
+ await b.call('gvs_agent',{action:'create',name:'hud',title:'HUD',purpose:'HUD',capability:'edit'});
+ const hud=await b.call('gvs_task',{action:'create',title:'HUD labels',instructions:'Edit',kind:'work',assignee:'hud',readScopes:['src/editor'],writeScopes:['src/editor/hud.rs'],resources:[]});
+ await b.call('gvs_task',{action:'complete',taskId:hud.task.id,verdict:'pass',summary:'Labels',findings:[]},b.actor('hud'));
+ const startA=await a.call('gvs_run',{task:'House work',kind:'code'});await a.complete(startA.briefTaskId,a.actor('user'));
+ await a.call('gvs_agent',{action:'create',name:'houses',title:'Houses',purpose:'Houses',capability:'edit'});
+ const work=await a.call('gvs_task',{action:'create',title:'House build',instructions:'Build',kind:'work',assignee:'houses',readScopes:['src/houses'],writeScopes:['src/houses'],resources:[]});
+ const before=b.sent.length;
+ await a.call('gvs_task',{action:'complete',taskId:work.task.id,verdict:'blocked',summary:'cargo check fails outside my scope',findings:['src/editor/hud.rs:663 calls unavailable TextLayout::new_with_justify','src/houses/roof.rs is fine']},a.actor('houses'));
+ const relayed=b.sent.slice(before).filter(message=>/NEIGHBOUR REPORT/.test(message.content[0].text));
+ assert.equal(relayed.length,1);assert.match(relayed[0].content[0].text,/src\/editor\/hud\.rs/);assert.doesNotMatch(relayed[0].content[0].text,/files your team changed: [^.]*roof/);
+ await a.call('gvs_pause');await b.call('gvs_pause');
+});
