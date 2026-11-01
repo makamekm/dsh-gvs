@@ -25,6 +25,7 @@ import {checkpointStore} from './checkpoint.js';
 
 export const inject=['tools','agentTeams','agents','sessionController','subagents','fs','workingDirectory','sandboxPolicy','attachments','llm','jobs','sessionProjections','systemPrompt'];
 const entries=new Map(),instance=randomUUID(),WAIT_TIMEOUT_MS=45000;
+const HARNESS_CONTROL=/dsh-rpc\.m?js|verification-cookie|[\\/]work[\\/]status\.json|\/api\/(?:session|commands|pluginManager)[\/\w]*/i;
 const object=properties=>({type:'object',additionalProperties:false,properties});
 const text=(maxLength=4000)=>({type:'string',maxLength});
 const strings={type:'array',items:{type:'string'},maxItems:40};
@@ -316,6 +317,8 @@ ${rolePolicy(member.run,member.role)}`:'';}});
  }
  ctx.on('tools/pre-execute',async(exec,next)=>{
   if(!exec.agent)return next();const membership=ctx.agentTeams.tryMembership(exec.agent);if(!membership)return next();
+  // Agents once drove the Harness RPC to post into another team's session, where the text became a "human" requirement.
+  if(['pwsh','bash'].includes(exec.name)&&HARNESS_CONTROL.test(String(exec.arguments?.command??'')))return {kind:'deny',reason:'GVS agents do not drive DeepSeek Harness through its RPC or read its launch/cookie files: a prompt sent into another session becomes a fake human message in that team’s goal. GVS already queues conflicting work between teams in one folder (see the GVS TEAMS notice); continue with your own tasks.'};
   if(membership.role==='lead'){
    const entry=entries.get(membership.root.id),target=exec.arguments?.file_path??exec.arguments?.path;
    if(entry?.run.requireCoordinatorPlan&&['write','edit'].includes(exec.name)&&target&&!evidencePath(target,entry.io.cwd))return {kind:'deny',reason:'Coordinator owns source inspection and the exact codePlan. Delegate product file changes through gvs_task to an edit specialist; direct coordinator edits are not the implementation workflow.'};
@@ -454,7 +457,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   }
   return found;
  }
- const TEAMS_NOTE='Another GVS team is working in this folder. GVS queues conflicting work across both teams automatically: a task whose files or resources (project-runtime, the build target, interactive-desktop) overlap a running task of the other team waits until that task ends. Keep writeScopes disjoint, give build/test/launch tasks their real resources and target scope, and do not forbid builds or wait for a manual handshake with the other session; there is no channel for one. Re-read files before editing, since the other team may have changed them.';
+ const TEAMS_NOTE='Another GVS team is working in this folder. GVS queues conflicting work across both teams automatically: a task whose files or resources (project-runtime, the build target, interactive-desktop) overlap a running task of the other team waits until that task ends. Keep writeScopes disjoint, give build/test/launch tasks their real resources and target scope, and do not forbid builds or wait for a manual handshake with the other session. Never message another session through the Harness RPC or shared notes: its text would land in that team’s human goal. Re-read files before editing, since the other team may have changed them.';
  async function noRun(exec){
   const {root}=await current(exec,false),teams=await otherTeams(await storage(root,exec.signal),root.id,exec.signal);
   return {status:'no-run',tasks:[],...(teams.length?{otherTeams:teams,note:TEAMS_NOTE}:{}),next:'No GVS run exists in this session yet. Call gvs_run with the task and kind to start one; nothing else is needed first.'};

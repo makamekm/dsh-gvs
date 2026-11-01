@@ -989,3 +989,10 @@ test('an edit whose old_string equals new_string reports no change instead of fa
  assert.equal(same.isError,false);assert.equal(same.value.before,same.value.after);assert.equal(dispatched,false);assert.match(same.additionalContexts[0].content[0].text,/left unchanged/);
  const missing=await run({file_path:'src/a.rs',old_string:'fn b(){}',new_string:'fn b(){}'});assert.equal(missing.isError,true,'text that is not in the file stays an error');
 });
+
+test('GVS agents cannot drive the Harness RPC to post into another session',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Guard harness control',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ const pre=(agent,command)=>f.hooks['tools/pre-execute']({agent,name:'pwsh',arguments:{command},signal:new AbortController().signal},async()=>({kind:'allow'}));
+ for(const command of ["& node.exe 'C:/work/dsh-rpc.mjs' session/prompt","Get-Content C:/x/work/status.json","Invoke-RestMethod http://host:3080/api/session/prompt"])assert.equal((await pre(f.root,command)).kind,'deny',command);
+ assert.equal((await pre(f.root,'cargo test --bin bastion')).kind,'allow');
+});
