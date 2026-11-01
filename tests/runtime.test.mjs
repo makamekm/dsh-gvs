@@ -974,9 +974,12 @@ test('two teams in one folder queue conflicting work across teams and the lead h
  assert.match(notice.additionalContexts.at(-1).content[0].text,/queues conflicting work across both teams/);
  const again=await b.hooks['tools/execute']({agent:b.root,name:'gvs_status',arguments:{},callId:randomUUID(),signal:new AbortController().signal},async()=>({isError:false,value:{},content:[]}));
  assert.equal(again.additionalContexts,undefined,'the notice is sent once');
+ const nextA=await a.call('gvs_task',{action:'create',title:'Second water build',instructions:'Build again',kind:'work',assignee:'water',readScopes:['src/water'],writeScopes:['src/water','target'],resources:['project-runtime']});assert.equal(nextA.task.state,'waiting');
  await a.call('gvs_task',{action:'complete',taskId:workA.task.id,verdict:'pass',summary:'Built',findings:[]},a.actor('water'));
  for(let i=0;i<50&&saved().tasks.find(task=>task.id===workB.task.id).state!=='running';i++)await new Promise(resolve=>setTimeout(resolve,10));
  assert.equal(saved().tasks.find(task=>task.id===workB.task.id).state,'running','finishing the other team task starts the queued one');
+ const savedA=JSON.parse([...a.files.entries()].find(([key])=>key.endsWith('team-'+a.root.id+'.json'))[1]).tasks.find(task=>task.id===nextA.task.id);
+ assert.equal(savedA.state,'waiting','the team whose task ended yields to the task that waited longer');assert.equal(savedA.otherTeamWait?.taskId,workB.task.id);
  await a.call('gvs_pause');await b.call('gvs_pause');
 });
 

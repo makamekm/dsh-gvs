@@ -239,6 +239,13 @@ ${rolePolicy(member.run,member.role)}`:'';}});
    const conflict=accessConflict(access,taskAccess(other.run,running));
    if(conflict)return {sessionId:other.run.sessionId,taskId:running.id,assignee:running.assignee,files:conflict.files.slice(0,8),resources:conflict.resources};
   }
+  // Fairness: yield to a conflicting task of another team that has waited on teams longer, otherwise the team whose
+  // task just ended always grabs the shared files first and its neighbours starve. Seniority is a total order: no cycle.
+  const since=task.crossWaitSince??Infinity,senior=(other,item)=>item.crossWaitSince<since||item.crossWaitSince===since&&other.run.sessionId<entry.run.sessionId;
+  for(const other of neighbours(entry))for(const waiting of other.run.tasks.filter(item=>item.state==='waiting'&&item.otherTeamWait&&item.crossWaitSince&&senior(other,item))){
+   const conflict=accessConflict(access,taskAccess(other.run,waiting));
+   if(conflict)return {sessionId:other.run.sessionId,taskId:waiting.id,assignee:waiting.assignee,yieldTo:true,files:conflict.files.slice(0,8),resources:conflict.resources};
+  }
   return null;
  }
  // A shared build breaks on whichever team's file is wrong: a failed result naming files another team changed is
@@ -266,22 +273,23 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   entry.scheduling=(async()=>{
    if(entry.run.status!=='running')return;
    await ensureUserProbe(entry,signal);
-   const ready=readyTasks(entry.run).sort((a,b)=>(b.priority??0)-(a.priority??0));let waitsChanged=false;
+   const ready=readyTasks(entry.run).sort((a,b)=>(b.priority??0)-(a.priority??0));let waitsChanged=false,dispatched=false;
    if(ready.some(task=>needsPreview(entry.run,task)||task.waitForPreviewRecovery)){const observed=await previewState(entry.run.preview,ctx.jobs,entry.root.id,signal);observePreview(entry,observed);await commit(entry);}
    for(const task of ready){
     if(entry.abort.signal.aborted||signal.aborted||entry.recoveringPreview)break;
     const role=roleOf(entry,task.assignee);
     if(role.capability==='edit'&&!goalStatus(entry.run).discoveryReady)continue;
     if(role.capability!=='user'&&entry.run.analysis&&(entry.run.analysis.state!=='ready'||entry.run.tasks.some(task=>task.kind==='brief'&&task.state!=='done')))continue;
-    if(role.retired||parallelBlocker(entry.run,task,entry.run.parallelLimit??maxParallel)){if(task.otherTeamWait){delete task.otherTeamWait;waitsChanged=true;}continue;}
+    if(role.retired||parallelBlocker(entry.run,task,entry.run.parallelLimit??maxParallel)){if(task.otherTeamWait||task.crossWaitSince){delete task.otherTeamWait;delete task.crossWaitSince;waitsChanged=true;}continue;}
     const otherTeam=crossTeamConflict(entry,task);
     if(JSON.stringify(otherTeam??null)!==JSON.stringify(task.otherTeamWait??null)){waitsChanged=true;if(otherTeam)task.otherTeamWait=otherTeam;else delete task.otherTeamWait;}
-    if(otherTeam)continue;
+    if(otherTeam){task.crossWaitSince??=Date.now();continue;}
+    if(task.crossWaitSince){delete task.crossWaitSince;waitsChanged=true;}
     const continuation=task.planContinuation?.plannedAt===task.codePlan?.plannedAt?task.planContinuation:null;
     if(needsCodePlan(entry.run,task)&&task.codePlan){const baseline=continuation?{sources:continuation.sources.filter(item=>task.codePlan.sources.some(source=>source.path===item.path))}:task.codePlan;let stale;try{stale=await stalePlanFiles(baseline,entry.io.bytes);}catch{task.planStale=true;task.stalePlanFiles=baseline.sources.map(source=>source.path);task.planCheckpointError='Code-plan source inspection failed. Coordinator must inspect actual file paths/types/read access; dispatch and continuation remain blocked.';await commit(entry);continue;}if(stale.length){task.planStale=true;task.stalePlanFiles=stale;await commit(entry);continue;}}
     const native=ctx.agentTeams.getTask(entry.root,task.id);
     await ctx.agentTeams.updateTask(entry.root,{taskId:task.id,expectedRevision:native.revision,action:'reassign',owner:role.name});
-    task.state='running';task.startedAt=Date.now();task.startedRevision=entry.run.revision;task.nonce=randomUUID();delete task.executionTurn;delete task.planContinuation;
+    task.state='running';dispatched=true;task.startedAt=Date.now();task.startedRevision=entry.run.revision;task.nonce=randomUUID();delete task.executionTurn;delete task.planContinuation;
     const images=task.reviewFocus==='source'?[]:liveImages(entry.run);task.receivedImages=images.map(image=>image.attachment.attachmentId);
     task.receivedAnalysisReports=(entry.run.analysisChecks??[]).filter(check=>check.ok&&check.revision===entry.run.revision&&check.planVersion===entry.run.analysis?.version).map(check=>check.id);
     const deps=entry.run.tasks.filter(previous=>task.dependsOn.includes(previous.id)).map(({id,title,result})=>({id,title,result:result?{verdict:result.verdict,summary:clip(result.summary,1200),findings:result.findings?.map(item=>clip(item,400)),inventoryItems:result.inventory?.length??0,artifacts:(result.artifacts??[]).slice(0,12)}:null}));
@@ -301,6 +309,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
     await commit(entry);
    }
    if(waitsChanged)await commit(entry);
+   if(dispatched)wakeNeighbours(entry);
   })();try{await entry.scheduling;}finally{entry.scheduling=null;}
  }
  function register(name,description,properties,required,execute,timeoutMs=120000){
@@ -824,7 +833,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
      const status=goalStatus(entry.run);
      if(!args.reason?.trim()||!args.evidence?.trim()||!args.dependency)throw new Error('Name the actual external dependency, attempts/evidence and exactly what is needed. A partial deliverable, test freshness error or missing internal work is not an external dependency.');
      const active=entry.run.tasks.filter(task=>['running','waiting'].includes(task.state));
-     if(active.length)throw new Error(`Complete all actionable running/waiting work before an external handoff: ${active.slice(0,8).map(task=>`${task.id} ${task.state}`).join(', ')}${active.length>8?` (+${active.length-8} more)`:''}.`);
+     if(active.length)throw new Error(`Complete all actionable running/waiting work before an external handoff: ${active.slice(0,8).map(task=>`${task.id} ${task.state}${task.otherTeamWait?` (queued behind ${task.otherTeamWait.taskId} of another team)`:''}`).join(', ')}${active.length>8?` (+${active.length-8} more)`:''}.${active.some(task=>task.otherTeamWait)?' Waiting for another GVS team in this folder is not an external dependency: GVS starts these tasks automatically when the conflicting work ends, longest-waiting first. Keep coordinating; do not hand off.':''}`);
      // A covered goal whose only failing gate is the environment's source fingerprint cannot be
      // verified or repaired by the team; record that limitation honestly instead of looping.
      const gates=quality(entry.run),failing=Object.keys(gates).filter(key=>!gates[key]),environmentOnly=status.ready&&!!entry.run.sourceError&&failing.length===1&&failing[0]==='source';
