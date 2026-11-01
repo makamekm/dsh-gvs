@@ -81,9 +81,11 @@ export function taskConflict(run,task,other){
  return conflict?{taskId:other.id,assignee:other.assignee,...conflict}:null;
 }
 // Overlapping files/resources of two access contracts; also used across teams sharing one folder.
-export function accessConflict(a,b){
- const external=[...shared(a.externalWrites??[],b.externalReads??[]),...shared(b.externalWrites??[],a.externalReads??[])];
- const files=[...new Set([...shared(a.writes,[...b.writes,...b.reads]),...shared(b.writes,a.reads),...external.map(file=>'external:'+file)])];
+// writesOnly (across teams): a broad read lease such as src would otherwise block every other team's edit for the
+// whole task; shared builds still serialize through the project-runtime resource and the build-output write scope.
+export function accessConflict(a,b,{writesOnly=false}={}){
+ const external=writesOnly?shared(a.externalWrites??[],b.externalWrites??[]):[...shared(a.externalWrites??[],b.externalReads??[]),...shared(b.externalWrites??[],a.externalReads??[])];
+ const files=[...new Set([...(writesOnly?shared(a.writes,b.writes):[...shared(a.writes,[...b.writes,...b.reads]),...shared(b.writes,a.reads)]),...external.map(file=>'external:'+file)])];
  const resources=a.resources.filter(name=>b.resources.includes(name));
  return files.length||resources.length?{files,resources}:null;
 }

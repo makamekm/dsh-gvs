@@ -236,14 +236,14 @@ ${rolePolicy(member.run,member.role)}`:'';}});
  function crossTeamConflict(entry,task){
   const access=taskAccess(entry.run,task);
   for(const other of neighbours(entry))for(const running of other.run.tasks.filter(item=>item.state==='running')){
-   const conflict=accessConflict(access,taskAccess(other.run,running));
+   const conflict=accessConflict(access,taskAccess(other.run,running),{writesOnly:true});
    if(conflict)return {sessionId:other.run.sessionId,taskId:running.id,assignee:running.assignee,files:conflict.files.slice(0,8),resources:conflict.resources};
   }
   // Fairness: yield to a conflicting task of another team that has waited on teams longer, otherwise the team whose
   // task just ended always grabs the shared files first and its neighbours starve. Seniority is a total order: no cycle.
   const since=task.crossWaitSince??Infinity,senior=(other,item)=>item.crossWaitSince<since||item.crossWaitSince===since&&other.run.sessionId<entry.run.sessionId;
   for(const other of neighbours(entry))for(const waiting of other.run.tasks.filter(item=>item.state==='waiting'&&item.otherTeamWait&&item.crossWaitSince&&senior(other,item))){
-   const conflict=accessConflict(access,taskAccess(other.run,waiting));
+   const conflict=accessConflict(access,taskAccess(other.run,waiting),{writesOnly:true});
    if(conflict)return {sessionId:other.run.sessionId,taskId:waiting.id,assignee:waiting.assignee,yieldTo:true,files:conflict.files.slice(0,8),resources:conflict.resources};
   }
   return null;

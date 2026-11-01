@@ -1015,3 +1015,16 @@ test('a failed build naming another team files is relayed to that team lead once
  assert.equal(relayed.length,1);assert.match(relayed[0].content[0].text,/src\/editor\/hud\.rs/);assert.doesNotMatch(relayed[0].content[0].text,/files your team changed: [^.]*roof/);
  await a.call('gvs_pause');await b.call('gvs_pause');
 });
+
+test('across teams a broad read lease does not block the other team, overlapping writes still do',async()=>{
+ const a=fixture(),b=fixture();b.ctx.workingDirectory.ensure=async()=>a.cwd;
+ const startA=await a.call('gvs_run',{task:'Driver',kind:'code'});await a.complete(startA.briefTaskId,a.actor('user'));
+ await a.call('gvs_agent',{action:'create',name:'driver',title:'Driver',purpose:'Driver',capability:'edit'});
+ const reader=await a.call('gvs_task',{action:'create',title:'State export',instructions:'Edit',kind:'work',assignee:'driver',readScopes:['src'],writeScopes:['src/debug.rs'],resources:[]});assert.equal(reader.task.state,'running');
+ const startB=await b.call('gvs_run',{task:'Houses',kind:'code'});await b.complete(startB.briefTaskId,b.actor('user'));
+ await b.call('gvs_agent',{action:'create',name:'houses',title:'Houses',purpose:'Houses',capability:'edit'});await b.call('gvs_agent',{action:'create',name:'debugger',title:'Debug',purpose:'Debug',capability:'edit'});
+ const free=await b.call('gvs_task',{action:'create',title:'Roofs',instructions:'Edit',kind:'work',assignee:'houses',readScopes:['src/houses'],writeScopes:['src/houses'],resources:[]});
+ const clash=await b.call('gvs_task',{action:'create',title:'Debug',instructions:'Edit',kind:'work',assignee:'debugger',readScopes:['src/debug.rs'],writeScopes:['src/debug.rs'],resources:[]});
+ assert.equal(free.task.state,'running','reading src in another team does not hold src');assert.equal(clash.task.state,'waiting','the same written file still queues');
+ await a.call('gvs_pause');await b.call('gvs_pause');
+});
