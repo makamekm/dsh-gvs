@@ -169,7 +169,7 @@ test('running discovery can add an immutable shared input without abandoning its
  assert.equal(expanded.task.state,'running');assert.equal(f.actor('researcher').id,session);assert.deepEqual(expanded.task.writeScopes,[]);
  const reorder=await f.call('gvs_task',{action:'update',taskId:id,readScopes:['artifacts/picker/main-decoded.txt','artifacts/source']});assert.equal(reorder.task.state,'running');
  await assert.rejects(f.call('gvs_task',{action:'update',taskId:id,readScopes:['artifacts/source','artifacts/picker/main-decoded.txt','src']}),/resources/);
- await assert.rejects(f.call('gvs_task',{action:'update',taskId:id,readScopes:[]}),/read-lease-contraction/);
+ const kept=await f.call('gvs_task',{action:'update',taskId:id,readScopes:[]});assert.deepEqual([...kept.task.readScopes].sort(),['artifacts/picker/main-decoded.txt','artifacts/source'],'a running task keeps its read access');
  assert.equal(f.tasks.get(edit.task.id).status,'in_progress');
 });
 
@@ -917,4 +917,41 @@ test('a marathon run checkpoints, refuses to stop early and at the deadline rest
  assert.ok(f.sent.some(message=>/MARATHON TIME LIMIT/.test(message.content[0].text)));
  assert.ok(commands.every(command=>command==='node test.js'));
  assert.equal((await f.call('gvs_finish')).status,'time-limit','finishing again reports the closed run');
+});
+
+test('read-only status before gvs_run is not an error and names another team working in the same folder',async()=>{
+ const f=fixture(),cwd=path.resolve('work/in-memory-fixture'),list=f.ctx.fs.listDir;
+ const other={schema:3,sessionId:'session-other',status:'running',updatedAt:new Date().toISOString(),task:'Repaint castle walls',tasks:[{id:'task-2',state:'running',writeScopes:['src/building.rs']}]};
+ f.files.set(path.join(cwd,'.gvs','team-session-other.json'),JSON.stringify(other));
+ f.ctx.fs.listDir=async target=>target.file===path.join(cwd,'.gvs')?[{name:'team-session-other.json',type:'file'}]:list(target);
+ const tasks=await f.call('gvs_task',{action:'list',limit:20}),goal=await f.call('gvs_goal',{action:'status'});
+ assert.equal(tasks.status,'no-run');assert.equal(goal.status,'no-run');assert.deepEqual(tasks.otherTeams[0].writeScopes,['src/building.rs']);
+ await assert.rejects(f.call('gvs_task',{action:'create',title:'x',instructions:'x',kind:'work',assignee:'user'}),/gvs_run first/,'changes still need a run');
+ const start=await f.call('gvs_run',{task:'Add bay windows',kind:'code'});assert.equal(start.otherTeams[0].sessionId,'session-other');assert.match(start.note,/disjoint/);
+});
+
+test('evident native tool mistakes are retried with the correction and arrive as real results',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Repair tool mistakes',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'editor',title:'Editor',purpose:'Edits',capability:'edit'});
+ const actor=f.actor('editor'),calls=[];let locks=1;
+ actor.ctx.tools={execute:async request=>{calls.push(request);if(request.name==='edit'&&request.arguments.lock&&locks-->0)return {isError:true,content:[{type:'text',text:'Error: ReplaceFileW EIO (Win32 1175): src/ui.rs'}]};return {isError:false,value:{name:request.name,arguments:request.arguments},content:[{type:'text',text:'ok'}]};}};
+ const failed=text=>({isError:true,content:[{type:'text',text}]});
+ const run=(name,args,result)=>f.hooks['tools/execute']({agent:actor,name,arguments:args,callId:randomUUID(),signal:new AbortController().signal},async()=>result);
+ const read=await run('read',{file_path:'src/fauna/flora.rs',offset:660,limit:180},failed('Error: offset 660 is out of range for "C:\snappy\src\fauna\flora.rs" (446 lines)'));
+ assert.equal(read.isError,false);assert.equal(calls.at(-1).arguments.offset,327);assert.match(read.additionalContexts.at(-1).content[0].text,/past the end/);
+ const grep=await run('grep',{pattern:'wave',path:'app'},failed('Error: grep search failed (exit 2): rg: app: IO error for operation on app: The system cannot find the file specified. (os error 2)'));
+ assert.equal(grep.isError,false);assert.equal(calls.at(-1).arguments.path,'app.js','a path missing only its extension resolves to the file');
+ calls.length=0;const unread=await run('edit',{file_path:'src/score.rs',old_string:'a',new_string:'b'},failed('Error: cannot modify "src/score.rs": file has not been read — read the file, then retry'));
+ assert.equal(unread.isError,false);assert.deepEqual(calls.map(call=>call.name),['read','edit']);
+ calls.length=0;const locked=await run('edit',{file_path:'src/ui.rs',old_string:'a',new_string:'b',lock:true},failed('Error: ReplaceFileW EIO (Win32 1175): src/ui.rs'));
+ assert.equal(locked.isError,false);assert.equal(calls.length,2,'a transient lock is retried until the edit applies');
+ const real=failed('Error: old_string not found in src/ui.rs');assert.strictEqual(await run('edit',{file_path:'src/ui.rs',old_string:'zz',new_string:'b'},real),real,'other failures stay errors');
+});
+
+test('reviews drop product write scopes instead of failing; work tasks for non-editors still fail',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Scoped review writes',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'qa',title:'QA',purpose:'Checks',capability:'verify'});
+ const review=await f.call('gvs_task',{action:'create',title:'Review',instructions:'Check',kind:'review',assignee:'qa',writeScopes:['src','artifacts/qa/report.md'],readScopes:['src']});
+ assert.deepEqual(review.task.writeScopes,['artifacts/qa/report.md']);
+ await assert.rejects(f.call('gvs_task',{action:'create',title:'Illegal QA edit',instructions:'Check',kind:'work',assignee:'qa',writeScopes:['src']}),/Verify writeScopes/);
 });

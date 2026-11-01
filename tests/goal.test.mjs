@@ -101,3 +101,13 @@ test('link errors name the exact unknown ID or misfiled review task',()=>{
  assert.throws(()=>linkGoal(r,{id:'featur',workTasks:['task-1']}),/Unknown requirement "featur"/);
  assert.throws(()=>linkGoal(r,{id:'feature',reviewTasks:['task-1']}),/task-1 is kind work/);
 });
+
+test('a later message without a new requirement is assessed with a reason, and omitted staffing keeps the existing assessment',()=>{
+ const run={goal:{messages:[{id:'m1',text:'Build it'},{id:'m2',text:'I will give desktop access in 10 minutes'}],requirements:[],issues:[],assessed:[]}};
+ planGoal(run,{requirements:[{id:'build',criterion:'Build it',sourceIds:['m1']}],assessedMessages:['m1'],expertise:[],staffingRationale:'Existing roles suffice.'});
+ assert.throws(()=>planGoal(run,{assessedMessages:['m2']}),/Record concrete requirements|reason/);
+ planGoal(run,{assessedMessages:['m2'],reason:'Access timing only; no new product requirement.'});
+ assert.deepEqual(run.goal.assessed,['m1','m2']);assert.equal(run.goal.messageNotes[0].id,'m2');assert.equal(run.goal.staffingRationale,'Existing roles suffice.');
+ planGoal(run,{requirements:[{id:'delay',criterion:'Wait for desktop access',sourceIds:['m2']}]});
+ assert.equal(run.goal.requirements.length,2,'a requirement update without staffing fields keeps the existing staffing');
+});

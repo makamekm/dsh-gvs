@@ -13,7 +13,7 @@ import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus,visualStates,visual
 import {USER_TESTING,planUserJourneys,userJourneyStatus,scenarioKey,userProbeInput,interruptedByLegacyPlan} from './journeys.js';
 import {recordToolFailure,recordToolSuccess,toolIdentity,diagnosticStatus,toolFailureMessage,recoveryAdvice,checkFailureDetails} from './diagnostics.js';
 import {providerRecoveryCandidates,providerFailureFor,readFailedSelection,inheritSelection} from './models.js';
-import {parallelFields,parallelBlocker,parallelStatus,taskAccess,runningAccessChange,writeAllowed,validateWriteScopes,evidencePath} from './parallel.js';
+import {parallelFields,parallelBlocker,parallelStatus,taskAccess,runningAccessChange,writeAllowed,validateWriteScopes,permittedWriteScopes,evidencePath} from './parallel.js';
 import {assignmentDelivery} from './delivery.js';
 import {prepareCodePlan,stalePlanFiles,planSources,needsCodePlan,missingPlanOutputs,migrateCodePlan,CodePlanSourceError,successfulPlanChecks} from './planning.js';
 import {taskArtifacts} from './artifacts.js';
@@ -208,7 +208,8 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   if(input.kind==='design-review'&&role.capability==='edit')throw new Error('The rendered design reviewer must be separate from the editing role.');
   if(['user-review','brief','consultation'].includes(input.kind)&&input.assignee!=='user')throw new Error('User decisions belong to the central User role.');
   const scope=reviewPlan(entry.run,input);
-  const access=parallelFields(input,entry.io.cwd);
+  const access=parallelFields(input,entry.io.cwd),permitted=permittedWriteScopes(role,input.kind,access.writeScopes);
+  if(permitted.dropped.length){access.writeScopes=permitted.scopes;access.scopeNotices=[...(access.scopeNotices??[]),...permitted.dropped.map(scope=>({path:scope,kind:'write-dropped',note:'This role and task kind cannot write product files; the scope was dropped. Assign source changes to an edit role.'}))];}
   validateWriteScopes(role,access.writeScopes);
   const plan=input.codePlan?await codePlan(entry,{...input,...scope,...access},input.codePlan):null;
   const native=await ctx.agentTeams.createTask(entry.root,{subject:clip(input.title,180),description:clip(input.instructions,15000),blockedBy:dependsOn,writeScopes:access.writeScopes??[]});
@@ -332,8 +333,9 @@ ${rolePolicy(member.run,member.role)}`:'';}});
  ctx.on('tools/execute',async(exec,next)=>{
   // Native tools validate strictly; repair a teammate's unambiguous JSON-text/alias mismatches first.
   if(exec.agent&&!exec.name.startsWith('gvs_')&&ctx.agentTeams.tryMembership?.(exec.agent)){const fixed=coerceArgs(exec.arguments,ctx.tools.get?.(exec.name,exec.agent)?.parameters);if(fixed!==exec.arguments)exec.arguments=fixed;}
-  const result=await next();
+  let result=await next();
   const member=exec.agent&&ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);
+  if(member&&result?.isError)result=await repairNativeFailure(exec,member,result)??result;
   if(!entry||entry.run.status!=='running')return result;
   const message=toolFailureMessage(result),advice=message&&recoveryAdvice(message);
   const proofTask=planSourceFailures.get(exec);
@@ -345,6 +347,38 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   if(proofTask)contexts.push({id:randomUUID(),role:'user',source:{kind:'gvs-tool-recovery',form:'notice',summary:'Successful command lacks code-plan source evidence'},content:[{type:'text',text:`GVS CODE-PLAN EVIDENCE (${proofTask}): This foreground command finished successfully; its original exit status, output and effects are preserved. Source hashes could not be captured, so NO current code-plan check proof was recorded. Inspect gvs_diagnostics and ask Lead to correct the actual source paths/types or read failure; directories are not source files. Do not blindly rerun a side-effecting command to fix metadata. Keep the same task/lease and all remaining requirements. This notice does not pass any check or acceptance gate.`}]});
   return {...result,additionalContexts:contexts};
  });
+ // A native failure with an evident correction is retried once with it; the agent gets the real result plus
+ // a note, so a guessed offset, a missing extension or a transient Windows file lock does not cost a step.
+ const repairCalls=new Set();
+ async function repairNativeFailure(exec,member,result){
+  if(repairCalls.has(exec.callId)||!exec.agent.ctx?.tools?.execute)return null;
+  const message=toolFailureMessage(result)??'',args=exec.arguments??{};
+  const run=async(name,next)=>{const callId=randomUUID();repairCalls.add(callId);try{return await exec.agent.ctx.tools.execute({callId,agent:exec.agent,signal:exec.signal,name,arguments:next});}finally{repairCalls.delete(callId);}};
+  const noted=(retried,text)=>retried&&!retried.isError?{...retried,additionalContexts:[...(retried.additionalContexts??[]),{id:randomUUID(),role:'user',source:{kind:'gvs-tool-recovery',form:'notice',summary:'GVS corrected the tool call'},content:[{type:'text',text:`GVS CORRECTED ${exec.name}: ${text}`}]}]}:null;
+  try{
+   const range=exec.name==='read'&&message.match(/offset (\d+) is out of range for .*\((\d+) lines?\)/);
+   if(range&&Number(range[2])>0){const lines=Number(range[2]),offset=Math.max(1,lines-Math.min(Number(args.limit)||120,120)+1);return noted(await run('read',{...args,offset}),`offset ${range[1]} is past the end of ${args.file_path} (${lines} lines); its last lines from offset ${offset} are shown instead.`);}
+   if(['grep','glob'].includes(exec.name)&&typeof args.path==='string'&&/cannot find the (?:file|path) specified|ENOENT|No such file or directory/i.test(message)){
+    const cwd=(await storage(member.root,exec.signal)).cwd,target=path.resolve(cwd,args.path),parent=path.dirname(target),base=path.basename(target).toLowerCase();
+    const rows=await ctx.fs.listDir(await ctx.fs.resolve(parent,{cwd,signal:exec.signal}),exec.signal);
+    const files=rows.filter(row=>row.name.toLowerCase().startsWith(base+'.')),replacement=files.length===1?path.join(parent,files[0].name):parent;
+    if(!path.relative(cwd,replacement).startsWith('..'))return noted(await run(exec.name,{...args,path:path.relative(cwd,replacement)||'.'}),`${args.path} does not exist; searched ${path.relative(cwd,replacement)||'.'} instead.`);
+   }
+   if(exec.name==='edit'&&typeof args.file_path==='string'&&/has not been read/i.test(message)){
+    const read=await run('read',{file_path:args.file_path});
+    if(!read.isError)return noted(await run('edit',args),`${args.file_path} was read automatically first; the edit applied because old_string matched the current file exactly.`);
+   }
+   if(['edit','write'].includes(exec.name)&&/ReplaceFileW|EBUSY|resource busy|\(Win32 (?:5|32|33|1175|1176|1177)\)/.test(message)){
+    for(let attempt=0;attempt<3;attempt++){
+     await new Promise(resolve=>setTimeout(resolve,250*2**attempt));exec.signal?.throwIfAborted();
+     const retried=await run(exec.name,args);
+     if(!retried.isError)return noted(retried,'the first attempt hit a transient Windows file lock (an indexer, antivirus or build holding the file); the retry succeeded.');
+     if(!/ReplaceFileW|EBUSY|resource busy|\(Win32 (?:5|32|33|1175|1176|1177)\)/.test(toolFailureMessage(retried)??''))break;
+    }
+   }
+  }catch{}
+  return null;
+ }
  ctx.on('tools/result',(exec,result)=>{
   if(!exec.agent)return;const member=ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);if(!entry||entry.run.status!=='running')return;
   const role=roleOf(entry,member.name),task=entry.run.tasks.find(task=>task.assignee===member.name&&task.state==='running');
@@ -367,6 +401,25 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   entry.run.checks=entry.run.checks.slice(-120);
   if(task&&check.finished&&!check.error&&check.exitCode===0)task.lastGreenCheck={at:check.at,command:check.command};
  });
+ // Other GVS teams running in the same folder and the files they are changing, so edits stay disjoint.
+ async function otherTeams(io,ownId,signal){
+  let rows;try{rows=await ctx.fs.listDir(await ctx.fs.resolve(path.join(io.cwd,'.gvs'),{cwd:io.cwd,signal}),signal);}catch{return [];}
+  const found=[];
+  for(const row of rows.filter(row=>/^team-.+\.json$/.test(row.name)&&row.name!==`team-${ownId}.json`).slice(0,20)){
+   try{
+    const run=JSON.parse(await io.read(path.join('.gvs',row.name)));
+    if(run.status!=='running'||Date.now()-Date.parse(run.updatedAt??0)>6*3600000)continue;
+    const active=run.tasks.filter(task=>['running','waiting','blocked'].includes(task.state));
+    found.push({sessionId:run.sessionId,task:clip(run.task,300),activeTasks:active.length,writeScopes:[...new Set(active.flatMap(task=>task.writeScopes??[]))].slice(0,40),updatedAt:run.updatedAt});
+   }catch{}
+  }
+  return found;
+ }
+ const TEAMS_NOTE='Another GVS team is changing this folder. Keep this team’s writeScopes disjoint from its writeScopes; a file both teams must change belongs to one team at a time. Re-read the file before editing, since the other team may have changed it.';
+ async function noRun(exec){
+  const {root}=await current(exec,false),teams=await otherTeams(await storage(root,exec.signal),root.id,exec.signal);
+  return {status:'no-run',tasks:[],...(teams.length?{otherTeams:teams,note:TEAMS_NOTE}:{}),next:'No GVS run exists in this session yet. Call gvs_run with the task and kind to start one; nothing else is needed first.'};
+ }
  register('gvs_run','Start an adaptive GVS team run. Returns immediately; then create only needed specialists and dependency tasks, coordinate results, and call gvs_finish. Named teammates persist and wake for later tasks.',{task:text(16000),kind:{type:'string',enum:kinds},engine:text(100),viewports:{type:'array',items:{type:'string',enum:['desktop','mobile']},minItems:1,maxItems:2},marathon:MARATHON_INPUT},['task','kind'],async(args,exec)=>{
   const {member,root,entry:previous}=await current(exec,false);lead(member);
   if(previous?.run.status==='running')throw new Error('A run is active; coordinate it or pause it first.');
@@ -387,7 +440,8 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   }
   await createRole(entry,{name:'user',title:'Пользователь',purpose:'Цели, UX и независимая пользовательская приёмка',instructions:USER,capability:'user'},exec.signal);
   const brief=await createTask(entry,{assignee:'user',title:'Определить цель и критерии приёмки',kind:'brief',instructions:`Inspect the actual task/project. Define audience/player, primary journey, meaningful acceptance criteria and visual ambition. Keep it concise. Do not prescribe a composition before exploration. For a game identify actual engine and key mechanics to verify. Do not run a full regression yet.\n${args.task}`,dependsOn:[]},exec.signal);
-  return {status:'running',briefTaskId:brief.id,...(marathon?{marathon:marathonView(marathon)}:{}),next:'Wait for the User brief, create suitable named specialists and dependency tasks. Coordinate until gvs_finish accepts all gates.'+(marathon&&!marathon.tests.length?' MARATHON: no visible test command was found; have an editor create a runnable test suite from the requirements early.':'')};
+  const teams=await otherTeams(io,root.id,exec.signal);
+  return {status:'running',briefTaskId:brief.id,...(teams.length?{otherTeams:teams,note:TEAMS_NOTE}:{}),...(marathon?{marathon:marathonView(marathon)}:{}),next:'Wait for the User brief, create suitable named specialists and dependency tasks. Coordinate until gvs_finish accepts all gates.'+(marathon&&!marathon.tests.length?' MARATHON: no visible test command was found; have an editor create a runnable test suite from the requirements early.':'')};
  });
  register('gvs_browser_capabilities','Read the ACTUAL GVS browser runtime/module/version/executable and isolated engine launch/input/media capabilities. Available to discovery/read roles before any review task or run; no product URL, shell or installation needed. Do not guess product node_modules/default caches or equate an executable file with a successful launch. This is diagnostics, not product/device acceptance.',{},[],async(_args,exec)=>{
   const {entry}=await current(exec,false);return {status:'browser-capabilities',acceptanceEvidence:false,target:entry?.run.qaTarget?.surfaces??null,engines:await browserCapabilities(config),next:'Use these actual runtime/executable paths when diagnosing the GVS adapter. Unavailable engines and unsupported settings remain limitations. Do not install another runtime from guessed paths, waive review, or claim a physical device was tested. Non-web products still require their own actual engine/process/native-window drivers.'};
@@ -423,7 +477,8 @@ ${rolePolicy(member.run,member.role)}`:'';}});
  register('gvs_task','Create tasks with real dependencies; waiting tasks wake automatically. For complete, REQUIRED top-level fields are taskId, verdict (pass/revise/blocked), summary and findings (explicit [] for pass); do not nest them inside result. Increment create/update requires explicit analysisIds ([] for an actual static slice). Reviews report real checks/images/findings; blocked tasks keep dependants waiting.',
   {action:{type:'string',enum:['create','list','complete','retry','dependencies','update']},taskId:text(40),offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:60},title:text(180),instructions:text(15000),assignee:text(40),kind:{type:'string',enum:taskKinds},dependsOn:strings,writeScopes:strings,readScopes:strings,externalReadScopes:{...strings,description:"Absolute external environment read leases; scheduling metadata only, not a permission grant."},externalWriteScopes:{...strings,description:"Absolute external environment write leases; outside-workspace Native write/edit remain disallowed."},resources:{...strings,description:'Exclusive resource names. Omit for conservative project-runtime locking on edit/verify tasks; [] only for isolated work. Literal workspace read/write paths may end in /**.'},priority:{type:'integer',minimum:-100,maximum:100},reason:{...text(1000),description:"Optional audit rationale for update. If omitted, an exact description is derived from changed fields."},codePlan:codePlanInput,scope:{type:'string',enum:['increment','full']},reviewFocus:{type:'string',enum:['visual','source'],description:'Lead-assigned source only for static/native/ABI source reviews: kind review, scope increment, analysisIds []. No visual/full-goal waiver.'},analysisIds:strings,
    verdict:{type:'string',enum:['pass','revise','blocked']},summary:text(4000),findings:{...strings,description:'ALL actionable required fixes, missing functionality, visual mismatches, untested required coverage or blockers of the assigned slice (full-scope reviews: of the whole goal). For pass use []. Neutral/positive evidence belongs in observations, never hide an unresolved obligation there.'},minorFindings:{...strings,items:text(1600),description:'Optional cosmetic polish that breaks no requirement. Saved as non-blocking backlog and allowed with pass. Never put a broken requirement, missing function, crash, data loss, security, accessibility or layout-breaking defect here.'},followUps:{...strings,items:text(1600),description:'Remaining wider-goal work outside this work/increment slice. Saved as mandatory goal issues for Lead; does not fail the slice. Full-scope reviews treat these as findings.'},observations:{...strings,items:text(1600),description:'Non-actionable facts, positive inspections or corrected tool-debug notes. These are saved evidence notes, not repair obligations or acceptance proof. Every unresolved required defect, coverage gap and blocker MUST still be in findings.'},scopeReviewed:{type:'boolean',description:'Independently compared the entire human goal and feature inventory against implementation; accepting the recent repair alone is insufficient.'},coveredRequirements:{...strings,maxItems:1000},addressedIssues:{...strings,maxItems:1000},inventory:{type:'array',maxItems:100,items:{...object({feature:text(500),evidence:text(1500),status:{type:'string',enum:['confirmed','unknown']},requirementIds:strings}),required:['feature','evidence','status','requirementIds']}},checks:{...strings,description:'ONLY exact verbatim foreground command strings, e.g. node test.mjs. No commentary, prefixes, read tools or annotations.'},images:{...strings,maxItems:1000},analysisReports:{...strings,description:'Only successful CURRENT reports by another capture agent; these may contribute to current analysis acceptance after independent review.'},historicalAnalysisReports:{...strings,description:'Source-only increment review of recorded successful reports from an older revision/plan by another capture agent. Requires adapterReviewed:true. Preserves exact original provenance; NEVER current runtime/visual/full-goal acceptance.'},simple:{type:'boolean'},scopePreserved:{type:'boolean'},adapterReviewed:{type:'boolean'},visualReview:{...object({manualCoverage:text(2000),checked:{type:'array',items:{type:'string',enum:VISUAL_CHECKS},maxItems:7},assessments:{type:'array',maxItems:1000,items:{...object({warningId:text(60),imageId:text(150),disposition:{type:'string',enum:['intentional','defect','outside-scope']},reason:text(1000)}),required:['warningId','imageId','disposition','reason']}}}),required:['checked','assessments']}},['action'],async(args,exec)=>{
-   const {member,entry,name}=await current(exec);
+   const {member,entry,name}=await current(exec,args.action!=='list');
+   if(!entry)return noRun(exec);
    if(!['create','list','complete','retry','dependencies','update'].includes(args.action))throw new Error(`Unknown gvs_task action ${JSON.stringify(args.action)}. Use create, list, complete, retry, dependencies or update. To message a teammate or Lead use gvs_agent action:message; nothing was changed.`);
    if(member.role!=='lead'&&['create','update','retry','dependencies'].includes(args.action)){
     const own=entry.run.tasks.find(t=>t.assignee===name&&t.state==='running');
@@ -449,6 +504,9 @@ ${rolePolicy(member.run,member.role)}`:'';}});
     if(task.state==='done')return {status:'already-completed',updated:false,task:taskSummaries([task],true)[0],next:'No changes were applied to the completed task. Preserve its result; create a linked follow-up for actual remaining work.'};
     if(!['waiting','running','blocked'].includes(task.state))throw new Error('Update only an outstanding task.');
     const access=parallelFields(args,entry.io.cwd),reassign=args.assignee&&args.assignee!==task.assignee;
+    // A running task never loses read access mid-flight: narrower readScopes are merged, not rejected.
+    if(task.state==='running'){for(const key of ['readScopes','externalReadScopes'])if(access[key])access[key]=[...new Set([...(task[key]??[]),...access[key]])];}
+    {const permitted=permittedWriteScopes(roleOf(entry,reassign?args.assignee:task.assignee),task.kind,access.writeScopes);if(permitted.dropped.length){access.writeScopes=permitted.scopes;access.scopeNotices=[...(access.scopeNotices??[]),...permitted.dropped.map(scope=>({path:scope,kind:'write-dropped',note:'This role and task kind cannot write product files; the scope was dropped.'}))];}}
     if(reassign){
      const role=roleOf(entry,args.assignee);
      if(!role?.sessionId||role.retired||['review','game-review'].includes(task.kind)&&role.capability!=='verify'||task.kind==='discovery'&&!['read','verify'].includes(role.capability)||task.kind==='design-review'&&role.capability==='edit'||['user-review','brief','consultation'].includes(task.kind)&&role.name!=='user')throw new Error('Reassign to a registered, suitable independent role; User decisions stay with user.');
@@ -692,7 +750,8 @@ ${rolePolicy(member.run,member.role)}`:'';}});
  }
  register('gvs_goal','Track the full REAL human goal. User appends immutable requirements covering actual sourceIds; Lead links each requirement/issue to implementation and independent rechecks. Open requirements, unmapped discovery and unresolved findings prevent finish. Never waive scope through simulated User decisions.',
   {action:{type:'string',enum:['status','plan','link','handoff']},offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:40},requirements:{type:'array',maxItems:100,items:goalRequirement},assessedMessages:strings,expertise:{type:'array',maxItems:32,items:expertise},staffingRationale:text(1500),discoveryRequired:{type:'boolean'},id:text(60),issueId:text(60),roleNeedId:text(60),requestId:text(60),agentName:text(40),taskId:text(40),workTasks:strings,reviewTasks:strings,links:{type:'array',minItems:1,maxItems:100,items:object({id:text(60),issueId:text(60),workTasks:strings,reviewTasks:strings,roleNeedId:text(60),requestId:text(60),agentName:text(40),taskId:text(40)})},reason:text(2000),evidence:text(4000),dependency:{type:'string',enum:['credentials','permission','unavailable-service','missing-source','human-decision']}},['action'],async(args,exec)=>{
-   const {member,entry,name}=await current(exec);
+   const {member,entry,name}=await current(exec,args.action!=='status');
+   if(!entry)return noRun(exec);
    if(args.action==='status')return goalPage(entry.run,args);
    if(args.action==='plan'){
     const own=entry.run.tasks.find(task=>task.assignee===name&&task.state==='running');

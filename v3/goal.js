@@ -14,10 +14,12 @@ export function syncGoal(run,messages){
  }
  return goal;
 }
-export function planGoal(run,{requirements,assessedMessages,expertise,staffingRationale,discoveryRequired}){
+export function planGoal(run,{requirements,assessedMessages,expertise,staffingRationale,discoveryRequired,reason}){
  const goal=run.goal;
+ // A later message that adds no requirement (logistics, access timing, thanks) is assessed with a reason.
+ const noteOnly=!requirements?.length&&!!assessedMessages?.length&&!!reason?.trim()&&goal.requirements.length>0;
  // An expertise-only update keeps the existing requirements; assessed messages must still be covered by them.
- if(!requirements?.length&&!(Array.isArray(expertise)&&goal.requirements.length))throw new Error('Record concrete requirements from the real human messages.');
+ if(!requirements?.length&&!(Array.isArray(expertise)&&goal.requirements.length)&&!noteOnly)throw new Error('Record concrete requirements from the real human messages.');
  if(requirements!==undefined&&!Array.isArray(requirements))throw new Error('requirements must be an array.');
  const proposed=structuredClone(goal.requirements),ids=new Set(goal.messages.map(item=>item.id));
  for(const [index,item] of (requirements??[]).entries()){
@@ -33,7 +35,10 @@ export function planGoal(run,{requirements,assessedMessages,expertise,staffingRa
   if(previous)previous.sourceIds=[...new Set([...previous.sourceIds,...item.sourceIds])];
   if(!previous)proposed.push({...item,workTasks:[],reviewTasks:[]});
  }
- if((assessedMessages??[]).some(id=>!ids.has(id)||!proposed.some(req=>req.sourceIds.includes(id))))throw new Error('Every assessed human message must be covered by a requirement.');
+ const uncovered=(assessedMessages??[]).filter(id=>!ids.has(id)||!proposed.some(req=>req.sourceIds.includes(id)));
+ if(uncovered.some(id=>!ids.has(id))||uncovered.length&&!reason?.trim())throw new Error('Every assessed human message must be covered by a requirement, or give a reason explaining why it adds none.');
+ // Staffing already assessed stays in force when an update omits it.
+ if(expertise===undefined&&staffingRationale===undefined&&goal.staffingRationale){expertise=[];staffingRationale=goal.staffingRationale;}
  if(!Array.isArray(expertise)||!staffingRationale?.trim())throw new Error('Assess needed expertise from the goal, risks and unknowns. Provide expertise (possibly []) and staffingRationale; the human does not select specialist roles.');
  const needs=structuredClone(goal.roleNeeds??[]);
  for(const item of expertise){
@@ -41,6 +46,7 @@ export function planGoal(run,{requirements,assessedMessages,expertise,staffingRa
   if(!needs.some(need=>need.id===item.id))needs.push({...item,agent:null,taskId:null});
  }
  goal.requirements=proposed;goal.assessed=[...new Set([...goal.assessed,...(assessedMessages??[])])];
+ if(uncovered.length)goal.messageNotes=[...(goal.messageNotes??[]),...uncovered.map(id=>({id,reason:String(reason).slice(0,1000)}))].slice(-100);
  goal.roleNeeds=needs;goal.staffingRationale=staffingRationale;goal.discoveryRequired ||= discoveryRequired===true;
  delete goal.handoff;
 }

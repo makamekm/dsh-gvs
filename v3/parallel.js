@@ -26,6 +26,12 @@ export function validateWriteScopes(role,scopes=[]){
  const writes=normalizeScopes(scopes);
  if(writes.length&&(role.capability!=='verify'||writes.some(scope=>!reportRoots.some(root=>scope.startsWith(root+'/'))&&!generatedOutput(scope))))throw new Error(`Verify writeScopes may contain only specific report/evidence paths (${reportRoots.map(root=>root+'/...').join(', ')}) and generated build/cache outputs (${outputRoots.join(', ')}, Cargo target or target-* in any crate). Product source, scripts and whole-workspace writes require an edit role.`);
 }
+// A review, brief or consultation never needs product writes: disallowed write scopes are dropped, not fatal.
+export function permittedWriteScopes(role,kind,scopes){
+ if(!scopes?.length||role?.capability==='edit'||kind==='work')return {scopes,dropped:[]};
+ const allowed=scope=>role?.capability==='verify'&&(reportRoots.some(root=>scope.startsWith(root+'/'))||generatedOutput(scope));
+ return {scopes:scopes.filter(allowed),dropped:scopes.filter(scope=>!allowed(scope))};
+}
 export function evidencePath(target,cwd){
  const relative=path.relative(cwd,path.resolve(cwd,target)).replaceAll('\\','/').toLowerCase();
  return reportRoots.some(root=>relative.startsWith(root+'/'));
