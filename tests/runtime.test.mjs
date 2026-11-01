@@ -1038,3 +1038,12 @@ test('a running task may release part of its exclusive lease but not take more',
  assert.equal(released.updated,true);assert.deepEqual(released.task.resources,[]);assert.match(released.update.reason,/Released from this running task/);
  assert.ok(f.sent.some(message=>message.target==='driver'&&/Released from this running task/.test(JSON.stringify(message.content))));
 });
+
+test('reading a missing module file falls back to its mod.rs',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Module read',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'editor',title:'Editor',purpose:'Edits',capability:'edit'});
+ const actor=f.actor('editor'),calls=[],list=f.ctx.fs.listDir;actor.ctx.tools={execute:async request=>{calls.push(request);return {isError:false,value:{},content:[{type:'text',text:'ok'}]};}};
+ f.ctx.fs.listDir=async target=>target.file===path.join(f.cwd,'src','fences')?[{name:'lay.rs',type:'file'},{name:'mod.rs',type:'file'}]:list(target);
+ const result=await f.hooks['tools/execute']({agent:actor,name:'read',arguments:{file_path:'src/fences.rs',offset:60,limit:110},callId:randomUUID(),signal:new AbortController().signal},async()=>({isError:true,content:[{type:'text',text:'Error: cannot read "src/fences.rs": not found'}]}));
+ assert.equal(result.isError,false);assert.equal(calls.at(-1).arguments.file_path,path.join('src','fences','mod.rs'));assert.equal('offset' in calls.at(-1).arguments,false);
+});

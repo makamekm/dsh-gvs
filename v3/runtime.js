@@ -422,6 +422,15 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   const noted=(retried,text)=>retried&&!retried.isError?{...retried,additionalContexts:[...(retried.additionalContexts??[]),{id:randomUUID(),role:'user',source:{kind:'gvs-tool-recovery',form:'notice',summary:'GVS corrected the tool call'},content:[{type:'text',text:`GVS CORRECTED ${exec.name}: ${text}`}]}]}:null;
   try{
    const range=exec.name==='read'&&message.match(/offset (\d+) is out of range for .*\((\d+) lines?\)/);
+   // Rust/JS/Python module layouts: src/fences.rs is often src/fences/mod.rs (index.ts, __init__.py).
+   if(exec.name==='read'&&typeof args.file_path==='string'&&/not found|ENOENT|cannot find/i.test(message)){
+    const cwd=(await storage(member.root,exec.signal)).cwd,target=path.resolve(cwd,args.file_path),stem=target.replace(/\.[^./\\]+$/,'');
+    if(stem!==target){
+     const rows=await ctx.fs.listDir(await ctx.fs.resolve(stem,{cwd,signal:exec.signal}),exec.signal).catch(()=>[]);
+     const entry=rows.find(row=>/^(?:mod\.rs|index\.(?:ts|tsx|js|mjs)|__init__\.py)$/.test(row.name));
+     if(entry){const file=path.relative(cwd,path.join(stem,entry.name)),{offset:_offset,...rest}=args;return noted(await run('read',{...rest,file_path:file}),`${args.file_path} does not exist; its module file ${file} is shown instead (from its start).`);}
+    }
+   }
    if(range&&Number(range[2])>0){const lines=Number(range[2]),offset=Math.max(1,lines-Math.min(Number(args.limit)||120,120)+1);return noted(await run('read',{...args,offset}),`offset ${range[1]} is past the end of ${args.file_path} (${lines} lines); its last lines from offset ${offset} are shown instead.`);}
    if(['grep','glob'].includes(exec.name)&&typeof args.path==='string'&&/cannot find the (?:file|path) specified|ENOENT|No such file or directory/i.test(message)){
     const cwd=(await storage(member.root,exec.signal)).cwd,target=path.resolve(cwd,args.path),parent=path.dirname(target),base=path.basename(target).toLowerCase();
