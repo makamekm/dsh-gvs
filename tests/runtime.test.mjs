@@ -967,10 +967,11 @@ test('two teams in one folder queue conflicting work across teams and the lead h
  assert.equal(workA.task.state,'running');
  const startB=await b.call('gvs_run',{task:'House work',kind:'code'});await b.complete(startB.briefTaskId,b.actor('user'));
  await b.call('gvs_agent',{action:'create',name:'houses',title:'Houses',purpose:'Houses',capability:'edit'});
- const workB=await b.call('gvs_task',{action:'create',title:'House build',instructions:'Edit and build',kind:'work',assignee:'houses',readScopes:['src/houses'],writeScopes:['src/houses','target'],resources:['project-runtime']});
+ const workB=await b.call('gvs_task',{action:'create',title:'House build',instructions:'Edit and build',kind:'work',assignee:'houses',readScopes:['src/houses'],writeScopes:['src/houses','src/water/shared.rs','target'],resources:['project-runtime']});
  assert.equal(workB.task.state,'waiting','the other team holds the build target and project runtime');
  const saved=()=>JSON.parse([...b.files.entries()].find(([key])=>key.endsWith(`team-${b.root.id}.json`))[1]);
- assert.deepEqual(saved().tasks.find(task=>task.id===workB.task.id).otherTeamWait.resources,['project-runtime']);
+ assert.deepEqual(saved().tasks.find(task=>task.id===workB.task.id).otherTeamWait.files,['src/water/shared.rs']);
+ await b.call('gvs_agent',{action:'create',name:'docs',title:'Docs',purpose:'Docs',capability:'edit'});const build=await b.call('gvs_task',{action:'create',title:'Docs build',instructions:'Build',kind:'work',assignee:'docs',readScopes:['docs'],writeScopes:['docs','target'],resources:['project-runtime']});assert.equal(build.task.state,'running','Cargo output and project-runtime do not queue across teams without a shared server');await b.call('gvs_task',{action:'complete',taskId:build.task.id,verdict:'pass',summary:'Built',findings:[]},b.actor('docs'));
  const notice=await b.hooks['tools/execute']({agent:b.root,name:'gvs_status',arguments:{},callId:randomUUID(),signal:new AbortController().signal},async()=>({isError:false,value:{},content:[]}));
  assert.match(notice.additionalContexts.at(-1).content[0].text,/queues conflicting work across both teams/);
  const again=await b.hooks['tools/execute']({agent:b.root,name:'gvs_status',arguments:{},callId:randomUUID(),signal:new AbortController().signal},async()=>({isError:false,value:{},content:[]}));

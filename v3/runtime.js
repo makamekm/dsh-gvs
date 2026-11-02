@@ -233,10 +233,18 @@ ${rolePolicy(member.run,member.role)}`:'';}});
  const neighbours=entry=>[...entries.values()].filter(other=>other!==entry&&other.run.status==='running'&&!other.suspending&&other.io?.cwd&&entry.io?.cwd&&path.resolve(other.io.cwd).toLowerCase()===path.resolve(entry.io.cwd).toLowerCase());
  // A running task of another team in the same folder holds its files and resources too, so builds, tests and
  // edits queue across teams the same way they queue inside one team, without a manual cross-session handshake.
+ // Across teams Cargo build output never conflicts (Cargo locks its target directory itself, and native QA runs a copied
+ // executable), and project-runtime only conflicts when the project has a shared server; the desktop stays exclusive.
+ const sharedServer=run=>(run.qaTarget?.surfaces??[]).some(surface=>['web','service','bot-service'].includes(surface));
+ function teamConflict(entry,access,other,item){
+  const conflict=accessConflict(access,taskAccess(other.run,item),{writesOnly:true});if(!conflict)return null;
+  const files=conflict.files.filter(file=>!/(^|\/)target(-[\w-]+)?(\/|$)/.test(file)),resources=conflict.resources.filter(name=>name!=='project-runtime'||sharedServer(entry.run)||sharedServer(other.run));
+  return files.length||resources.length?{files,resources}:null;
+ }
  function crossTeamConflict(entry,task){
   const access=taskAccess(entry.run,task);
   for(const other of neighbours(entry))for(const running of other.run.tasks.filter(item=>item.state==='running')){
-   const conflict=accessConflict(access,taskAccess(other.run,running),{writesOnly:true});
+   const conflict=teamConflict(entry,access,other,running);
    if(conflict)return {sessionId:other.run.sessionId,taskId:running.id,assignee:running.assignee,files:conflict.files.slice(0,8),resources:conflict.resources};
   }
   // Fairness: yield to a conflicting task of another team that has waited on teams longer, otherwise the team whose
@@ -245,7 +253,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   // Only a senior task that its own team could start now: one waiting on its dependencies or own agents must not hold
   // anything, or every team ends up yielding to stale waits and nothing runs.
   for(const other of neighbours(entry))for(const waiting of other.run.tasks.filter(item=>item.state==='waiting'&&item.otherTeamWait&&item.crossWaitSince&&senior(other,item)&&!parallelBlocker(other.run,item,other.run.parallelLimit??maxParallel))){
-   const conflict=accessConflict(access,taskAccess(other.run,waiting),{writesOnly:true});
+   const conflict=teamConflict(entry,access,other,waiting);
    if(conflict)return {sessionId:other.run.sessionId,taskId:waiting.id,assignee:waiting.assignee,yieldTo:true,files:conflict.files.slice(0,8),resources:conflict.resources};
   }
   return null;
@@ -507,7 +515,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   }
   return found;
  }
- const TEAMS_NOTE='Another GVS team is working in this folder. GVS queues conflicting work across both teams automatically: a task whose files or resources (project-runtime, the build target, interactive-desktop) overlap a running task of the other team waits until that task ends. Keep writeScopes disjoint. Every editing task must leave the shared code compiling: give it project-runtime and the build-output scope so it runs the project check (for example cargo check) before completing; a source-only checkpoint that does not compile blocks every team’s build and tests. Give build/test/launch tasks their real resources and target scope, close any game or app process a task launched when its check ends (a running executable locks the build output for every team). Hold project-runtime only for builds and tests, which are short; a long native QA or playtest copies the built executable into its own artifacts folder, runs that copy and holds only interactive-desktop plus its artifacts, so builds of every team continue meanwhile, and do not forbid builds or wait for a manual handshake with the other session. Never message another session through the Harness RPC or shared notes: its text would land in that team’s human goal. Re-read files before editing, since the other team may have changed them.';
+ const TEAMS_NOTE='Another GVS team is working in this folder. GVS queues conflicting work across both teams automatically: a task whose files or resources (project-runtime, the build target, interactive-desktop) overlap a running task of the other team waits until that task ends. Keep writeScopes disjoint. Every editing task must leave the shared code compiling: give it project-runtime and the build-output scope so it runs the project check (for example cargo check) before completing; a source-only checkpoint that does not compile blocks every team’s build and tests. Give build/test/launch tasks their real resources and target scope, close any game or app process a task launched when its check ends (a running executable locks the build output for every team). Cargo build output and builds need no cross-team lease (Cargo locks its target itself); hold project-runtime only to run the product against shared state; a long native QA or playtest copies the built executable into its own artifacts folder, runs that copy and holds only interactive-desktop plus its artifacts, so builds of every team continue meanwhile, and do not forbid builds or wait for a manual handshake with the other session. Never message another session through the Harness RPC or shared notes: its text would land in that team’s human goal. Re-read files before editing, since the other team may have changed them.';
  async function noRun(exec){
   const {root}=await current(exec,false),teams=await otherTeams(await storage(root,exec.signal),root.id,exec.signal);
   return {status:'no-run',tasks:[],...(teams.length?{otherTeams:teams,note:TEAMS_NOTE}:{}),next:'No GVS run exists in this session yet. Call gvs_run with the task and kind to start one; nothing else is needed first.'};
@@ -607,7 +615,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
     validateWriteScopes(roleOf(entry,reassign?args.assignee:task.assignee),access.writeScopes??task.writeScopes);
     const leaseChange=task.state==='running'&&runningAccessChange(entry.run,task,{...scope,...access,...(reassign?{assignee:args.assignee}:{})});
     // Another team's running task in this folder holds its writes and resources too.
-    const otherLease=!leaseChange&&task.state==='running'&&(()=>{const access2=taskAccess(entry.run,{...task,...scope,...access});for(const other of neighbours(entry))for(const running of other.run.tasks.filter(item=>item.state==='running')){const conflict=accessConflict(access2,taskAccess(other.run,running),{writesOnly:true});if(conflict&&(conflict.files.some(file=>!taskAccess(entry.run,task).writes.includes(file))||conflict.resources.some(name=>!taskAccess(entry.run,task).resources.includes(name))))return {kind:'other-team',sessionId:other.run.sessionId,taskId:running.id,...conflict};}return null;})();
+    const otherLease=!leaseChange&&task.state==='running'&&(()=>{const access2=taskAccess(entry.run,{...task,...scope,...access});for(const other of neighbours(entry))for(const running of other.run.tasks.filter(item=>item.state==='running')){const conflict=teamConflict(entry,access2,other,running);if(conflict&&(conflict.files.some(file=>!taskAccess(entry.run,task).writes.includes(file))||conflict.resources.some(name=>!taskAccess(entry.run,task).resources.includes(name))))return {kind:'other-team',sessionId:other.run.sessionId,taskId:running.id,...conflict};}return null;})();
     if(otherLease)throw new Error(`The added lease of running ${task.id} is held by another GVS team in this folder: ${JSON.stringify(otherLease)}. Nothing changed; queue a follow-up task for that part instead.`);
     if(leaseChange)throw new Error(`Do not change the owner/exclusive lease or shrink read access of a running task. Read-only expansion is allowed only without active write/resource conflicts. ${JSON.stringify(leaseChange)}. Preserve this slice; queue a scoped follow-up for conflicting changes.`);
     const plan=args.codePlan?await codePlan(entry,{...task,...scope,...access,...(reassign?{assignee:args.assignee}:{})},args.codePlan):null;
