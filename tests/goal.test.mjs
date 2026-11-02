@@ -96,10 +96,10 @@ test('User can add expertise needs without restating requirements, but a first p
  const fresh={revision:1,tasks:[]};syncGoal(fresh,[{id:'human',text:'Do it'}]);
  assert.throws(()=>planGoal(fresh,{expertise:[],staffingRationale:'none'}),/Record concrete requirements/);
 });
-test('link errors name the exact unknown ID or misfiled review task',()=>{
+test('link errors name the exact unknown ID and a misfiled work task is linked as work',()=>{
  const r=run();r.tasks.push(done('task-1','dev'));
  assert.throws(()=>linkGoal(r,{id:'featur',workTasks:['task-1']}),/Unknown requirement "featur"/);
- assert.throws(()=>linkGoal(r,{id:'feature',reviewTasks:['task-1']}),/task-1 is kind work/);
+ const linked=linkGoal(r,{id:'feature',reviewTasks:['task-1']});assert.ok(linked.workTasks.includes('task-1'),'a work task listed as review is linked as work');assert.ok(!linked.reviewTasks.includes('task-1'));
 });
 
 test('a later message without a new requirement is assessed with a reason, and omitted staffing keeps the existing assessment',()=>{

@@ -87,7 +87,10 @@ export function linkGoal(run,{id,issueId,workTasks,reviewTasks,roleNeedId,reques
  const item=issueId?run.goal.issues.find(item=>item.id===issueId):run.goal.requirements.find(item=>item.id===id);
  if(!item)throw new Error(`Unknown ${issueId?'issue':'requirement'} ${JSON.stringify(issueId??id)}. Read gvs_goal status and copy the exact existing ID; no changes applied.`);
  for(const taskId of [...(workTasks??[]),...(reviewTasks??[])])if(!run.tasks.some(task=>task.id===taskId))throw new Error(`Unknown task ${taskId}`);
- for(const taskId of reviewTasks??[]){const kind=run.tasks.find(task=>task.id===taskId).kind;if(!['review','design-review','game-review','user-review'].includes(kind))throw new Error(`Review links must name independent review tasks: ${taskId} is kind ${kind}. Put work/discovery tasks in workTasks; no changes applied.`);}
+ // A work/discovery task listed under reviewTasks is linked as work instead of failing the whole batch.
+ const reviewKind=taskId=>['review','design-review','game-review','user-review'].includes(run.tasks.find(task=>task.id===taskId).kind);
+ const misplaced=(reviewTasks??[]).filter(taskId=>!reviewKind(taskId));
+ if(misplaced.length){workTasks=[...new Set([...(workTasks??item.workTasks),...misplaced])];reviewTasks=reviewTasks.filter(reviewKind);if(!reviewTasks.length)reviewTasks=undefined;}
  if(workTasks)item.workTasks=[...new Set(workTasks)];
  // Explicitly replace superseded review attempts; findings remain durable issues.
  if(reviewTasks)item.reviewTasks=[...new Set(reviewTasks)];
