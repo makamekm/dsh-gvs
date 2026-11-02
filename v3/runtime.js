@@ -63,6 +63,7 @@ function reviewPlan(run,input){
 export function apply(ctx,config={}){
  const owned=new Set();
  const checkedPlanSources=new WeakMap();
+ const slotCommands=new WeakMap();
  const planSourceFailures=new WeakMap();
  const planCheckCommands=new WeakMap();
  const maxParallel=config.maxParallel??4,maxTasks=!config.goalProtocol&&[64,160].includes(config.maxTasks)?10000:config.maxTasks??10000;
@@ -417,6 +418,17 @@ ${rolePolicy(member.run,member.role)}`:'';}});
  ctx.on('tools/execute',async(exec,next)=>{
   // Native tools validate strictly; repair a teammate's unambiguous JSON-text/alias mismatches first.
   if(exec.agent&&!exec.name.startsWith('gvs_')&&ctx.agentTeams.tryMembership?.(exec.agent)){const fixed=coerceArgs(exec.arguments,ctx.tools.get?.(exec.name,exec.agent)?.parameters);if(fixed!==exec.arguments)exec.arguments=fixed;}
+  // Cargo lets one build at a time use a target directory, so parallel teammates queue on its lock. In a Cargo project
+  // each teammate's cargo commands build in one of a few slots (chosen by role), unless the command picks its own.
+  const slotMember=['pwsh','bash'].includes(exec.name)&&ctx.agentTeams.tryMembership?.(exec.agent),slotEntry=slotMember&&slotMember.role!=='lead'&&entries.get(slotMember.root.id);
+  const command=String(exec.arguments?.command??'');
+  if(slotEntry&&slotEntry.run.cargo===true&&/\bcargo(?:\.exe)?\s+(?:\+\S+\s+)?(?:build|check|test|run|clippy|nextest|b|c|t|r)\b/.test(command)&&!/CARGO_TARGET_DIR|--target-dir/.test(command)){
+   const slots=config.cargoSlots??['target','target-gvs-2','target-gvs-3'],name=slotMember.name,slot=slots[[...name].reduce((sum,char)=>sum+char.charCodeAt(0),0)%slots.length];
+   const dir=path.join(slotEntry.io.cwd,slot).replaceAll('\\','/');
+   slotCommands.set(exec,command);exec.arguments={...exec.arguments,command:exec.name==='pwsh'?`$env:CARGO_TARGET_DIR='${dir}'; ${command}`:`export CARGO_TARGET_DIR='${dir}'; ${command}`};
+   const task=slotEntry.run.tasks.find(item=>item.assignee===name&&item.state==='running');
+   if(task&&task.cargoSlotNoted!==dir){task.cargoSlotNoted=dir;exec.gvsCargoSlot=dir;}
+  }
   // An edit whose old_string equals new_string changes nothing; when the text is present, report that instead of failing.
   const same=exec.name==='edit'&&exec.arguments?.old_string&&exec.arguments.old_string===exec.arguments.new_string&&ctx.agentTeams.tryMembership?.(exec.agent);
   if(same){
@@ -426,6 +438,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
    }catch{}
   }
   let result=await next();
+  if(exec.gvsCargoSlot)result={...result,additionalContexts:[...(result.additionalContexts??[]),{id:randomUUID(),role:'user',source:{kind:'gvs-cargo-slot',form:'notice',summary:'Cargo build slot'},content:[{type:'text',text:`GVS CARGO SLOT: your cargo commands build into ${exec.gvsCargoSlot} so parallel teammates do not wait on one target lock. Your built game is ${exec.gvsCargoSlot}/debug/<binary>.exe — pass that path to game_launch. Recorded checks keep your original command text.`}]}]};
   const member=exec.agent&&ctx.agentTeams.tryMembership(exec.agent),entry=member&&entries.get(member.root.id);
   if(member&&result?.isError)result=await repairNativeFailure(exec,member,result)??result;
   // Tell each Lead once per process about other teams in its folder and how work is queued between them.
@@ -512,7 +525,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   }
   if(!['pwsh','bash'].includes(exec.name))return;
   const value=result.value;
-  const check={callId:exec.callId??null,taskId:task?.id??null,at:Date.now(),agent:member.name,command:clip(exec.arguments?.command,5000),exitCode:value?.exitCode??null,
+  const check={callId:exec.callId??null,taskId:task?.id??null,at:Date.now(),agent:member.name,command:clip(slotCommands.get(exec)??exec.arguments?.command,5000),exitCode:value?.exitCode??null,
    finished:value?.kind==='foreground'&&value?.signal==null&&!value?.timedOut&&!value?.aborted,error:result.isError,
    output:clip([value?.stdout?.text,value?.stderr?.text].filter(Boolean).join('\n')||result.content?.filter(part=>part.type==='text').map(part=>part.text).join('\n'),12000),...(checkedPlanSources.has(exec)?{codePlanSources:checkedPlanSources.get(exec)}:{})};
   entry.run.checks.push(check);
@@ -882,7 +895,11 @@ ${rolePolicy(member.run,member.role)}`:'';}});
    if(args.action==='plan'){
     const own=entry.run.tasks.find(task=>task.assignee===name&&task.state==='running');
     if(name!=='user'||!own||!['brief','consultation'].includes(own.kind))throw new Error('Only the central User in an assigned brief/consultation may assess the full human contract.');
+    const known=new Set(entry.run.goal.requirements.map(item=>item.id));
     planGoal(entry.run,args);
+    // A new human request must start now, not wait behind the backlog of review findings.
+    const added=entry.run.goal.requirements.filter(item=>!known.has(item.id));
+    if(added.length&&known.size)void ctx.agentTeams.sendMessage(entry.root,{target:'lead',content:[{type:'text',text:`GVS NEW HUMAN REQUESTS: the human just asked for new work, recorded as ${added.length} requirement(s): ${JSON.stringify(added.map(item=>({id:item.id,criterion:clip(item.criterion,300)})))}. Plan and start them NOW with priority above older backlog and review findings (gvs_task create … priority:90), split into small slices that build and verify themselves, and link them. Do not leave them queued behind the existing issue backlog.`}]}).catch(()=>{});
    }else{
     lead(member);
     if(args.action==='link'){

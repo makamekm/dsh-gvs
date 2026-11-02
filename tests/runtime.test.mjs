@@ -1111,3 +1111,20 @@ test('with the game MCP server the desktop is not an exclusive resource',async()
  const two=await f.call('gvs_task',{action:'create',title:'Check B',instructions:'Play',kind:'review',scope:'increment',analysisIds:[],assignee:'qa2',readScopes:['src/b.rs'],writeScopes:['artifacts/b'],resources:['interactive-desktop']});
  assert.equal(one.task.state,'running');assert.equal(two.task.state,'running','two MCP-driven checks run at once');
 });
+
+test('teammate cargo commands build in a per-role slot and checks keep the original command',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Slots',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'editor',title:'Editor',purpose:'Edits',capability:'edit'});
+ const work=await f.call('gvs_task',{action:'create',title:'Work',instructions:'Build',kind:'work',assignee:'editor',readScopes:['src'],writeScopes:['src'],resources:[]});
+ const actor=f.actor('editor');let seen;
+ const exec={agent:actor,name:'pwsh',arguments:{command:'cargo build --bin bastion'},callId:randomUUID(),signal:new AbortController().signal};
+ const result=await f.hooks['tools/execute'](exec,async()=>{seen=exec.arguments.command;return {isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'ok'}},content:[]};});
+ assert.match(seen,/^\$env:CARGO_TARGET_DIR='.+\/target(-gvs-\d)?'; cargo build --bin bastion$/);
+ assert.match(result.additionalContexts.at(-1).content[0].text,/GVS CARGO SLOT/);
+ f.hooks['tools/result'](exec,{isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'ok'}},content:[]});await f.call('gvs_pause');
+ const saved=JSON.parse([...f.files.entries()].find(([key])=>key.endsWith(`team-${f.root.id}.json`))[1]);
+ assert.equal(saved.checks.at(-1)?.command??saved.checks.length,'cargo build --bin bastion','the recorded check keeps the command the agent wrote');
+ await f.call('gvs_resume');let untouched;const own={agent:actor,name:'pwsh',arguments:{command:'$env:CARGO_TARGET_DIR="x"; cargo test'},callId:randomUUID(),signal:new AbortController().signal};
+ await f.hooks['tools/execute'](own,async()=>{untouched=own.arguments.command;return {isError:false,value:{},content:[]};});assert.equal(untouched,'$env:CARGO_TARGET_DIR="x"; cargo test');
+ void work;
+});
