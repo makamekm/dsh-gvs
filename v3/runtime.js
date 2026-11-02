@@ -345,6 +345,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
  ctx.on('tools/pre-execute',async(exec,next)=>{
   if(!exec.agent)return next();const membership=ctx.agentTeams.tryMembership(exec.agent);if(!membership)return next();
   // Agents once drove the Harness RPC to post into another team's session, where the text became a "human" requirement.
+  if(exec.name==='write'&&typeof exec.arguments?.content==='string'){const destructive=await destructiveWrite(membership,exec);if(destructive)return {kind:'deny',reason:destructive};}
   if(['read','grep','glob'].includes(exec.name)&&/(?:^|[\\/])(?:status\.json|verification-cookie[^\\/]*)$/i.test(String(exec.arguments?.file_path??exec.arguments?.path??''))&&/[\\/]work[\\/]/i.test(String(exec.arguments?.file_path??exec.arguments?.path??'')))return {kind:'deny',reason:'Harness launch and cookie files are not project inputs; GVS agents do not read them.'};
   if(['pwsh','bash'].includes(exec.name)&&HARNESS_CONTROL.test(String(exec.arguments?.command??'')))return {kind:'deny',reason:'GVS agents do not drive DeepSeek Harness through its RPC or read its launch/cookie files: a prompt sent into another session becomes a fake human message in that team’s goal. GVS already queues conflicting work between teams in one folder (see the GVS TEAMS notice); continue with your own tasks.'};
   if(membership.role==='lead'){
@@ -417,6 +418,18 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   if(proofTask)contexts.push({id:randomUUID(),role:'user',source:{kind:'gvs-tool-recovery',form:'notice',summary:'Successful command lacks code-plan source evidence'},content:[{type:'text',text:`GVS CODE-PLAN EVIDENCE (${proofTask}): This foreground command finished successfully; its original exit status, output and effects are preserved. Source hashes could not be captured, so NO current code-plan check proof was recorded. Inspect gvs_diagnostics and ask Lead to correct the actual source paths/types or read failure; directories are not source files. Do not blindly rerun a side-effecting command to fix metadata. Keep the same task/lease and all remaining requirements. This notice does not pass any check or acceptance gate.`}]});
   return {...result,additionalContexts:contexts};
  });
+ // A model once replaced a 1688-line source file with the literal text PLACEHOLDER through write. A write that would
+ // turn an existing file into placeholder text or less than a quarter of its size is refused before anything is written.
+ async function destructiveWrite(member,exec){
+  const content=exec.arguments.content,target=String(exec.arguments.file_path??exec.arguments.path??'');
+  if(!target)return null;
+  const cwd=(await storage(member.root,exec.signal)).cwd,file=path.resolve(cwd,target);
+  let info;try{info=await ctx.fs.lstat(file,{cwd},exec.signal);}catch{return null;}
+  if(info?.type!=='file'||!(info.size>2048))return null;
+  const bytes=Buffer.byteLength(content),placeholder=/^\s*(?:placeholder|todo|tbd|\.{3}|…)\s*$/i.test(content)||/(?:rest of (?:the )?file|existing code|unchanged code|remaining code)[^\n]{0,40}(?:\.{3}|…|unchanged|here|omitted)/i.test(content);
+  if(!placeholder&&bytes>=info.size*0.25)return null;
+  return `write would replace ${target} (${info.size} bytes) with ${bytes} bytes${placeholder?' of placeholder text':''}. write replaces the WHOLE file: use edit for partial changes, or write the complete new contents. Nothing was written.`;
+ }
  // A native failure with an evident correction is retried once with it; the agent gets the real result plus
  // a note, so a guessed offset, a missing extension or a transient Windows file lock does not cost a step.
  const repairCalls=new Set();

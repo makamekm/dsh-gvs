@@ -1067,3 +1067,13 @@ test('a neighbour task waiting on its own dependencies never holds work of other
  assert.equal(x.task.state,'running','a neighbour waiting on its own dependency does not hold the shared file');
  await a.call('gvs_pause');await b.call('gvs_pause');
 });
+
+test('write cannot replace a large existing file with a placeholder or a fragment',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Guard writes',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ const lstat=f.ctx.fs.lstat;f.ctx.fs.lstat=async(target,...rest)=>String(target).endsWith('hud.rs')?{type:'file',size:68113}:lstat(target,...rest);
+ const pre=content=>f.hooks['tools/pre-execute']({agent:f.root,name:'write',arguments:{file_path:'src/editor/hud.rs',content},signal:new AbortController().signal},async()=>({kind:'allow'}));
+ assert.equal((await pre('PLACEHOLDER')).kind,'deny');
+ assert.equal((await pre('fn hud() {}\n// ... rest of file unchanged ...\n')).kind,'deny');
+ assert.equal((await pre('x'.repeat(60000))).kind,'allow','a complete rewrite of similar size is allowed');
+ assert.equal((await f.hooks['tools/pre-execute']({agent:f.root,name:'write',arguments:{file_path:'src/new.rs',content:'PLACEHOLDER'},signal:new AbortController().signal},async()=>({kind:'allow'}))).kind,'allow','small or new files are not guarded');
+});
