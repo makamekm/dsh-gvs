@@ -235,9 +235,14 @@ ${rolePolicy(member.run,member.role)}`:'';}});
  // A changed file (lowercase, forward slashes) leased for writing by another team in this folder and by none of this
  // team's tasks. Human edits and unleased changes are never foreign.
  const leases=(task,file)=>(task.writeScopes??[]).some(scope=>{const s=String(scope).replaceAll('\\','/').toLowerCase().replace(/\/+$/,'');return s==='*'||file===s||file.startsWith(s+'/');});
+ // Hot files are leased by every team over hours, so ownership follows who is changing the file now: a running task
+ // of this team, else a running task of another team, else the most recent lease; when unsure the change is ours.
  function foreignFile(entry,file){
-  if(entry.run.tasks.some(task=>leases(task,file)))return false;
-  return neighbours(entry).some(other=>other.run.tasks.some(task=>(task.state==='running'||task.state==='done'&&Date.now()-(task.startedAt??0)<3*3600000)&&leases(task,file)));
+  const others=neighbours(entry),recent=task=>task.state==='done'&&Date.now()-(task.startedAt??0)<3*3600000;
+  if(entry.run.tasks.some(task=>task.state==='running'&&leases(task,file)))return false;
+  if(others.some(other=>other.run.tasks.some(task=>task.state==='running'&&leases(task,file))))return true;
+  if(entry.run.tasks.some(task=>recent(task)&&leases(task,file)))return false;
+  return others.some(other=>other.run.tasks.some(task=>recent(task)&&leases(task,file)));
  }
  // Other running GVS teams of this DSH process in the same folder.
  const neighbours=entry=>[...entries.values()].filter(other=>other!==entry&&other.run.status==='running'&&!other.suspending&&other.io?.cwd&&entry.io?.cwd&&path.resolve(other.io.cwd).toLowerCase()===path.resolve(entry.io.cwd).toLowerCase());
