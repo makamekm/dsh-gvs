@@ -13,7 +13,7 @@ import {VISUAL_CHECKS,validateVisualReview,visualAuditStatus,visualStates,visual
 import {USER_TESTING,planUserJourneys,userJourneyStatus,scenarioKey,userProbeInput,interruptedByLegacyPlan} from './journeys.js';
 import {recordToolFailure,recordToolSuccess,toolIdentity,diagnosticStatus,toolFailureMessage,recoveryAdvice,checkFailureDetails} from './diagnostics.js';
 import {providerRecoveryCandidates,providerFailureFor,readFailedSelection,inheritSelection} from './models.js';
-import {parallelFields,parallelBlocker,parallelStatus,taskAccess,accessConflict,runningAccessChange,writeAllowed,validateWriteScopes,permittedWriteScopes,evidencePath} from './parallel.js';
+import {parallelFields,parallelBlocker,parallelStatus,taskAccess,accessConflict,cargoOutput,runningAccessChange,writeAllowed,validateWriteScopes,permittedWriteScopes,evidencePath} from './parallel.js';
 import {assignmentDelivery} from './delivery.js';
 import {prepareCodePlan,stalePlanFiles,planSources,needsCodePlan,missingPlanOutputs,migrateCodePlan,CodePlanSourceError,successfulPlanChecks} from './planning.js';
 import {taskArtifacts} from './artifacts.js';
@@ -133,6 +133,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
    entry.run.requireCoordinatorPlan=config.requireCoordinatorPlan===true;
    for(const task of entry.run.tasks){task.codePlan=migrateCodePlan(task.codePlan);task.planRequired=task.state!=='done'&&needsCodePlan(entry.run,task);}
    entry.run.parallelLimit??=maxParallel;
+   if(entry.run.cargo===undefined){try{entry.run.cargo=(await ctx.fs.lstat(path.join(entry.io.cwd,'Cargo.toml'),{cwd:entry.io.cwd},exec.signal))?.type==='file';}catch{entry.run.cargo=false;}}
    if(isInteractiveProject(entry.run)){
     if(config.responsiveTesting!==false)entry.run.responsivePolicy=1;
     entry.run.userTestingPolicy=1;
@@ -238,7 +239,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
  const sharedServer=run=>(run.qaTarget?.surfaces??[]).some(surface=>['web','service','bot-service'].includes(surface));
  function teamConflict(entry,access,other,item){
   const conflict=accessConflict(access,taskAccess(other.run,item),{writesOnly:true});if(!conflict)return null;
-  const files=conflict.files.filter(file=>!/(^|\/)target(-[\w-]+)?(\/|$)/.test(file)),resources=conflict.resources.filter(name=>name!=='project-runtime'||sharedServer(entry.run)||sharedServer(other.run));
+  const files=conflict.files.filter(file=>!(entry.run.cargo===true&&cargoOutput(file))),resources=conflict.resources.filter(name=>name!=='project-runtime'||sharedServer(entry.run)||sharedServer(other.run));
   return files.length||resources.length?{files,resources}:null;
  }
  function crossTeamConflict(entry,task){

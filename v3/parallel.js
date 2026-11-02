@@ -76,9 +76,13 @@ export function taskAccess(run,task){
  const externalWrites=task.externalWriteScopes??[],externalReads=[...new Set([...(task.externalReadScopes??[]),...externalWrites])];
  return {reads,writes,resources,...(externalReads.length||externalWrites.length?{externalReads,externalWrites}:{})};
 }
+// Cargo locks its target directory for each build, so two tasks may share Cargo build output; other build tools
+// (Maven also writes target/) get no such exemption. run.cargo is set when the project root has Cargo.toml.
+export const cargoOutput=file=>/(^|\/)target(-[\w-]+)?(\/|$)/.test(file);
 export function taskConflict(run,task,other){
  const conflict=accessConflict(taskAccess(run,task),taskAccess(run,other));
- return conflict?{taskId:other.id,assignee:other.assignee,...conflict}:null;
+ const files=conflict&&run.cargo===true?conflict.files.filter(file=>!cargoOutput(file)):conflict?.files;
+ return conflict&&(files.length||conflict.resources.length)?{taskId:other.id,assignee:other.assignee,...conflict,files}:null;
 }
 // Overlapping files/resources of two access contracts; also used across teams sharing one folder.
 // writesOnly (across teams): a broad read lease such as src would otherwise block every other team's edit for the

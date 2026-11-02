@@ -1081,3 +1081,15 @@ test('write cannot replace a large existing file with a placeholder or a fragmen
  assert.equal((await pre('x'.repeat(60000))).kind,'allow','a complete rewrite of similar size is allowed');
  assert.equal((await f.hooks['tools/pre-execute']({agent:f.root,name:'write',arguments:{file_path:'src/new.rs',content:'PLACEHOLDER'},signal:new AbortController().signal},async()=>({kind:'allow'}))).kind,'allow','small or new files are not guarded');
 });
+
+test('Cargo build output is shared between tasks only in Cargo projects',async()=>{
+ for(const cargo of [true,false]){
+  const f=fixture(),lstat=f.ctx.fs.lstat;if(!cargo)f.ctx.fs.lstat=async(target,...rest)=>String(target).endsWith('Cargo.toml')?(()=>{throw Object.assign(new Error('missing'),{code:'ENOENT'});})():lstat(target,...rest);
+  const start=await f.call('gvs_run',{task:'Builds',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+  await f.call('gvs_agent',{action:'create',name:'one',title:'One',purpose:'One',capability:'edit'});await f.call('gvs_agent',{action:'create',name:'two',title:'Two',purpose:'Two',capability:'edit'});
+  const first=await f.call('gvs_task',{action:'create',title:'First',instructions:'Edit and build',kind:'work',assignee:'one',readScopes:['src/a.rs'],writeScopes:['src/a.rs','target'],resources:[]});
+  const second=await f.call('gvs_task',{action:'create',title:'Second',instructions:'Edit and build',kind:'work',assignee:'two',readScopes:['src/b.rs'],writeScopes:['src/b.rs','target'],resources:[]});
+  assert.equal(first.task.state,'running');assert.equal(second.task.state,cargo?'running':'waiting',cargo?'Cargo locks target itself':'other build tools keep the exclusive output lease');
+  await f.call('gvs_pause');
+ }
+});
