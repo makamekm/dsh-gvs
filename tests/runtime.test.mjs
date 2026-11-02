@@ -1093,3 +1093,11 @@ test('Cargo build output is shared between tasks only in Cargo projects',async()
   await f.call('gvs_pause');
  }
 });
+
+test('creating an existing role without a capability reuses it',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Roles',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
+ await f.call('gvs_agent',{action:'create',name:'house-artist',title:'Houses',purpose:'Houses',capability:'edit'});const spawns=f.spawns;
+ const again=await f.call('gvs_agent',{action:'create',name:'house-artist',title:'Native house artist',purpose:'Preserve existing houses'});
+ assert.equal(again.role.capability,'edit');assert.equal(f.spawns,spawns,'no second agent is spawned');
+ await assert.rejects(f.call('gvs_agent',{action:'create',name:'new-role',purpose:'x'}),/Capability must be/,'a new role still needs a capability');
+});

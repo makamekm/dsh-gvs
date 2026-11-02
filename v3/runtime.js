@@ -185,7 +185,9 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   if(notify&&item.agent!=='lead')try{await ctx.agentTeams.sendMessage(exec.agent,{target:'lead',content:[{type:'text',text:`GVS TOOL ERROR ${JSON.stringify(item)}. Diagnose this without waiting for the human to forward it. Correct the protocol/configuration or assign an owned repair for a real failed check. A missing check, permission denial or product failure is not permission to waive acceptance. Read gvs_diagnostics for current errors.`}],signal:exec.signal});}catch{}
  }
  async function createRole(entry,input,signal){
-  const spec=roleSpec(input),existing=roleOf(entry,spec.name);
+  // Creating a role that already exists reuses it: an omitted capability takes the existing one.
+  const known=typeof input.name==='string'?roleOf(entry,input.name):null;
+  const spec=roleSpec(known&&!input.capability?{...input,capability:known.capability,purpose:input.purpose??known.purpose}:input),existing=roleOf(entry,spec.name);
   if(existing){if(existing.capability!==spec.capability)throw new Error('A persistent role cannot silently change capability. Use a new role name.');existing.retired=false;if(existing.sessionId){delete existing.error;return existing;}}
   if(!existing&&entry.run.roles.length>=32)throw new Error('This team has 32 persistent roles; reuse an appropriate specialist.');
   const role=existing??{...spec,sessionId:null,retired:false};if(!existing)entry.run.roles.push(role);
