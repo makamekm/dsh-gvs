@@ -345,6 +345,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
  ctx.on('tools/pre-execute',async(exec,next)=>{
   if(!exec.agent)return next();const membership=ctx.agentTeams.tryMembership(exec.agent);if(!membership)return next();
   // Agents once drove the Harness RPC to post into another team's session, where the text became a "human" requirement.
+  if(['read','grep','glob'].includes(exec.name)&&/(?:^|[\\/])(?:status\.json|verification-cookie[^\\/]*)$/i.test(String(exec.arguments?.file_path??exec.arguments?.path??''))&&/[\\/]work[\\/]/i.test(String(exec.arguments?.file_path??exec.arguments?.path??'')))return {kind:'deny',reason:'Harness launch and cookie files are not project inputs; GVS agents do not read them.'};
   if(['pwsh','bash'].includes(exec.name)&&HARNESS_CONTROL.test(String(exec.arguments?.command??'')))return {kind:'deny',reason:'GVS agents do not drive DeepSeek Harness through its RPC or read its launch/cookie files: a prompt sent into another session becomes a fake human message in that team’s goal. GVS already queues conflicting work between teams in one folder (see the GVS TEAMS notice); continue with your own tasks.'};
   if(membership.role==='lead'){
    const entry=entries.get(membership.root.id),target=exec.arguments?.file_path??exec.arguments?.path;

@@ -999,6 +999,8 @@ test('GVS agents cannot drive the Harness RPC to post into another session',asyn
  const pre=(agent,command)=>f.hooks['tools/pre-execute']({agent,name:'pwsh',arguments:{command},signal:new AbortController().signal},async()=>({kind:'allow'}));
  for(const command of ["& node.exe 'C:/work/dsh-rpc.mjs' session/prompt","Get-Content C:/x/work/status.json","Invoke-RestMethod http://host:3080/api/session/prompt"])assert.equal((await pre(f.root,command)).kind,'deny',command);
  assert.equal((await pre(f.root,'cargo test --bin bastion')).kind,'allow');
+ const read=file=>f.hooks['tools/pre-execute']({agent:f.root,name:'read',arguments:{file_path:file},signal:new AbortController().signal},async()=>({kind:'allow'}));
+ assert.equal((await read('C:/x/work/status.json')).kind,'deny');assert.equal((await read('src/status.json')).kind,'allow','project files of that name stay readable');
 });
 
 test('a failed build naming another team files is relayed to that team lead once',async()=>{
