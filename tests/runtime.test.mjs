@@ -1101,3 +1101,13 @@ test('creating an existing role without a capability reuses it',async()=>{
  assert.equal(again.role.capability,'edit');assert.equal(f.spawns,spawns,'no second agent is spawned');
  await assert.rejects(f.call('gvs_agent',{action:'create',name:'new-role',purpose:'x'}),/Capability must be/,'a new role still needs a capability');
 });
+
+test('with the game MCP server the desktop is not an exclusive resource',async()=>{
+ const f=fixture(),start=await f.call('gvs_run',{task:'Game checks',kind:'game3d'});await f.complete(start.briefTaskId,f.actor('user'));
+ for(const name of ['qa1','qa2'])await f.call('gvs_agent',{action:'create',name,title:name,purpose:'QA',capability:'verify'});
+ const assemble=f.hooks['system-prompt/assemble'];
+ await assemble({},{agent:f.root},async()=>({tools:[{name:'mcp__game__game_launch'},{name:'read'}],sections:[]}));
+ const one=await f.call('gvs_task',{action:'create',title:'Check A',instructions:'Play',kind:'review',scope:'increment',analysisIds:[],assignee:'qa1',readScopes:['src/a.rs'],writeScopes:['artifacts/a'],resources:['interactive-desktop']});
+ const two=await f.call('gvs_task',{action:'create',title:'Check B',instructions:'Play',kind:'review',scope:'increment',analysisIds:[],assignee:'qa2',readScopes:['src/b.rs'],writeScopes:['artifacts/b'],resources:['interactive-desktop']});
+ assert.equal(one.task.state,'running');assert.equal(two.task.state,'running','two MCP-driven checks run at once');
+});

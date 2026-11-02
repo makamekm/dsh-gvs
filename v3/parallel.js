@@ -82,7 +82,10 @@ export const cargoOutput=file=>/(^|\/)target(-[\w-]+)?(\/|$)/.test(file);
 export function taskConflict(run,task,other){
  const conflict=accessConflict(taskAccess(run,task),taskAccess(run,other));
  const files=conflict&&run.cargo===true?conflict.files.filter(file=>!cargoOutput(file)):conflict?.files;
- return conflict&&(files.length||conflict.resources.length)?{taskId:other.id,assignee:other.assignee,...conflict,files}:null;
+ // Games driven through the game MCP server run in their own windows without the user's mouse and keyboard, so the
+ // desktop is no longer an exclusive resource.
+ const resources=conflict&&run.gameMcp===true?conflict.resources.filter(name=>!['interactive-desktop','native-window'].includes(name)):conflict?.resources;
+ return conflict&&(files.length||resources.length)?{taskId:other.id,assignee:other.assignee,...conflict,files,resources}:null;
 }
 // Overlapping files/resources of two access contracts; also used across teams sharing one folder.
 // writesOnly (across teams): a broad read lease such as src would otherwise block every other team's edit for the

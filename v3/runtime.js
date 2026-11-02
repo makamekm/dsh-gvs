@@ -18,7 +18,7 @@ import {assignmentDelivery} from './delivery.js';
 import {prepareCodePlan,stalePlanFiles,planSources,needsCodePlan,missingPlanOutputs,migrateCodePlan,CodePlanSourceError,successfulPlanChecks} from './planning.js';
 import {taskArtifacts} from './artifacts.js';
 import {classifyProjectQA,isInteractiveProject,requiresWebVerification} from './project-qa.js';
-import {scopeTools,scopeSections,rolePolicy,projectSurfaces} from './scoping.js';
+import {scopeTools,scopeSections,rolePolicy,projectSurfaces,gameControl} from './scoping.js';
 import {coerceArgs} from './args.js';
 import {MARATHON_INPUT,MARATHON_LEAD,MARATHON_TEAM,marathonSettings,detectTests,marathonPhase,remainingMinutes,testsGreen,hardeningDecision,marathonView} from './marathon.js';
 import {checkpointStore} from './checkpoint.js';
@@ -83,6 +83,8 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   const assembly=await next(),member=memberScope(context?.agent??context?.scope);
   if(!member)return assembly;
   const tools=scopeTools(assembly.tools,member);
+  // The scheduler learns from the real tool set whether games are driven through the game MCP server.
+  if(member.run&&gameControl(assembly.tools,member.run)!==!!member.run.gameMcp){member.run.gameMcp=gameControl(assembly.tools,member.run);const entry=[...entries.values()].find(item=>item.run===member.run);if(entry)void commit(entry).then(()=>schedule(entry,entry.abort.signal)).catch(()=>{});}
   return {...assembly,tools,sections:scopeSections(assembly.sections??[],tools)};
  });
  async function storage(root,signal){
@@ -253,7 +255,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
  const sharedServer=run=>(run.qaTarget?.surfaces??[]).some(surface=>['web','service','bot-service'].includes(surface));
  function teamConflict(entry,access,other,item){
   const conflict=accessConflict(access,taskAccess(other.run,item),{writesOnly:true});if(!conflict)return null;
-  const files=conflict.files.filter(file=>!(entry.run.cargo===true&&cargoOutput(file))),resources=conflict.resources.filter(name=>name!=='project-runtime'||sharedServer(entry.run)||sharedServer(other.run));
+  const files=conflict.files.filter(file=>!(entry.run.cargo===true&&cargoOutput(file))),resources=conflict.resources.filter(name=>(name!=='project-runtime'||sharedServer(entry.run)||sharedServer(other.run))&&!(entry.run.gameMcp===true&&['interactive-desktop','native-window'].includes(name)));
   return files.length||resources.length?{files,resources}:null;
  }
  function crossTeamConflict(entry,task){
