@@ -207,7 +207,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   if(!taskKinds.includes(input.kind))throw new Error('Choose a supported task kind.');
   const role=roleOf(entry,input.assignee);
   if(!role.sessionId)throw new Error('This role failed to register. Use gvs_agent wake with its existing name to repair registration before assigning work.');
-  if(input.kind==='discovery'&&!['read','verify'].includes(role.capability))throw new Error('Assign discovery to an independent read/verify architect or researcher.');
+  if(input.kind==='discovery'&&!['read','verify'].includes(role.capability))throw new Error(`Assign discovery to an independent read/verify architect or researcher; ${role.name} is an ${role.capability} role. Registered read/verify roles: ${JSON.stringify(entry.run.roles.filter(item=>['read','verify'].includes(item.capability)&&!item.retired&&item.sessionId).map(item=>item.name))}. If ${role.name} should investigate as part of changing code, create kind:work instead.`);
   if(['review','game-review'].includes(input.kind)&&role.capability!=='verify')throw new Error('Assign independent verification to a verify role, not the editing agent.');
   if(input.kind==='design-review'&&role.capability==='edit')throw new Error('The rendered design reviewer must be separate from the editing role.');
   if(['user-review','brief','consultation'].includes(input.kind)&&input.assignee!=='user')throw new Error('User decisions belong to the central User role.');
