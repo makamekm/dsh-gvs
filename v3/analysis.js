@@ -42,7 +42,7 @@ export function parseAnalysisReport(raw,plan,viewports){
  const ids=new Set();
  for(const result of raw.results){
   const requirement=plan.requirements.find(item=>item.id===result.id);
-  if(!requirement||ids.has(result.id)||!Array.isArray(result.cases)||!result.cases.length)throw new Error('Report each planned analysis once with measured cases.');
+  if(!requirement||ids.has(result.id)||!Array.isArray(result.cases)||!result.cases.length)throw new Error(`Report each planned analysis once with measured cases. Result ${JSON.stringify(result?.id??null)} ${!requirement?'is not a planned analysis id':ids.has(result.id)?'is reported twice':'has no measured cases'}. Planned ids: ${JSON.stringify(plan.requirements.map(item=>item.id))}; reported: ${JSON.stringify(raw.results.map(item=>item?.id??null))}.`);
   ids.add(result.id);
   for(const item of result.cases)if(!item.name?.trim()||!['runtime','rendered-pixels','frame-timing'].includes(item.source)||typeof item.passed!=='boolean'||item.actual===undefined||item.expected===undefined)throw new Error('Analysis cases need a source, passed, actual and expected; counters alone are insufficient.');
   if(requirement.method==='rendered-sequence'){
