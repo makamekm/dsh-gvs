@@ -62,3 +62,16 @@ test('other agents\' .claude worktrees are not product source',async()=>{
   await fs.writeFile(path.join(cwd,'app.js'),'changed');assert.notEqual(await sourceFingerprint(provider,cwd),first);
  }finally{await fs.rm(cwd,{recursive:true,force:true});}
 });
+
+test('a change only inside another team leased files does not age this team revision',async t=>{
+ const cwd=await fs.mkdtemp(path.join(os.tmpdir(),'gvs-foreign-'));t.after(()=>fs.rm(cwd,{recursive:true,force:true}));
+ await fs.mkdir(path.join(cwd,'src'),{recursive:true});await fs.writeFile(path.join(cwd,'src','mine.rs'),'a');await fs.writeFile(path.join(cwd,'src','theirs.rs'),'b');
+ const entry={io:{cwd},run:{revision:4},foreignFile:file=>file==='src/theirs.rs'};
+ await refreshRevision(entry,provider);assert.equal(entry.run.revision,4);
+ await fs.writeFile(path.join(cwd,'src','theirs.rs'),'b2');await refreshRevision(entry,provider);
+ assert.equal(entry.run.revision,4,'a foreign-only change keeps the revision');assert.deepEqual(entry.run.foreignChanges.at(-1).files,['src/theirs.rs']);
+ await fs.writeFile(path.join(cwd,'src','theirs.rs'),'b3');await fs.writeFile(path.join(cwd,'src','mine.rs'),'a2');await refreshRevision(entry,provider);
+ assert.equal(entry.run.revision,5,'a change that touches this team files ages it');
+ delete entry.sourceFiles;await fs.writeFile(path.join(cwd,'src','theirs.rs'),'b4');await refreshRevision(entry,provider);
+ assert.equal(entry.run.revision,6,'without a known previous file list the change is not attributable');
+});

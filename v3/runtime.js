@@ -143,7 +143,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
    entry.run.progress??={startedAt:Date.now(),metadataSinceWrite:0,writes:0};
    if(member.role==='lead'){
     if(entry.owner!==ctx&&entry.suspending){entry.abort=new AbortController();entry.suspending=false;}
-    entry.owner=ctx;entry.wake=()=>schedule(entry,entry.abort.signal);entry.notifyLead=text=>ctx.agentTeams.sendMessage(entry.root,{target:'lead',content:[{type:'text',text}]});owned.add(member.root.id);
+    entry.owner=ctx;entry.wake=()=>schedule(entry,entry.abort.signal);entry.foreignFile=file=>foreignFile(entry,file);entry.notifyLead=text=>ctx.agentTeams.sendMessage(entry.root,{target:'lead',content:[{type:'text',text}]});owned.add(member.root.id);
    }
    const messages=ctx.sessionProjections?.stateOf(member.root.session,'gvsHumanGoal')?.messages;
    const migrating=!entry.run.goal;
@@ -231,6 +231,13 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   if(queued){const combined=userProbeInput(entry.run,queued.userProbeFor??[],queued.userProbeInitial??!queued.userProbeFor?.length)??input;queued.userProbeFor=[...new Set([...(queued.userProbeFor??[]),...combined.userProbeFor])];queued.instructions=clip(combined.instructions,15000);queued.readScopes=[...new Set([...queued.readScopes,...combined.readScopes])];queued.resources=[...new Set([...(queued.resources??[]),...combined.resources])];queued.userProbeTargets=combined.userProbeTargets;queued.userProbeInitial=combined.userProbeInitial;}
   else await createTask(entry,input,signal,false);
   entry.run.userTestingSeen=[...new Set([...entry.run.userTestingSeen,...input.userProbeFor])];entry.run.userTestingInitial=false;await commit(entry);
+ }
+ // A changed file (lowercase, forward slashes) leased for writing by another team in this folder and by none of this
+ // team's tasks. Human edits and unleased changes are never foreign.
+ const leases=(task,file)=>(task.writeScopes??[]).some(scope=>{const s=String(scope).replaceAll('\\','/').toLowerCase().replace(/\/+$/,'');return s==='*'||file===s||file.startsWith(s+'/');});
+ function foreignFile(entry,file){
+  if(entry.run.tasks.some(task=>leases(task,file)))return false;
+  return neighbours(entry).some(other=>other.run.tasks.some(task=>(task.state==='running'||task.state==='done'&&Date.now()-(task.startedAt??0)<3*3600000)&&leases(task,file)));
  }
  // Other running GVS teams of this DSH process in the same folder.
  const neighbours=entry=>[...entries.values()].filter(other=>other!==entry&&other.run.status==='running'&&!other.suspending&&other.io?.cwd&&entry.io?.cwd&&path.resolve(other.io.cwd).toLowerCase()===path.resolve(entry.io.cwd).toLowerCase());
@@ -531,7 +538,7 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   const run={schema:3,sessionId:root.id,runId:`${new Date().toISOString().replace(/[:.]/g,'-')}-${randomUUID().slice(0,8)}`,task:args.task,kind:args.kind,engine:args.engine??'',status:'running',revision:0,
    visualRequired,visualPolicy:visualRequired?1:0,viewports:args.viewports??(args.kind==='ui'?['desktop','mobile']:['desktop']),viewportsAuto:args.viewports===undefined,roles:previous?.run.roles??[],tasks:[],checks:[],visualChecks:[],gameChecks:[],analysis:{state:'pending',version:0,requirements:[],rationale:'',motionHint:motionHint(args.task)},analysisChecks:[],preview:null,quality:null,summary:'',progress:{startedAt:Date.now(),metadataSinceWrite:0,writes:0}};
   const entry={run,root,io,write:Promise.resolve(),abort:new AbortController(),waiters:new Map(),scheduling:null};entries.set(root.id,entry);
-  entry.owner=ctx;entry.wake=()=>schedule(entry,entry.abort.signal);entry.notifyLead=text=>ctx.agentTeams.sendMessage(entry.root,{target:'lead',content:[{type:'text',text}]});owned.add(root.id);
+  entry.owner=ctx;entry.wake=()=>schedule(entry,entry.abort.signal);entry.foreignFile=file=>foreignFile(entry,file);entry.notifyLead=text=>ctx.agentTeams.sendMessage(entry.root,{target:'lead',content:[{type:'text',text}]});owned.add(root.id);
   const human=ctx.sessionProjections?.stateOf(root.session,'gvsHumanGoal')?.messages;
   syncGoal(run,human?.length?human:[{id:'initial-request',text:args.task}]);
   if(config.projectInspection!==false){run.qaTarget=await inspectProject(root,exec.signal,run.engine);if(run.viewportsAuto&&run.qaTarget.sourceConfirmed&&!requiresWebVerification(run))run.viewports=['desktop'];}

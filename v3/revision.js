@@ -86,7 +86,14 @@ export async function refreshRevision(entry,fs,signal){
  const run=entry.run;
  try{
   entry.sourceCache??=new Map();const files=new Map(),fingerprint=await sourceFingerprint(fs,entry.io.cwd,signal,entry.sourceCache,files);
-  if(run.sourceFingerprint&&run.sourceFingerprint!==fingerprint){run.revision++;if(run.goal)delete run.goal.handoff;run.revisionLog=[...(run.revisionLog??[]),changedFiles(entry.sourceFiles,files,run.revision)].slice(-400);}
+  if(run.sourceFingerprint&&run.sourceFingerprint!==fingerprint){
+   // Several GVS teams may share a folder. A change entirely inside another team's leased files (and outside this
+   // team's) is that team's to review; it does not age this team's evidence, or no team could ever finish.
+   const change=changedFiles(entry.sourceFiles,files,run.revision+1);
+   if(change.complete&&change.files.length&&entry.foreignFile&&change.files.every(file=>entry.foreignFile(file))){
+    run.foreignChanges=[...(run.foreignChanges??[]),{at:Date.now(),files:change.files.slice(0,40)}].slice(-100);
+   }else{run.revision++;if(run.goal)delete run.goal.handoff;run.revisionLog=[...(run.revisionLog??[]),{...change,revision:run.revision}].slice(-400);}
+  }
   entry.sourceFiles=files;run.sourceFingerprint=fingerprint;delete run.sourceError;
  }catch(error){
   signal?.throwIfAborted();run.sourceError=error.message;
