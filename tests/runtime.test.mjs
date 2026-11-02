@@ -370,7 +370,8 @@ test('host API defers tasks, forbids early execution and wakes the same role wit
  await f.consult(f.actor('reviewer'));
  f.hooks['tools/result']({agent:f.actor('reviewer'),name:'pwsh',arguments:{command:'node test.mjs'}},{isError:false,value:{kind:'foreground',exitCode:0,stdout:{text:'passed'}},content:[]});
  await assert.rejects(f.complete(review.task.id,f.actor('reviewer'),{checks:['node test.mjs: passed']}),/ONLY verbatim/);
- await f.complete(review.task.id,f.actor('reviewer'),{checks:['node test.mjs'],simple:true,scopePreserved:true});
+ const accepted=await f.complete(review.task.id,f.actor('reviewer'),{checks:['node test.mjs','all 12 tests green'],simple:true,scopePreserved:true});
+ assert.deepEqual(accepted.task.result.checks,['node test.mjs']);assert.match(accepted.task.result.observations.at(-1),/all 12 tests green/,'commentary in checks becomes an observation');
  const next=await f.call('gvs_task',{action:'create',title:'Second change',instructions:'New work, same role',kind:'work',assignee:'developer',dependsOn:[review.task.id]});
  assert.equal(next.task.state,'running');assert.equal(f.actor('developer').id,originalId);assert.equal(f.spawns,3);
 });
