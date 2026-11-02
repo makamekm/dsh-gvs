@@ -72,3 +72,11 @@ test('unambiguous local-model argument mistakes are repaired against the tool sc
  assert.deepEqual(coerceArgs({limit:'2.5'},schema),{limit:'2.5'},'a non-integer stays for the tool to reject');
  assert.deepEqual(coerceArgs({result:{unknown:1},action:'list'},schema),{result:{unknown:1},action:'list'},'an unrelated object is not hoisted');
 });
+
+test('desktop control is hidden for a game that the game MCP server can drive',()=>{
+ const game={kind:'game3d',qaTarget:{surfaces:['native-game']},roles:[]},web={kind:'ui',qaTarget:{surfaces:['web']},roles:[]};
+ const tools=[{name:'mcp__game__game_launch'},{name:'mcp__desktop__windows_computer_use_click'},{name:'read'}];
+ assert.deepEqual(scopeTools(tools,{lead:true,run:game}).map(tool=>tool.name),['mcp__game__game_launch','read']);
+ assert.deepEqual(scopeTools(tools,{run:game,role:role('verify')}).map(tool=>tool.name),['mcp__game__game_launch','read']);
+ assert.ok(scopeTools(tools.slice(1),{lead:true,run:game}).some(tool=>tool.name.startsWith('mcp__desktop__')),'without the game server desktop control stays');
+});

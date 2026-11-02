@@ -68,8 +68,11 @@ export function scopeSections(sections,tools){
   return !families.length||families.some(family=>family==='desktop'?desktopVisible:browserVisible);
  });
 }
+// A game that can be launched and driven through the game MCP server is never tested with desktop mouse/keyboard control.
+export const gameControl=(tools,run)=>tools.some(tool=>tool.name.startsWith('mcp__game__'))&&!!(projectSurfaces(run)?.game||run?.kind?.startsWith('game'));
 export function scopeTools(tools,scope){
- return tools.filter(tool=>toolVisible(tool.name,scope)).map(tool=>!scope.lead&&tool.name==='gvs_task'&&tool.parameters?{...tool,parameters:teammateTaskSchema(tool.parameters,scope)}:tool);
+ const noDesktop=gameControl(tools,scope.run);
+ return tools.filter(tool=>toolVisible(tool.name,scope)&&!(noDesktop&&tool.name.startsWith('mcp__desktop__'))).map(tool=>!scope.lead&&tool.name==='gvs_task'&&tool.parameters?{...tool,parameters:teammateTaskSchema(tool.parameters,scope)}:tool);
 }
 
 // Stable role policy, delivered once in the teammate's system prompt instead of repeated in every assignment.
