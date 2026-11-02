@@ -296,9 +296,12 @@ ${rolePolicy(member.run,member.role)}`:'';}});
  const wakeNeighbours=entry=>{for(const other of neighbours(entry))if(other.run.tasks.some(task=>task.otherTeamWait))void other.wake?.()?.catch?.(()=>{});};
  const neighbourTimer=setInterval(()=>{for(const entry of entries.values())if(entry.owner===ctx&&entry.run.status==='running'&&entry.run.tasks.some(task=>task.state==='waiting'&&task.otherTeamWait))void schedule(entry,entry.abort.signal).catch(()=>{});},config.neighbourTickMs??60000);
  neighbourTimer.unref?.();ctx.effect(()=>()=>clearInterval(neighbourTimer));
- async function schedule(entry,signal){
+ async function schedule(entry,callerSignal){
   if(entry.recoveringPreview)return;
-  if(entry.scheduling)return entry.scheduling;
+  // A pass blocked on a stopped agent must not hang every later tool call that schedules: wait for it briefly only.
+  if(entry.scheduling)return Promise.race([entry.scheduling,new Promise(resolve=>setTimeout(resolve,15000).unref?.())]);
+  // Pausing aborts entry.abort, which also ends any delivery still waiting inside this pass.
+  const signal=AbortSignal.any([callerSignal??new AbortController().signal,entry.abort.signal]);
   entry.scheduling=(async()=>{
    if(entry.run.status!=='running')return;
    await ensureUserProbe(entry,signal);
