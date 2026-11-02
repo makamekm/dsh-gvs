@@ -155,7 +155,7 @@ test('missing update reasons derive a factual audit; identical updates do not no
  const request={action:'update',taskId:work.task.id,title:'Precise slice',instructions:'Implement exact slice; preserve follow-ups',priority:95,readScopes:['app.js'],writeScopes:['app.js'],resources:[]};
  const updated=await f.call('gvs_task',request);assert.equal(updated.updated,true);assert.equal(updated.update.reasonSource,'derived');assert.deepEqual(updated.update.fields.sort(),['instructions','priority','title']);assert.ok(!f.sent.at(-1).content[0].text.includes('undefined'));
  const sent=f.sent.length,revision=f.tasks.get(work.task.id).revision;const repeat=await f.call('gvs_task',request);assert.equal(repeat.status,'unchanged');assert.equal(f.sent.length,sent);assert.equal(f.tasks.get(work.task.id).revision,revision);
- await assert.rejects(f.call('gvs_task',{...request,writeScopes:['other.js']}),/running task/);
+ const swapped=await f.call('gvs_task',{...request,writeScopes:['other.js']});assert.equal(swapped.updated,true,'a conflict-free lease change of a running task is applied');assert.match(swapped.update.reason,/Released from this running task/);
  await assert.rejects(f.call('gvs_task',{action:'update',taskId:'not-real',title:'Unknown'}),/Unknown task/);
  assert.deepEqual(JSON.parse([...f.files.values()][0]).goal,goal);
 });
@@ -1035,8 +1035,11 @@ test('across teams a broad read lease does not block the other team, overlapping
 test('a running task may release part of its exclusive lease but not take more',async()=>{
  const f=fixture(),start=await f.call('gvs_run',{task:'Release lease',kind:'code'});await f.complete(start.briefTaskId,f.actor('user'));
  await f.call('gvs_agent',{action:'create',name:'driver',title:'Driver',purpose:'Driver',capability:'edit'});
- const work=await f.call('gvs_task',{action:'create',title:'Telemetry',instructions:'Edit',kind:'work',assignee:'driver',readScopes:['src'],writeScopes:['src/debug.rs','target'],resources:['project-runtime']});
- await assert.rejects(f.call('gvs_task',{action:'update',taskId:work.task.id,writeScopes:['src/debug.rs','src/other.rs','target']}),/exclusive-lease-change/);
+ const work=await f.call('gvs_task',{action:'create',title:'Telemetry',instructions:'Edit',kind:'work',assignee:'driver',readScopes:['src/debug.rs'],writeScopes:['src/debug.rs','target'],resources:['project-runtime']});
+ await f.call('gvs_agent',{action:'create',name:'other',title:'Other',purpose:'Other',capability:'edit'});
+ const held=await f.call('gvs_task',{action:'create',title:'Other file',instructions:'Edit',kind:'work',assignee:'other',readScopes:['src/held.rs'],writeScopes:['src/held.rs'],resources:[]});assert.equal(held.task.state,'running');
+ await assert.rejects(f.call('gvs_task',{action:'update',taskId:work.task.id,writeScopes:['src/debug.rs','src/held.rs','target']}),/resources|held/,'taking a file another running task holds is refused');
+ const grown=await f.call('gvs_task',{action:'update',taskId:work.task.id,writeScopes:['src/debug.rs','src/free.rs','target']});assert.equal(grown.updated,true,'a conflict-free expansion is allowed');
  const released=await f.call('gvs_task',{action:'update',taskId:work.task.id,writeScopes:['src/debug.rs'],resources:[],reason:'Source-only now'});
  assert.equal(released.updated,true);assert.deepEqual(released.task.resources,[]);assert.match(released.update.reason,/Released from this running task/);
  assert.ok(f.sent.some(message=>message.target==='driver'&&/Released from this running task/.test(JSON.stringify(message.content))));
