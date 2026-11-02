@@ -10,12 +10,8 @@ import {isStatusQuestion} from './requests.js';
 export {isStatusQuestion} from './requests.js';
 
 export const inject=['agents','agentTeams','tools','workingDirectory','fs','sessionProjections','systemPrompt'];
-export function retryableStop(reason){
- if(['completed','max-tokens','interrupted'].includes(reason?.kind))return true;
- if(reason?.kind!=='error')return false;
- const error=reason.error??{};
- return error.retryable===true||/overload|rate.?limit|temporar|timeout|timed.?out|ECONNREFUSED|ECONNRESET|fetch failed|context.{0,20}(?:overflow|exceed)|CONTEXT_WINDOW_EXCEEDED|\b(?:429|502|503|504)\b/iu.test(`${error.code??''} ${error.message??''}`);
-}
+export {retryableStop} from './retry.js';
+import {retryableStop} from './retry.js';
 function isLead(agent){
  return agent?.session.header.agentPreset==='gvs-local'&&agent.session.header.origin!=='subagent';
 }

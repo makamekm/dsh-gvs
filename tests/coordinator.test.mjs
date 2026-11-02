@@ -117,3 +117,9 @@ test('human goal projection preserves real scope and excludes status questions a
  assert.equal(unit.stateVersion,2);assert.deepEqual(state.messages.map(item=>item.id),['original','steer','mixed']);assert.match(state.messages[0].text,/all functionality/);
 });
 
+
+test('provider outages with code SERVER or an HTML try-again page are retried',()=>{
+ assert.equal(retryableStop({kind:'error',error:{code:'SERVER',message:'<html>Unable to load site. Please try again later.</html>'}}),true);
+ assert.equal(retryableStop({kind:'error',error:{code:'X',message:'502 Bad Gateway'}}),true);
+ assert.equal(retryableStop({kind:'error',error:{code:'AUTH_ERROR',message:'invalid api key'}}),false);
+});

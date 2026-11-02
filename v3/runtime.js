@@ -20,6 +20,7 @@ import {taskArtifacts} from './artifacts.js';
 import {classifyProjectQA,isInteractiveProject,requiresWebVerification} from './project-qa.js';
 import {scopeTools,scopeSections,rolePolicy,projectSurfaces,gameControl} from './scoping.js';
 import {coerceArgs} from './args.js';
+import {retryableStop} from './retry.js';
 import {MARATHON_INPUT,MARATHON_LEAD,MARATHON_TEAM,marathonSettings,detectTests,marathonPhase,remainingMinutes,testsGreen,hardeningDecision,marathonView} from './marathon.js';
 import {checkpointStore} from './checkpoint.js';
 
@@ -1251,6 +1252,18 @@ ${rolePolicy(member.run,member.role)}`:'';}});
      void(async()=>{await commit(entry);if(entry.run.status!=='running'||entry.suspending||signal.aborted||task.state!=='running'||task.nonce!==nonce||task.assignee!==role.name)return;
       await ctx.agentTeams.sendMessage(entry.root,{target:role.name,content:[{type:'text',text:`GVS TASK CONTINUATION ${task.id} (${attempt}/2): Your model response ended normally, but this exact assigned task has no accepted result. Continue the SAME task, role, model policy and leases; no new task or permission was created. TASK NONCE: ${nonce}. Read gvs_task action:list taskId:${task.id} for current instructions/codePlan and inspect existing partial work/checks before any retry. Do not blindly repeat side effects or a denied pass. Finish the actual remaining work, then call gvs_task action:complete with EXACT taskId:"${task.id}" and top-level verdict, summary, findings plus real required evidence. If evidence is missing or a real blocker remains, preserve it with revise/blocked and concrete findings; never invent pass, drop requirements or change permissions. Human pause/cancellation and all original gates remain binding.`}],signal});
      })().catch(()=>{if(!signal.aborted&&task.nonce===nonce&&task.assignee===role.name)blockEndedTask(entry,role,task,session,event,'Automatic continuation could not be delivered; preserve this same task and inspect its chat before coordinator retry.');});
+     continue;
+    }
+    // A provider outage or network failure ends the turn with an error; continue the same task after a backoff
+    // (quota/billing exhaustion is not transient: it stays blocked for a model change)
+    // instead of blocking it until the coordinator notices.
+    if(event.data.reason.kind==='error'&&retryableStop(event.data.reason)&&!/usage limit|quota|billing|insufficient|plan limit|exceeded your/i.test(String(event.data.reason.error?.message??''))&&(task.providerRetries??0)<5&&!entry.suspending&&!entry.abort.signal.aborted){
+     const attempt=(task.providerRetries??0)+1,nonce=task.nonce,signal=entry.abort.signal,delay=Math.min(600000,(config.retryBaseMs??30000)*2**(attempt-1));
+     task.providerRetries=attempt;delete task.executionTurn;void commit(entry).catch(()=>{});
+     setTimeout(()=>void(async()=>{
+      if(entry.run.status!=='running'||entry.suspending||signal.aborted||task.state!=='running'||task.nonce!==nonce||task.assignee!==role.name)return;
+      await ctx.agentTeams.sendMessage(entry.root,{target:role.name,content:[{type:'text',text:`GVS TASK CONTINUATION ${task.id} after a transient model/provider failure (retry ${attempt}/5): ${clip(event.data.reason.error?.code??'',40)} ${clip(String(event.data.reason.error?.message??'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' '),200)}. Continue the SAME task, role and leases. TASK NONCE: ${nonce}. Read gvs_task action:list taskId:${task.id} and inspect your partial work before continuing; do not blindly repeat side effects. Finish and call gvs_task action:complete with EXACT taskId:"${task.id}".`}],signal});
+     })().catch(()=>{if(!signal.aborted&&task.nonce===nonce)blockEndedTask(entry,role,task,session,event);}),delay).unref?.();
      continue;
     }
     blockEndedTask(entry,role,task,session,event);
