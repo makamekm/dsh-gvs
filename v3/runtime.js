@@ -1157,7 +1157,10 @@ ${rolePolicy(member.run,member.role)}`:'';}});
  register('gvs_game_check','Exercise an actual Canvas/WebGL game using its test-build __gvsGame v1 bridge. reset/step/hold/press/pointer drive real simulation; assert compares state paths. Returns actual frames, images and category coverage. It never treats a screenshot as collision proof.',{url:text(2000),scenario:text(500),actions:{type:'array',items:action,minItems:1,maxItems:32}},['url','actions'],(args,exec)=>browserCheck(args,exec,true));
  register('gvs_native_game_check','Run the actual native engine test command in foreground and read its GVS_GAME_RESULT JSON report. Accepts engine-generated screenshot files under the workspace. Independent code review must verify the adapter uses real game/physics logic.',{command:text(5000)},['command'],async(args,exec)=>{
   const {entry,name}=await current(exec);const result=await exec.agent.ctx.tools.execute({callId:randomUUID(),agent:exec.agent,signal:exec.signal,name:process.platform==='win32'?'pwsh':'bash',arguments:{description:'Run actual engine gameplay tests',command:args.command,workdir:entry.io.cwd,timeoutMs:120000}});
-  if(result.isError||result.value?.kind!=='foreground'||result.value.exitCode!==0)throw new Error('The actual engine test command did not pass.');
+  if(result.isError||result.value?.kind!=='foreground'||result.value.exitCode!==0){
+   const value=result.value,output=[value?.stdout?.text,value?.stderr?.text].filter(Boolean).join('\n')||(result.content??[]).filter(part=>part.type==='text').map(part=>part.text).join('\n');
+   throw new Error(`The actual engine test command did not pass: ${JSON.stringify({kind:value?.kind??null,exitCode:value?.exitCode??null,timedOut:value?.timedOut===true,signal:value?.signal??null})}. Output tail:\n${String(output).slice(-2500)}`);
+  }
   const stdout=result.value.stdout?.text??result.content.filter(part=>part.type==='text').map(part=>part.text).join('\n');
   const marker='GVS_GAME_RESULT:',offset=stdout.lastIndexOf(marker);if(offset<0)throw new Error('Runner did not print GVS_GAME_RESULT: followed by its gvs.game/1 JSON.');
   let raw;try{raw=JSON.parse(stdout.slice(offset+marker.length).trim());}catch{throw new Error('Runner report must be the final JSON in stdout.');}
