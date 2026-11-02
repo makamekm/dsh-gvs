@@ -1047,3 +1047,20 @@ test('reading a missing module file falls back to its mod.rs',async()=>{
  const result=await f.hooks['tools/execute']({agent:actor,name:'read',arguments:{file_path:'src/fences.rs',offset:60,limit:110},callId:randomUUID(),signal:new AbortController().signal},async()=>({isError:true,content:[{type:'text',text:'Error: cannot read "src/fences.rs": not found'}]}));
  assert.equal(result.isError,false);assert.equal(calls.at(-1).arguments.file_path,path.join('src','fences','mod.rs'));assert.equal('offset' in calls.at(-1).arguments,false);
 });
+
+test('a neighbour task waiting on its own dependencies never holds work of other teams',async()=>{
+ const a=fixture(),b=fixture();b.ctx.workingDirectory.ensure=async()=>a.cwd;
+ const startA=await a.call('gvs_run',{task:'A',kind:'code'});await a.complete(startA.briefTaskId,a.actor('user'));
+ await a.call('gvs_agent',{action:'create',name:'a1',title:'A1',purpose:'A',capability:'edit'});await a.call('gvs_agent',{action:'create',name:'a2',title:'A2',purpose:'A',capability:'edit'});
+ const z=await a.call('gvs_task',{action:'create',title:'Z',instructions:'Edit',kind:'work',assignee:'a1',readScopes:['src/shared.rs'],writeScopes:['src/shared.rs'],resources:[]});
+ const startB=await b.call('gvs_run',{task:'B',kind:'code'});await b.complete(startB.briefTaskId,b.actor('user'));
+ await b.call('gvs_agent',{action:'create',name:'b1',title:'B1',purpose:'B',capability:'edit'});await b.call('gvs_agent',{action:'create',name:'b2',title:'B2',purpose:'B',capability:'edit'});
+ const y=await b.call('gvs_task',{action:'create',title:'Y',instructions:'Edit',kind:'work',assignee:'b1',readScopes:['src/shared.rs'],writeScopes:['src/shared.rs'],resources:[]});
+ assert.equal(y.task.state,'waiting','Y first waits for team A');
+ const d=await b.call('gvs_task',{action:'create',title:'D',instructions:'Edit',kind:'work',assignee:'b2',readScopes:['src/other.rs'],writeScopes:['src/other.rs'],resources:[]});assert.equal(d.task.state,'running');
+ await b.call('gvs_task',{action:'dependencies',taskId:y.task.id,dependsOn:[d.task.id]});
+ await a.call('gvs_task',{action:'complete',taskId:z.task.id,verdict:'pass',summary:'Z done',findings:[]},a.actor('a1'));
+ const x=await a.call('gvs_task',{action:'create',title:'X',instructions:'Edit',kind:'work',assignee:'a2',readScopes:['src/shared.rs'],writeScopes:['src/shared.rs'],resources:[]});
+ assert.equal(x.task.state,'running','a neighbour waiting on its own dependency does not hold the shared file');
+ await a.call('gvs_pause');await b.call('gvs_pause');
+});

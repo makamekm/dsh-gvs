@@ -242,7 +242,9 @@ ${rolePolicy(member.run,member.role)}`:'';}});
   // Fairness: yield to a conflicting task of another team that has waited on teams longer, otherwise the team whose
   // task just ended always grabs the shared files first and its neighbours starve. Seniority is a total order: no cycle.
   const since=task.crossWaitSince??Infinity,senior=(other,item)=>item.crossWaitSince<since||item.crossWaitSince===since&&other.run.sessionId<entry.run.sessionId;
-  for(const other of neighbours(entry))for(const waiting of other.run.tasks.filter(item=>item.state==='waiting'&&item.otherTeamWait&&item.crossWaitSince&&senior(other,item))){
+  // Only a senior task that its own team could start now: one waiting on its dependencies or own agents must not hold
+  // anything, or every team ends up yielding to stale waits and nothing runs.
+  for(const other of neighbours(entry))for(const waiting of other.run.tasks.filter(item=>item.state==='waiting'&&item.otherTeamWait&&item.crossWaitSince&&senior(other,item)&&!parallelBlocker(other.run,item,other.run.parallelLimit??maxParallel))){
    const conflict=accessConflict(access,taskAccess(other.run,waiting),{writesOnly:true});
    if(conflict)return {sessionId:other.run.sessionId,taskId:waiting.id,assignee:waiting.assignee,yieldTo:true,files:conflict.files.slice(0,8),resources:conflict.resources};
   }
@@ -274,6 +276,8 @@ ${rolePolicy(member.run,member.role)}`:'';}});
    if(entry.run.status!=='running')return;
    await ensureUserProbe(entry,signal);
    const ready=readyTasks(entry.run).sort((a,b)=>(b.priority??0)-(a.priority??0));let waitsChanged=false,dispatched=false;
+   // A task no longer ready (dependencies reopened) keeps no cross-team wait or seniority.
+   for(const task of entry.run.tasks)if(!ready.includes(task)&&(task.otherTeamWait||task.crossWaitSince)){delete task.otherTeamWait;delete task.crossWaitSince;waitsChanged=true;}
    if(ready.some(task=>needsPreview(entry.run,task)||task.waitForPreviewRecovery)){const observed=await previewState(entry.run.preview,ctx.jobs,entry.root.id,signal);observePreview(entry,observed);await commit(entry);}
    for(const task of ready){
     if(entry.abort.signal.aborted||signal.aborted||entry.recoveringPreview)break;
