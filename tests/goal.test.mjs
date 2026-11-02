@@ -109,5 +109,7 @@ test('a later message without a new requirement is assessed with a reason, and o
  planGoal(run,{assessedMessages:['m2'],reason:'Access timing only; no new product requirement.'});
  assert.deepEqual(run.goal.assessed,['m1','m2']);assert.equal(run.goal.messageNotes[0].id,'m2');assert.equal(run.goal.staffingRationale,'Existing roles suffice.');
  planGoal(run,{requirements:[{id:'delay',criterion:'Wait for desktop access',sourceIds:['m2']}]});
- assert.equal(run.goal.requirements.length,2,'a requirement update without staffing fields keeps the existing staffing');
+ run.goal.messages.push({id:'m3',text:'Tool fixed, retry'});planGoal(run,{assessedMessages:['m3'],requirements:[],staffingRationale:'Tool status only; no new requirement.'});assert.ok(run.goal.assessed.includes('m3'),'the explanation may come in staffingRationale');
+ run.goal.messages.push({id:'m4',text:'Add whales'});planGoal(run,{assessedMessages:['m4'],requirements:[{id:'whales',criterion:'Add whales',sourceIds:['m4']}],staffingRationale:'Same team'});assert.equal(run.goal.requirements.at(-1).id,'whales','omitted expertise adds no need');
+ assert.ok(run.goal.requirements.some(item=>item.id==='delay'),'a requirement update without staffing fields keeps the existing staffing');
 });

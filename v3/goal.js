@@ -17,6 +17,8 @@ export function syncGoal(run,messages){
 export function planGoal(run,{requirements,assessedMessages,expertise,staffingRationale,discoveryRequired,reason}){
  const goal=run.goal;
  // A later message that adds no requirement (logistics, access timing, thanks) is assessed with a reason.
+ // Models put the explanation in reason or staffingRationale; either explains a message that adds no requirement.
+ reason=reason?.trim()?reason:(!requirements?.length?staffingRationale:reason);
  const noteOnly=!requirements?.length&&!!assessedMessages?.length&&!!reason?.trim()&&goal.requirements.length>0;
  // An expertise-only update keeps the existing requirements; assessed messages must still be covered by them.
  if(!requirements?.length&&!(Array.isArray(expertise)&&goal.requirements.length)&&!noteOnly)throw new Error('Record concrete requirements from the real human messages.');
@@ -38,7 +40,9 @@ export function planGoal(run,{requirements,assessedMessages,expertise,staffingRa
  const uncovered=(assessedMessages??[]).filter(id=>!ids.has(id)||!proposed.some(req=>req.sourceIds.includes(id)));
  if(uncovered.some(id=>!ids.has(id))||uncovered.length&&!reason?.trim())throw new Error('Every assessed human message must be covered by a requirement, or give a reason explaining why it adds none.');
  // Staffing already assessed stays in force when an update omits it.
- if(expertise===undefined&&staffingRationale===undefined&&goal.staffingRationale){expertise=[];staffingRationale=goal.staffingRationale;}
+ // An update that omits expertise adds no new need; omitted staffing keeps the existing assessment.
+ if(expertise===undefined&&(staffingRationale!==undefined||goal.staffingRationale))expertise=[];
+ if(!staffingRationale?.trim()&&goal.staffingRationale)staffingRationale=goal.staffingRationale;
  if(!Array.isArray(expertise)||!staffingRationale?.trim())throw new Error('Assess needed expertise from the goal, risks and unknowns. Provide expertise (possibly []) and staffingRationale; the human does not select specialist roles.');
  const needs=structuredClone(goal.roleNeeds??[]);
  for(const item of expertise){
